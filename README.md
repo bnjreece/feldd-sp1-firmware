@@ -2,57 +2,51 @@
 
 ![feldd — browser-configurable controller firmware for the Teenage Engineering SP-1](docs/feldd-og.png)
 
-**Custom controller firmware for the Teenage Engineering SP-1 stem player.**
+**feldd turns the Teenage Engineering SP-1 into a configurable MIDI controller — its 4 faders and 9 buttons become fully remappable USB-MIDI + TRS-MIDI, set up entirely from your browser.**
 
-feldd turns the SP-1's 4 faders and 9 buttons into a fully configurable USB-MIDI + TRS-MIDI controller with 8 on-device profiles — all mapped and managed from your browser, no app to install.
-
-**Configure it → [feldd.com/sp-1/configure](https://feldd.com/sp-1/configure)** (Chromium / WebSerial)
+> The SP-1 is an unreleased TE device. This is unofficial community firmware — not affiliated with or endorsed by Teenage Engineering.
 
 ## What it does
 
-- 🎛️ **4 faders + 9 buttons → MIDI** (CC / notes), fully remappable
-- 💾 **8 profiles** stored on-device in NVS; switch banks live with the •• button
-- 🎹 **USB-MIDI 2.0** *and* **TRS (3.5 mm) MIDI** out
-- 🔌 **Live, bidirectional config** over USB-CDC — read, edit, write, and monitor the hardware in real time from the web configurator
-- ⚡ Boot-safe: links above the TE bootloader, keeps the DFU escape hatch + a charge-standby gate
+- 🎛️ **4 faders + 9 buttons → MIDI** — map any control to any CC or note
+- 💾 **8 profiles on the device** — switch banks live with the •• button; no computer needed once they're loaded
+- 🎹 **USB-MIDI 2.0 + TRS (3.5 mm) MIDI** out — drives your DAW or your hardware
+- 🔌 **Configure live in the browser** — read, edit, write, and watch your controls move in real time over USB
 
-> The SP-1 is an unreleased TE device. **This is unofficial community firmware — not affiliated with or endorsed by Teenage Engineering.**
+## Use it — all in the browser, no app to install
 
-## Flashing
+### → **[feldd.com](https://feldd.com)**
 
-Flash with the community **[Solderless](https://solderless.engineering)** tool. Step-by-step walkthrough: **[feldd.com/sp-1/flash](https://feldd.com/sp-1/flash)**.
+- **[Configure your SP-1](https://feldd.com/sp-1/configure)** — map the faders + buttons, manage your 8 profiles, and watch them fire live. *(Chromium browser — uses WebSerial.)*
+- **[Flash the firmware](https://feldd.com/sp-1/flash)** — a guided walkthrough using the community **Solderless** tool.
 
-> ⚠️ **Flash at your own risk.** You're modifying an irreplaceable device. feldd links at `0x20000` (above the TE bootloader) and keeps the **Track 1 + 4 DFU escape hatch** plus a charge-standby gate, so a bad flash is recoverable by re-flashing the known-good `sp1_looper.bin` — but read the warnings first.
+Flash once, then configure and reconfigure from the browser whenever you like.
 
-## Building
+## ⚠️ Flashing safety
 
-feldd is a **Zephyr / nRF Connect SDK** application for the nRF52840 inside the SP-1.
+You're modifying an irreplaceable device. feldd links above the TE bootloader (`0x20000`) and keeps the Track 1 + 4 DFU escape hatch plus a charge-standby gate, so a bad flash is recoverable by re-flashing the known-good `sp1_looper.bin`. Read the warnings on the [flash page](https://feldd.com/sp-1/flash) before you start.
 
-1. Set up the NCS toolchain + west workspace — see `scripts/setup-zephyr-ws.sh`.
-2. You need the **`sp1` board definition** from the **marisko** SP-1 firmware project; feldd builds with `-DBOARD_ROOT=<path-to-marisko>`. Point `BOARD_ROOT` in `scripts/fw.sh` at it.
-3. Build:
-   - `scripts/fw.sh build` — compile
-   - `scripts/fw.sh bin` — produce the flashable image (stripped to the `0x20000` app region)
-   - `scripts/fw.sh info` — vector-table VMA + size sanity check
+---
 
-### Host tools & tests
+## Building from source
 
-- `scripts/sp1ctl.py` — a host-side CLI that speaks feldd's JSON-lines config protocol over the USB-CDC port (`list` / `read` / `write` / `setactive` / `monset`). Handy for scripting and testing without the web UI.
-- `firmware/test/` — pure-logic host tests (control mapping, profile codec, protocol, gestures): `cd firmware/test && make`.
+> Most people never need this — just use **[feldd.com](https://feldd.com)**. This section is for developers who want to build or fork the firmware.
 
-## Config protocol & profile format
+feldd is a Zephyr / nRF Connect SDK app for the nRF52840 inside the SP-1.
 
-The web configurator and `sp1ctl.py` talk to the device over a small newline-framed JSON protocol on USB-CDC (`list`, `read`, `write`, `setactive`, `monset`, …). The packed on-device profile format (69 bytes, base64 on the wire) is documented in **`scripts/sp1-profile-format.md`**.
+- Set up the toolchain + west workspace: `scripts/setup-zephyr-ws.sh`
+- Get the **`sp1` board definition** from the **marisko** project and point `BOARD_ROOT` (in `scripts/fw.sh`) at it
+- Build: `scripts/fw.sh build` · flashable image: `scripts/fw.sh bin` · vector-table/size check: `scripts/fw.sh info`
+- `scripts/sp1ctl.py` — host CLI for the JSON-lines config protocol; `firmware/test/` — pure-logic tests (`cd firmware/test && make`)
+- Protocol + packed profile format: `scripts/sp1-profile-format.md`
 
 ## Credits
 
-Standing on the shoulders of the SP-1 hacking community:
-
-- **[Solderless](https://solderless.engineering)** — the firmware-flash + stem-loader web tools that make any of this possible
-- **[Tim Knapen / SP-1-dev](https://github.com/timknapen/SP-1-dev)** — the SP-1 developer documentation + wiki
-- **marisko** — the `sp1` Zephyr board definition feldd builds against
+- **[Solderless](https://solderless.engineering)** — the flash + stem-loader tools that make SP-1 hacking possible
+- **[Tim Knapen / SP-1-dev](https://github.com/timknapen/SP-1-dev)** — SP-1 developer docs + wiki
+- **marisko** — the `sp1` Zephyr board definition
 - **Eric Lewis / sp1-midi** — gold-standard nRF52 BSP + boot-safety reference
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). The firmware in this repo is MIT; its dependencies (Zephyr, the board definition, etc.) are under their own licenses.
+MIT — see [`LICENSE`](LICENSE). Dependencies (Zephyr, the board definition, etc.) under their own licenses.
