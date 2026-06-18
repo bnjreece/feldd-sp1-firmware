@@ -1,5 +1,7 @@
 # feldd
 
+![feldd — browser-configurable controller firmware for the Teenage Engineering SP-1](docs/feldd-og.png)
+
 **Custom controller firmware for the Teenage Engineering SP-1 stem player.**
 
 feldd turns the SP-1's 4 faders and 9 buttons into a fully configurable USB-MIDI + TRS-MIDI controller with 8 on-device profiles — all mapped and managed from your browser, no app to install.
