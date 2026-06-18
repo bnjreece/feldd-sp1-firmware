@@ -1,0 +1,9 @@
+# SP-1 controller firmware application Kconfig.
+#
+# Pulls in the common USB sample options (CONFIG_SAMPLE_USBD_VID/PID/PRODUCT/...)
+# consumed by the vendored sample_usbd_init.c device_next bring-up helper, then
+# the standard Zephyr Kconfig tree. Mirrors the sp1-tape-looper mechanism.
+
+source "samples/subsys/usb/common/Kconfig.sample_usbd"
+
+source "Kconfig.zephyr"

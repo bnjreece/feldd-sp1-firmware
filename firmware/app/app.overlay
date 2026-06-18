@@ -1,0 +1,119 @@
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+    zephyr,user {
+        /* idx: 0=ladder tracks(AIN0), 1=ladder vol(AIN1), 2..5=faders1..4(AIN3,6,2,7), 6=battery(AIN4) */
+        io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>, <&adc 4>, <&adc 5>, <&adc 6>;
+        /* M3.2 TRS MIDI out: ring = PNP current-source base on P0.23, active-LOW
+         * (drive logical-1 to enable; the GPIO_ACTIVE_LOW flag inverts it to the
+         * electrical low the PNP base wants). Coexists with io-channels above. */
+        midi_ring_gpios = <&gpio0 23 GPIO_ACTIVE_LOW>;
+    };
+    chosen { zephyr,console = &cdc_acm_uart0; };
+
+    /* M4.1 USB-MIDI 2.0 endpoint. The zephyr,midi2-device node sits at the DT
+     * root (NOT under the &usbd bus); the usbd_midi2 class instance it defines
+     * is auto-registered into the composite by usbd_register_all_classes
+     * alongside the CDC ACM node below. One MIDI2 Group Terminal Block at group
+     * 0 (reg = <0 1>), default MIDI-1 protocol. Group 0 matches the UMP the
+     * midi_out USB sink builds. */
+    usb_midi: usb_midi {
+        compatible = "zephyr,midi2-device";
+        status = "okay";
+        #address-cells = <1>;
+        #size-cells = <1>;
+        label = "SP-1 Control Surface";
+        midi_in_out@0 {
+            reg = <0 1>;
+            protocol = "midi1-up-to-64b";
+            label = "SP-1 MIDI";
+        };
+    };
+};
+
+/* M3.2 TRS MIDI out (31250 baud, TX-only) on uart1/uarte1.
+ * Tip data = UARTE TXD on P0.20 (idles high = MIDI mark/"1"). P0.20 is the
+ * most-likely TXD per the CA-033/RP-054 research; if the on-hardware bench
+ * (scope + OP-XY) later shows P0.17 is the real tip TXD, flip the psels pin
+ * number below from 20 to 17 — a one-line pinctrl change.
+ * A second tip pin (P0.17, a parallel current copy) is only needed if one pin
+ * cannot drive the MIDI opto; DEFERRED until one-pin drive proves too weak. */
+&pinctrl {
+    uart1_default: uart1_default { group1 { psels = <NRF_PSEL(UART_TX, 0, 20)>; }; };
+    uart1_sleep:   uart1_sleep   { group1 { psels = <NRF_PSEL(UART_TX, 0, 20)>; low-power-enable; }; };
+};
+&uart1 {
+    compatible = "nordic,nrf-uarte"; status = "okay";
+    current-speed = <31250>;
+    pinctrl-0 = <&uart1_default>; pinctrl-1 = <&uart1_sleep>; pinctrl-names = "default","sleep";
+    /* TX-only MIDI out: no RX/RTS/CTS. P0.20 = tip TXD (most-likely; flip to
+     * P0.17 if the bench shows otherwise). Second tip pin P0.17 (parallel
+     * current copy) deferred until one-pin drive proves too weak. */
+};
+
+&adc {
+    status = "okay";
+    #address-cells = <1>;
+    #size-cells = <0>;
+    channel@0 { reg=<0>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN0>; zephyr,resolution=<12>; };   /* ladder: tracks */
+    channel@1 { reg=<1>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN1>; zephyr,resolution=<12>; };   /* ladder: vol */
+    channel@2 { reg=<2>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN3>; zephyr,resolution=<12>; };   /* fader1 P0.05 */
+    channel@3 { reg=<3>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN6>; zephyr,resolution=<12>; };   /* fader2 P0.30 */
+    channel@4 { reg=<4>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN2>; zephyr,resolution=<12>; };   /* fader3 P0.04 */
+    channel@5 { reg=<5>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN7>; zephyr,resolution=<12>; };   /* fader4 P0.31 */
+    channel@6 { reg=<6>; zephyr,gain="ADC_GAIN_1_6"; zephyr,reference="ADC_REF_INTERNAL";
+        zephyr,acquisition-time=<ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS,20)>;
+        zephyr,input-positive=<NRF_SAADC_AIN4>; zephyr,resolution=<12>; };   /* battery P0.28 */
+};
+
+/* The nRF52840 USB device-controller nodelabel is &usbd; there is no
+ * zephyr_udc0 alias on this SoC. The sample_usbd helper (sample_usbd_init.c)
+ * hard-references DT_NODELABEL(zephyr_udc0), so we attach that extra label here
+ * and hang the CDC-ACM console child node off it. */
+zephyr_udc0: &usbd {
+    status = "okay";
+    cdc_acm_uart0: cdc_acm_uart0 { compatible = "zephyr,cdc-acm-uart"; };
+};
+
+/* M5.2 NVS storage partition for the profile librarian.
+ *
+ * The marisko board dts (boards/arm/sp1/sp1.dts) declares only
+ * bootloader_partition @0 (0x20000) + app_partition @0x20000 (0xBF000).
+ * The app *partition* (the linker cap on the app image) ends at 0xDF000, but
+ * the SP-1 bootloader's actual writable app slot runs to 0xFEFFF — only the
+ * last page 0xFF000..0xFFFFF is reserved. The nRF52840 flash is 1 MB
+ * (0x100000). We place NVS at the TOP of usable flash (conventional NVS
+ * placement: maximally far from a growing app image, just under the reserved
+ * page) — a 16 KB (0x4000) region spanning 0xFB000..0xFF000, ending exactly
+ * at the reserved page. It is safe because it sits above the linker-capped app
+ * region (ends 0xDF000) and just below the only reserved page (0xFF000).
+ *
+ * Referencing the &flash0 { partitions { ... }; } path MERGES this child into
+ * the marisko-declared `partitions` node (which has no label, so it is reached
+ * by node path); the bootloader + app partitions survive and all three appear
+ * in the merged zephyr.dts. The node is named partition@fb000 so its
+ * unit-address matches its reg offset, and labelled storage_partition so
+ * FIXED_PARTITION_*(storage_partition) resolves in librarian.c. */
+&flash0 {
+    partitions {
+        storage_partition: partition@fb000 {
+            label = "storage";
+            reg = <0x000FB000 0x00004000>;
+        };
+    };
+};
