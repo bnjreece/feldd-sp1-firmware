@@ -8,8 +8,18 @@ struct proto_store {
     int (*set_active)(uint8_t n);                      /* 0 ok, nonzero NVS_FAIL */
     int (*reset)(uint8_t n);                           /* 0 ok, nonzero NVS_FAIL: reseed slot n to default */
     int (*reset_all)(void);                            /* 0 ok, nonzero NVS_FAIL: reseed all slots to default */
-    uint8_t (*get_active)(void);
-    uint8_t profiles, faders, buttons;
+    uint8_t (*get_active)(void);                       /* WITHIN-bank index (0..bank_profiles-1) of the current mode */
+    uint8_t (*get_mode)(void);                         /* device mode: 0 MIDI, 1 KEYBOARD */
+    int     (*set_mode)(uint8_t m);                    /* 0 ok; nonzero NVS_FAIL */
+    /* Two distinct index axes (§0 mode-scoped banks). read/write/reset address a
+     * GLOBAL slot 0..profiles-1 (both banks); setactive/get_active address a
+     * WITHIN-bank index 0..bank_profiles-1 (the current mode's bank). Validating
+     * setactive against `profiles` (=16) would let a host setactive n=8..15 pass
+     * the gate, then get -EINVAL from a within-only set_active and be mislabeled
+     * NVS_FAIL, so setactive is bounded by `bank_profiles` instead. */
+    uint8_t profiles;          /* GLOBAL slot count (read/write/reset bound) = NUM_PROFILES */
+    uint8_t bank_profiles;     /* WITHIN-bank profile count (setactive bound) = NUM_BANK_PROFILES */
+    uint8_t faders, buttons;
     const char *fw;
     const char *uid;   /* hex hardware id (hwinfo) for getPorts matching; "" if none */
 };

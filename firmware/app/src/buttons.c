@@ -50,21 +50,22 @@ int buttons_decode_tracks_pure(int v)
  * specific. What is physically fixed is the PLATEAU ORDER; the logical name on
  * each plateau is a wiring assumption confirmable on hardware later.
  *
- * ASSUMED ASSIGNMENT (ascending raw -> our logical name), HARDWARE-CONFIRMABLE:
+ * BENCH-CONFIRMED ASSIGNMENT (ascending raw -> our logical name). petercolombo
+ * reported on a real unit (2026-06-18) that FWD and VolDown were swapped — the
+ * outer two (RWD lowest, VolUp highest) were correct, the inner two reversed. So
+ * the transport/volume pairs are interleaved on the ladder, not grouped as first
+ * assumed:
  *     plateau ~404  -> RWD     (idx 8)
- *     plateau ~729  -> FWD     (idx 7)
- *     plateau ~1220 -> VolDown (idx 6)
+ *     plateau ~729  -> VolDown (idx 6)
+ *     plateau ~1220 -> FWD     (idx 7)
  *     plateau ~1820 -> VolUp   (idx 5)
- * Rationale: the transport pair (RWD/FWD) sits on the two lower plateaus and the
- * volume pair (Down/Up) on the two upper ones, with Up the highest code, which
- * mirrors the tracks ladder's "highest code = the standalone PLAY action". If
- * the bench shows otherwise, only this mapping table changes. */
+ * If a future bench disagrees, only this mapping table changes. */
 int buttons_decode_vol_pure(int v)
 {
     if (v <  200) return -1;   /* idle */
     if (v <  560) return 8;    /* RWD */
-    if (v <  950) return 7;    /* FWD */
-    if (v < 1500) return 6;    /* VolDown */
+    if (v <  950) return 6;    /* VolDown */
+    if (v < 1500) return 7;    /* FWD */
     return 5;                  /* VolUp */
 }
 
@@ -205,10 +206,12 @@ int buttons_scan_pure(struct buttons_state *s, int trk_raw, int vol_raw,
 #include "controls.h"
 
 static struct buttons_state g_state;
+static int g_rail_loaded;   /* instantaneous: any button pulling the rail this scan */
 
 int buttons_init(void)
 {
     buttons_state_init(&g_state);
+    g_rail_loaded = 0;
     return 0;
 }
 
@@ -218,11 +221,37 @@ int buttons_scan(struct button_event *evt, int cap)
     int vol_raw = controls_read_raw(1);   /* vol ladder   (AIN1) */
     if (trk_raw < 0) trk_raw = 0;         /* a read error reads as idle */
     if (vol_raw < 0) vol_raw = 0;
+    /* Capture the INSTANTANEOUS rail load (pre-debounce): a button pressed THIS
+     * scan already pulls current through its ladder, sagging the shared BTN_COM
+     * rail. The fader gate reads this rather than the 3-read committed state, so
+     * it skips the drooped fader read on the very first sagged tick instead of
+     * ~24 ms later. Thresholds mirror the decode idle bands (<110 tracks, <200
+     * vol = nothing held); the Track1+4 DFU band (>110) also loads the rail. */
+    g_rail_loaded = (trk_raw >= 110) || (vol_raw >= 200);
     return buttons_scan_pure(&g_state, trk_raw, vol_raw, evt, cap);
 }
 
 int buttons_dfu_held(void)
 {
     return g_state.dfu_held;
+}
+
+/* True if THIS scan's raw ladder reads showed any button pulling the rail
+ * (instantaneous, pre-debounce). The control loop gates the fader read on this:
+ * a held button sags the shared BTN_COM rail, which (the SAADC ref is internal,
+ * not ratiometric) drops all four fader reads ~1-2 LSB. The raw read catches the
+ * press edge on the first sagged tick; the committed state would lag it ~24 ms
+ * and leak the droop. */
+int buttons_rail_loaded(void)
+{
+    return g_rail_loaded;
+}
+
+/* The tracks-ladder committed (debounced) button index: -1 idle, 0=Play,
+ * 1..4 = Track1..4. Drives the track-LED button-press feedback in main.c. A
+ * resistor ladder reports one button at a time, so at most one track is held. */
+int buttons_track_committed(void)
+{
+    return g_state.trk.committed;
 }
 #endif /* BUTTONS_HOST_TEST */

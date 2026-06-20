@@ -52,11 +52,46 @@ static void t_fmt_active_overflow(void)
     assert(z == -1);
 }
 
+/* 4. mode frame: exact bytes, trailing newline. */
+static void t_fmt_mode_basic(void)
+{
+    char buf[48];
+    int n0 = config_cdc_fmt_mode(buf, (int)sizeof buf, 0);
+    assert(n0 > 0);
+    assert(strcmp(buf, "{\"t\":\"mon\",\"k\":\"mode\",\"v\":0}\n") == 0);
+
+    int n1 = config_cdc_fmt_mode(buf, (int)sizeof buf, 1);
+    assert(n1 > 0);
+    assert(strcmp(buf, "{\"t\":\"mon\",\"k\":\"mode\",\"v\":1}\n") == 0);
+
+    /* RAW byte, not boolean-collapsed: a reserved personality (mode 2/3) pushes
+     * its real value so the unsolicited push matches the solicited mode_r reply
+     * (protocol.c emits get_mode() raw via %u). A (v ? 1 : 0) coercion would
+     * wrongly emit "v":1 here and diverge the two channels. */
+    int n2 = config_cdc_fmt_mode(buf, (int)sizeof buf, 2);
+    assert(n2 > 0);
+    assert(strcmp(buf, "{\"t\":\"mon\",\"k\":\"mode\",\"v\":2}\n") == 0);
+
+    int n3 = config_cdc_fmt_mode(buf, (int)sizeof buf, 3);
+    assert(n3 > 0);
+    assert(strcmp(buf, "{\"t\":\"mon\",\"k\":\"mode\",\"v\":3}\n") == 0);
+
+    /* out-of-range clamps to 0 (MIDI), matching lib_header_set_mode()'s clamp. */
+    int nbig = config_cdc_fmt_mode(buf, (int)sizeof buf, 99);
+    assert(nbig > 0);
+    assert(strcmp(buf, "{\"t\":\"mon\",\"k\":\"mode\",\"v\":0}\n") == 0);
+
+    /* too-small cap -> -1, no overrun */
+    char tiny[8];
+    assert(config_cdc_fmt_mode(tiny, (int)sizeof tiny, 1) == -1);
+}
+
 int main(void)
 {
     t_fmt_active_basic();
     t_fmt_active_indices();
     t_fmt_active_overflow();
+    t_fmt_mode_basic();
     printf("all config_cdc tests passed\n");
     return 0;
 }

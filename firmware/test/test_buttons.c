@@ -61,10 +61,10 @@ static void test_decode_vol_boundaries(void)
     CHECK(buttons_decode_vol_pure(199)  == -1);
     CHECK(buttons_decode_vol_pure(200)  == 8);      /* RWD (lowest plateau) */
     CHECK(buttons_decode_vol_pure(559)  == 8);
-    CHECK(buttons_decode_vol_pure(560)  == 7);      /* FWD */
-    CHECK(buttons_decode_vol_pure(949)  == 7);
-    CHECK(buttons_decode_vol_pure(950)  == 6);      /* VolDown */
-    CHECK(buttons_decode_vol_pure(1499) == 6);
+    CHECK(buttons_decode_vol_pure(560)  == 6);      /* VolDown (bench-confirmed) */
+    CHECK(buttons_decode_vol_pure(949)  == 6);
+    CHECK(buttons_decode_vol_pure(950)  == 7);      /* FWD (bench-confirmed) */
+    CHECK(buttons_decode_vol_pure(1499) == 7);
     CHECK(buttons_decode_vol_pure(1500) == 5);      /* VolUp (highest plateau) */
     CHECK(buttons_decode_vol_pure(4095) == 5);
 }

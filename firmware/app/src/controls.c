@@ -27,30 +27,6 @@ static const struct adc_dt_spec ch[N_CH] = {
 
 static int16_t sample;
 
-/*
- * Run the SAADC offset calibration once at startup. The nRF SAADC drifts with
- * temperature/supply, and adc_read_dt() with seq.calibrate left false never
- * triggers nrfx_saadc_offset_calibrate(), so the converted values quietly skew
- * over a session. A single calibrated read (seq.calibrate = true) kicks the
- * driver's offset-calibration path; the offset is instance-global, so one read
- * recalibrates the whole SAADC. We do it here, after BTN_COM is up and the
- * channels are configured, so calibration runs against the real rail.
- */
-static void controls_calibrate(void)
-{
-    for (int i = 0; i < N_CH; i++) {
-        struct adc_sequence seq = {
-            .buffer      = &sample,
-            .buffer_size = sizeof(sample),
-            .calibrate   = true,
-        };
-        if (adc_sequence_init_dt(&ch[i], &seq) < 0) {
-            continue;
-        }
-        (void)adc_read_dt(&ch[i], &seq);
-    }
-}
-
 int controls_init(void)
 {
     nrf_gpio_cfg_output(SP1_BTN_COM);
@@ -60,7 +36,12 @@ int controls_init(void)
             adc_channel_setup_dt(&ch[i]);
         }
     }
-    controls_calibrate();                           /* SAADC offset calibration */
+    /* Deliberately NO SAADC offset calibration here. An earlier controls_calibrate()
+     * ran nrfx_saadc_offset_calibrate against the still-charging BTN_COM rail,
+     * baking a global offset that pushed PLAY's tracks-ladder plateau below its
+     * decode band (PLAY never registered) and dragged the fader reads down. The
+     * verified tape-looper never calibrates; we match it. (root-caused 2026-06-18
+     * from petercolombo's bench report.) */
     return 0;
 }
 

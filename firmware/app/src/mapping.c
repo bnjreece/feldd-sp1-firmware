@@ -15,14 +15,16 @@ void map_fader(const struct profile *p, int idx, int cc_val, int shift,
     if (idx < 0 || idx >= NUM_FADERS || cc_val < 0) return;
     uint8_t cc = shift ? p->shift.fader_cc[idx] : p->fader[idx].cc;
     uint8_t val = scale(cc_val, &p->fader[idx]);
-    struct midi_msg m = { .status = 0xB0 | (p->channel & 0x0F), .d1 = cc, .d2 = val, .len = 3 };
+    /* v2: each fader rides its own channel (p->fader_channel[idx]), so 4 faders
+     * can drive 4 different tracks at once. */
+    struct midi_msg m = { .status = 0xB0 | (p->fader_channel[idx] & 0x0F), .d1 = cc, .d2 = val, .len = 3 };
     sink(&m, ctx);
 }
 void map_button(const struct profile *p, int idx, int pressed, int shift,
                 midi_sink_fn sink, void *ctx) {
     if (idx < 0 || idx >= NUM_BUTTONS) return;
     const struct button_map *b = &p->button[idx];
-    uint8_t ch = p->channel & 0x0F;
+    uint8_t ch = p->button_channel[idx] & 0x0F;   /* v2: per-button channel */
     uint8_t val = shift ? p->shift.button_value[idx] : b->value;
     struct midi_msg m = { .len = 3 };
     switch (b->type) {

@@ -146,9 +146,15 @@ int profile_validate(const struct profile *p)
         if (p->fader[i].max   > 127)  return -1;
         if (p->fader[i].curve > CURVE_EXP)         return -1;
         if (p->fader[i].invert > 1)                return -1;
+        if (p->fader_channel[i] > 15)              return -1;  /* v2 per-fader ch */
     }
     for (int i = 0; i < NUM_BUTTONS; i++) {
         if (p->button[i].type > BTN_PROFILE_SWITCH) return -1;
+        if (p->button_channel[i] > 15)              return -1; /* v2 per-button ch */
     }
+    /* v3 button_key[i] / button_mod[i] AND v4 button_key_shift[i] /
+     * button_mod_shift[i]: every u8 is a legal HID usage / modifier bitmask
+     * (0 = unbound), so no bounds guard is needed. The version == PROFILE_VERSION
+     * check above already rejects any older blob reaching v4 firmware. */
     return 0;
 }

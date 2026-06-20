@@ -11,9 +11,14 @@
 #include "protocol.h"
 
 /* ---------- mock store ---------- */
-#define MOCK_PROFILES 8
+/* §0 mode-scoped banks: 16 GLOBAL slots (read/write/reset axis), 8 per bank.
+ * get/set_active operate on the WITHIN-bank index (0..7) of the current mode;
+ * read/write/reset address a GLOBAL slot (0..15). */
+#define MOCK_PROFILES 16
+#define MOCK_BANK 8
 static struct profile g_arr[MOCK_PROFILES];
-static uint8_t        g_active;
+static uint8_t        g_mode;                 /* current device mode 0/1 */
+static uint8_t        g_active_within[2];     /* per-mode within-bank active */
 static int            g_fail_write;   /* if set, store->write returns this */
 static int            g_fail_read;    /* if set, store->read  returns this */
 static int            g_fail_reset;   /* if set, store->reset / reset_all return this */
@@ -35,13 +40,13 @@ static int mock_write(uint8_t n, const struct profile *in)
     memcpy(&g_arr[n], in, sizeof *in);
     return 0;
 }
-static int mock_set_active(uint8_t n)
+static int mock_set_active(uint8_t within)   /* within 0..7 of the current mode */
 {
-    if (n >= MOCK_PROFILES) return 1;
-    g_active = n;
+    if (within >= MOCK_BANK) return 1;
+    g_active_within[g_mode] = within;
     return 0;
 }
-static uint8_t mock_get_active(void) { return g_active; }
+static uint8_t mock_get_active(void) { return g_active_within[g_mode]; }   /* WITHIN */
 static int mock_reset(uint8_t n)
 {
     if (g_fail_reset) return g_fail_reset;
@@ -62,6 +67,13 @@ static int mock_reset_all(void)
     }
     return 0;
 }
+static uint8_t mock_get_mode(void) { return g_mode; }
+static int mock_set_mode(uint8_t m)
+{
+    if (m > 1) return 1;
+    g_mode = m;
+    return 0;
+}
 
 static struct proto_store make_store(void)
 {
@@ -72,7 +84,10 @@ static struct proto_store make_store(void)
     s.get_active = mock_get_active;
     s.reset = mock_reset;
     s.reset_all = mock_reset_all;
-    s.profiles = MOCK_PROFILES;
+    s.get_mode = mock_get_mode;
+    s.set_mode = mock_set_mode;
+    s.profiles = MOCK_PROFILES;        /* 16 global slots (read/write/reset axis) */
+    s.bank_profiles = MOCK_BANK;       /* 8 within-bank slots (setactive axis) */
     s.faders = NUM_FADERS;
     s.buttons = NUM_BUTTONS;
     s.fw = "1.2.3";
@@ -83,7 +98,9 @@ static struct proto_store make_store(void)
 static void reset_store(void)
 {
     memset(g_arr, 0, sizeof g_arr);
-    g_active = 0;
+    g_mode = 0;
+    g_active_within[0] = 0;
+    g_active_within[1] = 0;
     g_fail_write = 0;
     g_fail_read = 0;
     g_fail_reset = 0;
@@ -152,7 +169,7 @@ static void t_hello(void)
     assert(strstr(out, "\"i\":1"));
     assert(strstr(out, "\"ok\":true"));
     assert(strstr(out, "\"proto\":1"));
-    assert(strstr(out, "\"profiles\":8"));
+    assert(strstr(out, "\"profiles\":16"));   /* §0 mode-scoped banks: 2 x 8 */
     assert(strstr(out, "\"faders\":4"));
     assert(strstr(out, "\"buttons\":9"));
     assert(strstr(out, "\"active\":0"));
@@ -260,13 +277,60 @@ static void t_setactive_getactive(void)
     assert(strstr(out, "\"t\":\"setactive_r\""));
     assert(strstr(out, "\"active\":3"));
     assert(strstr(out, "\"i\":4"));
-    assert(g_active == 3);
+    assert(g_active_within[0] == 3);   /* mode 0 (MIDI) within-bank active */
 
     rc = proto_handle(&s, "{\"t\":\"getactive\",\"i\":5}", out, (int)sizeof out, NULL);
     assert(rc > 0);
     assert(strstr(out, "\"t\":\"getactive_r\""));
     assert(strstr(out, "\"active\":3"));
     assert(strstr(out, "\"i\":5"));
+}
+
+/* 6b. setactive is bounded by the WITHIN-bank axis (bank_profiles), NOT the
+ * global slot count (profiles). §0 mode-scoped banks: read/write/reset address a
+ * GLOBAL slot 0..profiles-1 (both banks), but setactive selects a WITHIN-bank
+ * index 0..bank_profiles-1 of the CURRENT mode. A two-bank store (profiles=16,
+ * bank_profiles=8) must:
+ *   - REJECT setactive n=8..15 as BAD_INDEX (a within index can't exceed 7),
+ *     NOT pass the gate and surface set_active's -EINVAL as a misleading NVS_FAIL,
+ *   - still ACCEPT read/write of the upper bank (global n=8..15), proving the two
+ *     axes are reconciled rather than collapsed onto one bound. */
+static void t_setactive_within_vs_global_bounds(void)
+{
+    reset_store();
+    struct proto_store s = make_store();
+    s.profiles = 16;          /* two banks of 8 (global slots 0..15) */
+    s.bank_profiles = 8;      /* the current mode's bank (within 0..7) */
+    char out[512];
+
+    /* within edge: n=7 is the last valid within index -> OK. */
+    int rc = proto_handle(&s, "{\"t\":\"setactive\",\"i\":1,\"n\":7}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(strstr(out, "\"t\":\"setactive_r\""));
+    assert(strstr(out, "\"active\":7"));
+
+    /* n=8 is bank 1's BASE, a valid GLOBAL slot but NOT a valid within index.
+     * It must be a clean BAD_INDEX, never a BAD_INDEX-bypass -> NVS_FAIL. */
+    rc = proto_handle(&s, "{\"t\":\"setactive\",\"i\":2,\"n\":8}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(strstr(out, "\"t\":\"err\""));
+    assert(strstr(out, "\"code\":\"BAD_INDEX\""));
+    assert(!strstr(out, "NVS_FAIL"));   /* the whole point: not mislabeled */
+
+    /* n=15 (top of bank 1) is likewise rejected on the within axis. */
+    rc = proto_handle(&s, "{\"t\":\"setactive\",\"i\":3,\"n\":15}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(strstr(out, "\"code\":\"BAD_INDEX\""));
+
+    /* But the upper bank IS addressable on the GLOBAL axis: read/write n=15 work.
+     * (mock_read/write bound on MOCK_PROFILES=8, so use the real range here by
+     * checking that the protocol gate itself admits n=15 rather than BAD_INDEX.)
+     * Reading global 8..15 against this 16-wide protocol bound must pass the gate
+     * and reach the store, where the single-bank mock returns NVS_FAIL, proving
+     * the protocol no longer rejects the upper bank at the index gate. */
+    rc = proto_handle(&s, "{\"t\":\"read\",\"i\":4,\"n\":15}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(!strstr(out, "BAD_INDEX"));  /* global gate admits 15 */
 }
 
 /* 7. read bad index */
@@ -342,52 +406,66 @@ static void t_monset_result_flag(void)
     assert(res.mon_set == 0);
 }
 
-/* 8c. list -> list_r with one {n,name,ver} entry per slot, plus active.
- * Names are decoded straight from profile.name[16] (NOT base64), and the
- * whole response must fit the firmware's 256-byte g_resp buffer. */
-static void t_list(void)
+/* 8c. list returns ALL 16 entries (both banks), each tagged with its bank, +
+ * a top-level mode + a within-mode active. The web shows both banks together;
+ * bank 0 = MIDI (global 0..7), bank 1 = Keyboard (global 8..15). Names are
+ * decoded straight from profile.name[16] (NOT base64). The whole 16-entry
+ * response must fit the firmware's g_resp buffer (now 1280; see
+ * t_list_worst_case_fits_g_resp for the all-escaped worst case). */
+static void t_list_all_banks(void)
 {
     reset_store();
-    /* Give three slots distinct, length-varied names; leave the rest zeroed
-     * (empty name -> "", version 0). */
-    static const char *nm[3] = { "OP-XY mix", "Logic", "X" };
-    for (int k = 0; k < 3; k++) {
-        struct profile p = make_full_profile();
-        memset(p.name, 0, sizeof p.name);
-        memcpy(p.name, nm[k], strlen(nm[k]));
-        g_arr[k] = p;                 /* version == PROFILE_VERSION */
-    }
-    mock_set_active(2);
+    static const char *nm0 = "MIDI-A";   /* global 0 -> bank 0 */
+    static const char *nm8 = "KB-A";     /* global 8 -> bank 1 */
+    struct profile p0 = make_full_profile();
+    memset(p0.name, 0, sizeof p0.name); memcpy(p0.name, nm0, strlen(nm0));
+    g_arr[0] = p0;
+    struct profile p8 = make_full_profile();
+    memset(p8.name, 0, sizeof p8.name); memcpy(p8.name, nm8, strlen(nm8));
+    g_arr[8] = p8;
+    g_mode = 1;                /* current = Keyboard bank */
+    g_active_within[1] = 2;    /* KB active = within 2 (global 10) */
 
     struct proto_store s = make_store();
-    char out[512];
+    char out[768];
     int rc = proto_handle(&s, "{\"t\":\"list\",\"i\":5}", out, (int)sizeof out, NULL);
     assert(rc > 0);
     assert(strstr(out, "\"t\":\"list_r\""));
     assert(strstr(out, "\"i\":5"));
-    assert(strstr(out, "\"active\":2"));
-    /* each populated slot's name + index appears */
-    assert(strstr(out, "\"n\":0"));
-    assert(strstr(out, "\"name\":\"OP-XY mix\""));
-    assert(strstr(out, "\"name\":\"Logic\""));
-    assert(strstr(out, "\"name\":\"X\""));
+    assert(strstr(out, "\"mode\":1"));           /* current mode reported */
+    assert(strstr(out, "\"active\":2"));          /* WITHIN index of the current mode */
+    assert(strstr(out, "\"name\":\"MIDI-A\""));
+    assert(strstr(out, "\"name\":\"KB-A\""));
+    assert(strstr(out, "\"n\":0,\"bank\":0"));    /* global 0 is bank 0 */
+    assert(strstr(out, "\"n\":8,\"bank\":1"));    /* global 8 is bank 1 */
     /* version field per slot, derived from profile.version */
     char vpat[24];
     snprintf(vpat, sizeof vpat, "\"ver\":%d", PROFILE_VERSION);
     assert(strstr(out, vpat));
     /* a zeroed slot decodes to an empty name, not garbage past the NUL */
     assert(strstr(out, "\"name\":\"\""));
+    /* the full 16-entry list must fit (proto_handle returns -1 if it would not). */
+    assert(rc < (int)sizeof out);
+}
 
-    /* CRITICAL: the full 8-slot list must fit the real firmware response
-     * buffer (config_cdc.c g_resp, sized to hold the worst-case list:
-     * 8 * {"n":N,"name":"<=16>","ver":VVV} ~= 405B, so 512). proto_handle
-     * returns -1 if it would not fit. (The plan's original 256 underbudgeted
-     * the list verb: even 3 short names + 5 empty slots is 267B; g_resp was
-     * bumped to 512 to match.) */
-    char small[512];
-    rc = proto_handle(&s, "{\"t\":\"list\",\"i\":5}", small, (int)sizeof small, NULL);
+/* 8c'. read/write reach into bank 1 (global idx 8..15) regardless of current
+ * mode — the editor can write either bank without first flipping mode. */
+static void t_read_write_other_bank(void)
+{
+    reset_store();
+    struct proto_store s = make_store();
+    struct profile p = make_full_profile();
+    char b64[256];
+    int bn = profile_to_b64(&p, b64, (int)sizeof b64);
+    assert(bn > 0);
+    char line[512];
+    snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":3,\"n\":15,\"data\":\"%s\"}", b64);
+    char out[512];
+    int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
     assert(rc > 0);
-    assert(rc < (int)sizeof small);
+    assert(strstr(out, "\"t\":\"write_r\""));
+    assert(strstr(out, "\"n\":15"));
+    assert(memcmp(&g_arr[15], &p, sizeof p) == 0);   /* wrote the KB bank's last slot */
 }
 
 /* 8d. list with a HOSTILE profile name: raw name[16] bytes that include a
@@ -413,7 +491,7 @@ static void t_list_hostile_name(void)
     mock_set_active(0);
 
     struct proto_store s = make_store();
-    char out[512];
+    char out[768];   /* 16-entry banked list_r */
     int rc = proto_handle(&s, "{\"t\":\"list\",\"i\":5}", out, (int)sizeof out, NULL);
     assert(rc > 0);
     assert(strstr(out, "\"t\":\"list_r\""));
@@ -430,6 +508,51 @@ static void t_list_hostile_name(void)
      * sanitized name */
     assert(strstr(out, "\"name\":\"a"));
     assert(strstr(out, "b\""));
+}
+
+/* 8e. WORST-CASE list_r MUST fit the firmware's g_resp buffer. Regression guard
+ * for the under-budgeting bug: the sanitizer prepends a backslash for EVERY '"'
+ * and '\\', so a name[16] of all '"' emits 32 wire bytes, not 16. profile_validate
+ * does NOT constrain name[] content, so a host can legally write all 16 slots
+ * with 16-char all-'"' names via `write`. The OLD 768-byte budget (which counted
+ * name[16] as 16 wire bytes) OVERFLOWED on this legal input: proto_handle returned
+ * -1 and the host could not enumerate profiles at all. This pins the response to
+ * fit the real firmware g_resp size. Keep this constant in lockstep with
+ * config_cdc.c::g_resp. */
+#define G_RESP_SIZE 1280   /* mirror of config_cdc.c g_resp[1280] */
+static void t_list_worst_case_fits_g_resp(void)
+{
+    reset_store();
+    /* Fill ALL 16 slots with the worst case the wire can carry: a full 16-char
+     * name of all '"' (each escapes to 2 -> 32 wire bytes) + a 3-digit version. */
+    for (int i = 0; i < MOCK_PROFILES; i++) {
+        struct profile p = make_full_profile();
+        p.version = 255;                       /* 3-digit ver -> widest "ver" */
+        memset(p.name, '"', sizeof p.name);    /* 16 quotes, NO NUL -> full 16 */
+        g_arr[i] = p;
+    }
+
+    struct proto_store s = make_store();
+    /* Size EXACTLY like the firmware's g_resp so this asserts the real budget. */
+    char resp[G_RESP_SIZE];
+    int rc = proto_handle(&s, "{\"t\":\"list\",\"i\":4294967295}",
+                          resp, (int)sizeof resp, NULL);
+    /* Must NOT overflow: a positive length, fully within the buffer. */
+    assert(rc > 0);
+    assert(rc < (int)sizeof resp);
+    assert(strstr(resp, "\"t\":\"list_r\""));
+    /* All 16 banked entries are present (last global slot 15 in bank 1). */
+    assert(strstr(resp, "\"n\":15,\"bank\":1"));
+    /* Every '"' in a name is escaped (a `\"` appears in the name field). */
+    assert(strstr(resp, "\\\""));
+
+    /* Prove the OLD budget was genuinely too small: the SAME worst case into a
+     * 768-byte buffer overflows (proto_handle returns -1), so the bump is load-
+     * bearing, not cosmetic. */
+    char resp_old[768];
+    int rc_old = proto_handle(&s, "{\"t\":\"list\",\"i\":4294967295}",
+                              resp_old, (int)sizeof resp_old, NULL);
+    assert(rc_old == -1);
 }
 
 /* 9. bad json */
@@ -500,7 +623,7 @@ static void t_outcap_overflow(void)
     reset_store();
     g_arr[0] = make_full_profile();
     struct proto_store s = make_store();
-    char out[256];   /* a read_r with 92-char base64 will not fit */
+    char out[256];   /* a read_r with the full base64 profile will not fit in 64 */
     int rc = proto_handle(&s, "{\"t\":\"read\",\"i\":2,\"n\":0}", out, 64, NULL);
     assert(rc == -1);
     /* also a tiny outcap for hello must not overrun */
@@ -623,6 +746,32 @@ static void t_resetall(void)
     assert(strstr(out, "\"i\":18"));
 }
 
+/* 18. mode get/set/bad-value */
+static void t_mode_get_set(void)
+{
+    reset_store();
+    struct proto_store s = make_store();
+    char out[512];
+
+    /* get defaults to 0 */
+    int n = proto_handle(&s, "{\"t\":\"mode\",\"i\":1}", out, sizeof out, NULL);
+    assert(n > 0);
+    assert(strstr(out, "\"t\":\"mode_r\"") && strstr(out, "\"v\":0"));
+
+    /* set to 1 */
+    n = proto_handle(&s, "{\"t\":\"mode\",\"v\":1,\"i\":2}", out, sizeof out, NULL);
+    assert(n > 0);
+    assert(strstr(out, "\"t\":\"mode_r\"") && strstr(out, "\"v\":1"));
+
+    /* get now reflects 1 */
+    n = proto_handle(&s, "{\"t\":\"mode\",\"i\":3}", out, sizeof out, NULL);
+    assert(strstr(out, "\"v\":1"));
+
+    /* bad value -> err */
+    n = proto_handle(&s, "{\"t\":\"mode\",\"v\":2,\"i\":4}", out, sizeof out, NULL);
+    assert(strstr(out, "\"t\":\"err\"") && strstr(out, "BAD_VALUE"));
+}
+
 int main(void)
 {
     t_hello();
@@ -631,11 +780,14 @@ int main(void)
     t_write_bad_len();
     t_write_bad_version();
     t_setactive_getactive();
+    t_setactive_within_vs_global_bounds();
     t_read_bad_index();
     t_monset();
     t_monset_result_flag();
-    t_list();
+    t_list_all_banks();
+    t_read_write_other_bank();
     t_list_hostile_name();
+    t_list_worst_case_fits_g_resp();
     t_bad_json();
     t_unknown_verb();
     t_nvs_fail_write();
@@ -646,6 +798,7 @@ int main(void)
     t_reset_bad_index();
     t_reset_nvs_fail();
     t_resetall();
+    t_mode_get_set();
     printf("all protocol tests passed\n");
     return 0;
 }

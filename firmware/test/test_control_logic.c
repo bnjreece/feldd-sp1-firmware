@@ -2,49 +2,86 @@
 #include <stdio.h>
 #include "../src/control_logic.h"
 
-static void test_fader_to_cc_quantizes_and_suppresses_jitter(void) {
-    fader_t f = {0};
-    // 12-bit 0..4095 -> 7-bit 0..127, first read always reports
-    assert(fader_update(&f, 0) == 0);          // CC value 0
-    assert(fader_update(&f, 4095) == 127);     // full scale
-    assert(fader_update(&f, 4095 - 8) == -1);  // same CC step: no send
-    assert(fader_update(&f, 2048) == 64);      // big move: sends ~center
-    assert(fader_update(&f, 2056) == -1);      // jitter suppressed
-    assert(fader_update(&f, 2032) == 63);      // delta == FADER_HYSTERESIS exactly: sends
+static void test_fader_rescales_to_full_0_127(void) {
+    // SP-1 pots top out ~raw 3680, which a plain raw>>5 capped at CC 115.
+    // raw_to_cc rescales the usable span so full travel reaches 0..127.
+    // First read always reports.
+    fader_t a = {0}; assert(fader_update(&a, 0)    == 0);    // bottom -> CC 0
+    fader_t b = {0}; assert(fader_update(&b, 3680) == 127);  // physical max -> CC 127 (was 115)
+    fader_t c = {0}; assert(fader_update(&c, 4095) == 127);  // ADC full scale -> CC 127
+    fader_t d = {0}; assert(fader_update(&d, 1841) == 63);   // mid travel -> ~center
 }
 
-static void test_fader_rails_reachable_after_boundary_jitter(void) {
+static void test_fader_suppresses_jitter_and_duplicates(void) {
     fader_t f = {0};
-    assert(fader_update(&f, 33) == 1);     // first read reports CC 1
-    assert(fader_update(&f, 31) == 0);     // low rail band: emits CC 0 despite jitter window
-    assert(fader_update(&f, 0) == -1);     // same CC step: duplicate suppressed
-    assert(fader_update(&f, 4095) == 127); // top rail reachable from anywhere
+    assert(fader_update(&f, 1841) == 63);   // seed at CC 63
+    assert(fader_update(&f, 1849) == -1);   // +8 raw, same CC 63: suppressed
+    assert(fader_update(&f, 1830) == -1);   // -11 raw, same CC 63: suppressed
+    assert(fader_update(&f, 2100) == 72);   // big move clears the step + window: emits
 }
 
-static void test_fader_rail_bands_bypass_jitter_window(void) {
-    // an ADC limited by pot end resistance may never read true 0/4095;
-    // any reading inside the top/bottom CC step must still reach the extreme
+static void test_fader_hysteresis_boundary_emits(void) {
     fader_t f = {0};
-    assert(fader_update(&f, 4060) == 126);  // resting just below the top step
-    assert(fader_update(&f, 4070) == 127);  // delta 10 < hysteresis, but in top rail band
-    assert(fader_update(&f, 4085) == -1);   // same CC step: duplicate suppressed
-    fader_t g = {0};
-    assert(fader_update(&g, 35) == 1);      // resting just above the bottom step
-    assert(fader_update(&g, 25) == 0);      // delta 10 < hysteresis, but in bottom rail band
-    assert(fader_update(&g, 5) == -1);      // same CC step: duplicate suppressed
+    assert(fader_update(&f, 2084) == 72);   // seed at CC 72
+    assert(fader_update(&f, 2100) == -1);   // +16 raw but still CC 72: duplicate-suppressed
+    assert(fader_update(&f, 2068) == 71);   // -16 (== hysteresis) crossing to CC 71: emits
 }
 
-static void test_fader_reinit_reemits_unchanged_raw(void) {
+static void test_fader_top_rail_bypasses_jitter_window(void) {
+    // resting just below the top, a sub-hysteresis nudge into the top dead-band
+    // must still reach CC 127 (the rail band bypasses the jitter window)
+    fader_t f = {0};
+    assert(fader_update(&f, 3640) == 126);  // resting just below the top step
+    assert(fader_update(&f, 3652) == 127);  // +12 (< hysteresis) but >= MAX rail: emits 127
+    assert(fader_update(&f, 3800) == -1);   // same CC step (127): duplicate suppressed
+}
+
+static void test_fader_bottom_reachable_and_reinit_reemits(void) {
+    fader_t f = {0};
+    assert(fader_update(&f, 80) == 1);      // resting just above the bottom step (CC 1)
+    assert(fader_update(&f, 30) == 0);      // into the bottom rail: emits CC 0
     // After a profile switch the firmware re-arms every fader by zeroing
-    // .initialized (faders_rearm in main.c). A re-armed fader must re-emit its
-    // current value even though the raw code has not moved, so the new
-    // profile's CC/range/curve mapping reaches the host/OP-XY immediately.
-    fader_t f = {0};
-    assert(fader_update(&f, 2048) == 64);   // first read seeds + emits CC 64
-    assert(fader_update(&f, 2048) == -1);   // unchanged raw: suppressed
+    // .initialized (faders_rearm in main.c); a re-armed fader must re-emit its
+    // current value even though the raw code has not moved.
     f.initialized = 0;                      // simulate faders_rearm() on switch
-    assert(fader_update(&f, 2048) == 64);   // re-armed: re-emits despite no move
-    assert(fader_update(&f, 2048) == -1);   // and suppresses again afterward
+    assert(fader_update(&f, 30) == 0);      // re-armed: re-emits despite no move
+    assert(fader_update(&f, 30) == -1);     // and suppresses again afterward
+}
+
+static void test_takeover_no_catch_when_at_target(void) {
+    takeover_t t = {0};
+    assert(takeover_arm(&t, 64, 64) == 0);   // already at target: nothing to catch
+    assert(t.pending == 0);
+    assert(takeover_step(&t, 64) == 1);      // not pending: emit normally
+    assert(takeover_step(&t, 70) == 1);      // still not pending
+}
+
+static void test_takeover_catch_from_above(void) {
+    takeover_t t = {0};
+    assert(takeover_arm(&t, 100, 40) == 1);  // physical above the target -> catch
+    assert(t.pending == 1 && t.from_above == 1);
+    assert(takeover_step(&t, 90) == 0);      // still above: suppress
+    assert(takeover_step(&t, 41) == 0);      // just above: suppress
+    assert(takeover_step(&t, 40) == 1);      // reached target: release + emit
+    assert(t.pending == 0);
+    assert(takeover_step(&t, 20) == 1);      // released: tracks normally
+}
+
+static void test_takeover_catch_from_below(void) {
+    takeover_t t = {0};
+    assert(takeover_arm(&t, 10, 80) == 1);   // physical below the target -> catch
+    assert(t.pending == 1 && t.from_above == 0);
+    assert(takeover_step(&t, 50) == 0);      // still below: suppress
+    assert(takeover_step(&t, 79) == 0);      // just below: suppress
+    assert(takeover_step(&t, 80) == 1);      // reached target: release + emit
+    assert(t.pending == 0);
+}
+
+static void test_takeover_catches_on_overshoot(void) {
+    takeover_t t = {0};
+    assert(takeover_arm(&t, 10, 60) == 1);   // below target
+    assert(takeover_step(&t, 90) == 1);      // jumped past target in one read: still catches
+    assert(t.pending == 0);
 }
 
 static void test_ladder_decode_matches_first_level_within_tolerance(void) {
@@ -58,10 +95,15 @@ static void test_ladder_decode_matches_first_level_within_tolerance(void) {
 }
 
 int main(void) {
-    test_fader_to_cc_quantizes_and_suppresses_jitter();
-    test_fader_rails_reachable_after_boundary_jitter();
-    test_fader_rail_bands_bypass_jitter_window();
-    test_fader_reinit_reemits_unchanged_raw();
+    test_fader_rescales_to_full_0_127();
+    test_fader_suppresses_jitter_and_duplicates();
+    test_fader_hysteresis_boundary_emits();
+    test_fader_top_rail_bypasses_jitter_window();
+    test_fader_bottom_reachable_and_reinit_reemits();
+    test_takeover_no_catch_when_at_target();
+    test_takeover_catch_from_above();
+    test_takeover_catch_from_below();
+    test_takeover_catches_on_overshoot();
     test_ladder_decode_matches_first_level_within_tolerance();
     printf("all control_logic tests passed\n");
     return 0;

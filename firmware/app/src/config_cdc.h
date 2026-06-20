@@ -6,6 +6,8 @@ void config_cdc_poll(void);                       /* call from main loop: drain 
 void config_cdc_monitor_fader(int idx, int value);/* if monitoring on, emit a mon line */
 void config_cdc_monitor_button(int idx, int pressed);
 void config_cdc_monitor_active(int n);            /* ALWAYS emit active-changed mon line (independent of monitor gate) */
+void config_cdc_monitor_mode(int v);              /* ALWAYS emit a mode-changed mon line (independent of monitor gate) */
+int  config_cdc_fmt_mode(char *buf, int cap, int v);
 
 /* Pure, host-testable formatter for the active-changed monitor frame. Writes
  * {"t":"mon","k":"active","n":<n>}\n (newline-terminated, NUL-terminated) into

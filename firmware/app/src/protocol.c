@@ -213,9 +213,14 @@ int proto_handle(const struct proto_store *s, const char *line,
     }
 
     /* ---- setactive ---- */
+    /* n is a WITHIN-bank index (0..bank_profiles-1), NOT a global slot: it selects
+     * one of the CURRENT mode's profiles (the •• cycle's axis). Bound it against
+     * bank_profiles (=8), not profiles (=16); otherwise n=8..15 would pass the
+     * gate and set_active would reject it with -EINVAL, surfaced as a misleading
+     * NVS_FAIL. The other bank is reachable by flipping mode, not by setactive. */
     if (strcmp(verb, "setactive") == 0) {
         uint32_t n;
-        if (json_uint(line, "n", &n) < 0 || n >= s->profiles)
+        if (json_uint(line, "n", &n) < 0 || n >= s->bank_profiles)
             return emit_err(out, outcap, id, "BAD_INDEX", "bad index");
         if (s->set_active((uint8_t)n) != 0)
             return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_active failed");
@@ -266,23 +271,53 @@ int proto_handle(const struct proto_store *s, const char *line,
             id, on ? "true" : "false");
     }
 
+    /* ---- mode ---- */
+    /* {"t":"mode"} reads, {"t":"mode","v":0|1} sets the global device mode. */
+    if (strcmp(verb, "mode") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v > 1)
+                return emit_err(out, outcap, id, "BAD_VALUE", "mode must be 0 or 1");
+            if (s->set_mode((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_mode failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"mode_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_mode());
+    }
+
     /* ---- list ---- */
-    /* list_r{profiles:[{n,name,ver}],active}. We read each slot's profile and
-     * emit only its index, name, and version (NOT the base64 blob) so the
-     * librarian can render names without decoding 8 full profiles.
+    /* list_r{mode,active,profiles:[{n,bank,name,ver}]}. We read each slot's
+     * profile and emit only its GLOBAL index, bank, name, and version (NOT the
+     * base64 blob) so the librarian can render both banks' names without decoding
+     * 16 full profiles. §0 mode-scoped banks: ALL profiles (0..NUM_PROFILES-1) are
+     * returned, each tagged with bank = n / NUM_BANK_PROFILES (0=MIDI, 1=Keyboard),
+     * plus the current `mode` and the within-mode `active` at the top so the web
+     * shows both banks together and highlights the active one.
      *
-     * Budget: the worst case is profiles 0..7 each with a 16-char name and a
-     * 3-digit version. Per entry "{\"n\":N,\"name\":\"<<=16>>\",\"ver\":VVV}"
-     * is at most 9 + 16 + 9 = 34 bytes, plus a comma = 35; 8 entries = 280...
-     * which would NOT fit 256. Names are user/JSON ASCII (no '"' or '\\' per
-     * the codec), so 16 chars is the true cap, but realistic profile names are
-     * short. The emit() path is snprintf-bounded: if the array ever overruns
-     * outcap, proto_handle returns -1 and the caller reports OVERFLOW rather
-     * than truncating. version is a single byte (0..255 -> <=3 digits). */
+     * Budget (WORST case — must NOT under-count the sanitizer's expansion):
+     *   name[16] is user-supplied and NOT constrained by profile_validate, so a
+     *   host can write all 16 bytes as '"' (or '\\'); the sanitizer below prepends
+     *   a backslash for EACH, so name[16] emits up to 32 wire bytes, not 16.
+     *   Per entry "{\"n\":NN,\"bank\":B,\"name\":\"<<=32>>\",\"ver\":VVV}" + comma:
+     *     fixed structural chars (incl. comma, n=2, bank=1, ver=3 digits) = 38
+     *     + escaped name (16 -> 32)                                       = 32
+     *     = 70 bytes / entry.  16 entries = 1120.
+     *   Header "{\"t\":\"list_r\",\"i\":<<=10>>,\"mode\":M,\"active\":A,\"profiles\":["
+     *   is <= 61 (i is host-supplied %u, up to 10 digits); footer "]}" = 2.
+     *   Worst total = 1120 + 61 + 2 = 1183 (+ NUL = 1184). config_cdc.c sizes
+     *   g_resp to 1280 (>= 1184) to hold this. The prior 768 UNDER-budgeted (it
+     *   counted name[16] as 16 wire bytes), so the worst-case list returned -1 and
+     *   the host could not enumerate profiles — exactly the under-budgeting class
+     *   the earlier "the plan's original 256 underbudgeted the list verb" warned of.
+     *   The emit() path is snprintf-bounded: if the array ever overruns outcap,
+     *   proto_handle returns -1 and the caller reports OVERFLOW rather than
+     *   truncating (no corruption). version is a single byte (0..255 -> <=3
+     *   digits). */
     if (strcmp(verb, "list") == 0) {
         int off = emit(out, outcap,
-            "{\"t\":\"list_r\",\"i\":%u,\"active\":%u,\"profiles\":[",
-            id, (unsigned)s->get_active());
+            "{\"t\":\"list_r\",\"i\":%u,\"mode\":%u,\"active\":%u,\"profiles\":[",
+            id, (unsigned)s->get_mode(), (unsigned)s->get_active());
         if (off < 0)
             return -1;
         for (unsigned n = 0; n < s->profiles; n++) {
@@ -306,9 +341,10 @@ int proto_handle(const struct proto_store *s, const char *line,
                 name[j++] = (char)c;
             }
             name[j] = '\0';
+            unsigned bank = n / NUM_BANK_PROFILES;   /* 0..7 -> 0, 8..15 -> 1 */
             int w = emit(out + off, outcap - off,
-                "%s{\"n\":%u,\"name\":\"%s\",\"ver\":%u}",
-                n ? "," : "", n, name, (unsigned)p.version);
+                "%s{\"n\":%u,\"bank\":%u,\"name\":\"%s\",\"ver\":%u}",
+                n ? "," : "", n, bank, name, (unsigned)p.version);
             if (w < 0)
                 return -1;
             off += w;

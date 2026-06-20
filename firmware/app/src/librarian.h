@@ -11,18 +11,23 @@
  * only read at boot and written on an explicit edit/switch.
  *
  * NVS layout:
- *   id 1            -> header { uint8_t version, active, _rsvd[2]; }
- *   id 0x100 + n    -> struct profile  (n in 0..NUM_PROFILES-1)
+ *   id 1            -> header { uint8_t version, mode, active[NUM_MODES]; }
+ *   id 0x100 + g    -> struct profile  (g in 0..NUM_PROFILES-1; bank 0 = MIDI
+ *                      [0..7], bank 1 = Keyboard [8..15])
  */
-#define NUM_PROFILES 8
+/* NUM_PROFILES / NUM_BANK_PROFILES / NUM_MODES are defined in profile.h (the §0
+ * mode-scoped-bank constants), pulled in via the include above. */
 
 int  librarian_init(void);                                 /* mount NVS, first-boot defaults, load active */
-const struct profile *librarian_active(void);              /* RAM hot copy (fast path, never hits flash) */
-uint8_t librarian_active_index(void);
-int  librarian_read(uint8_t n, struct profile *out);       /* 0 ok, <0 error */
-int  librarian_write(uint8_t n, const struct profile *in); /* 0 ok; persists; refreshes RAM if n is active */
-int  librarian_set_active(uint8_t n);                      /* 0 ok; persists index + reloads RAM */
-int  librarian_reset(uint8_t n);                           /* 0 ok; reseed slot n to factory default, persist, refresh RAM if active */
-int  librarian_reset_all(void);                            /* 0 ok; reseed all slots to factory default, persist, refresh RAM */
+const struct profile *librarian_active(void);              /* active profile of the CURRENT mode (RAM hot copy,
+                                                            * = slot lib_bank_global(mode, active[mode]); never hits flash) */
+uint8_t librarian_active_index(void);                      /* WITHIN-bank index (0..7) of the current mode */
+int  librarian_read(uint8_t g, struct profile *out);       /* g = GLOBAL slot 0..15; 0 ok, <0 error */
+int  librarian_write(uint8_t g, const struct profile *in); /* g = GLOBAL slot 0..15; 0 ok; persists; refreshes RAM if g is the active slot */
+int  librarian_set_active(uint8_t within);                 /* set the CURRENT mode's active (within 0..7); persists all actives + mode, reloads RAM */
+int  librarian_reset(uint8_t g);                           /* g = GLOBAL slot 0..15; reseed to factory default, persist, refresh RAM if active */
+int  librarian_reset_all(void);                            /* 0 ok; reseed all 16 slots to factory default, persist, refresh RAM */
+uint8_t librarian_mode(void);                              /* device mode: 0=MIDI (default), 1=KEYBOARD, 2..3 reserved personalities (mode.h) */
+int  librarian_set_mode(uint8_t m);                        /* switch bank -> reload that mode's remembered active profile; persists raw mode (0..LIB_HEADER_MODE_MAX); -EINVAL if out of range */
 
 #endif

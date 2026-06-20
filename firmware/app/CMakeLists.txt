@@ -11,4 +11,15 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # protocol.c (the host-tested JSON-lines config protocol). protocol.c's
 # read/write paths exercise profile.c's b64 codec, pulling profile_to_b64/
 # profile_from_b64 into the final image (they were gc-eliminated in M5.2).
-target_sources(app PRIVATE src/main.c src/control_logic.c src/controls.c src/buttons.c src/mapping.c src/midi_out.c src/usbdev.c src/librarian.c src/profile.c src/protocol.c src/config_cdc.c src/config_cdc_fmt.c src/gesture.c)
+# Phase 2b: mode.c is the pure device-mode decision unit (mode_decide / the LED
+# pattern table). main.c's button-scan now calls mode_decide() to drive the
+# on-device •• + FWD/RWD mode toggle (and the config_cdc unsolicited mode push),
+# so it must be in the image — it was host-test-only until this wiring landed.
+# Indicator-language rework: dial.c is the pure count-dial FSM + the count->track-
+# row LED mapping (dial_track_pattern). main.c's •• handler now feeds dial_step()
+# and renders dial_track_pattern() every tick, so it must be in the image — it was
+# host-test-only (firmware/test) until this wiring landed.
+# 0.9.1 LED redesign: side_led.c is the pure SIDE-row render (side_led_pattern =
+# layer rest + temporary mode-flash). main.c's per-tick side-row block calls it
+# every loop, so it must be in the image — it was host-test-only until this wiring.
+target_sources(app PRIVATE src/main.c src/control_logic.c src/controls.c src/buttons.c src/mapping.c src/midi_out.c src/usbdev.c src/usb_midi1.c src/usb_hid.c src/midi1_codec.c src/librarian.c src/profile.c src/protocol.c src/config_cdc.c src/config_cdc_fmt.c src/gesture.c src/mode.c src/dial.c src/side_led.c)

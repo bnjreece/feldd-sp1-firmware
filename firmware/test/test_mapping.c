@@ -9,7 +9,10 @@ static void sink(const struct midi_msg *m, void *ctx){ (void)ctx; cap[ncap++]=*m
 static struct profile P(void){
     struct profile p; memset(&p,0,sizeof p);
     p.version=PROFILE_VERSION; p.channel=2;
-    for(int i=0;i<NUM_FADERS;i++){ p.fader[i]=(struct fader_map){.cc=(uint8_t)(7+i),.min=0,.max=127,.curve=CURVE_LINEAR,.invert=0}; p.shift.fader_cc[i]=(uint8_t)(20+i);}
+    /* v2: per-control channels default to the profile channel (2) so these
+     * fixtures exercise the uniform case; t_*_per_channel covers the split. */
+    for(int i=0;i<NUM_FADERS;i++){ p.fader[i]=(struct fader_map){.cc=(uint8_t)(7+i),.min=0,.max=127,.curve=CURVE_LINEAR,.invert=0}; p.shift.fader_cc[i]=(uint8_t)(20+i); p.fader_channel[i]=2;}
+    for(int i=0;i<NUM_BUTTONS;i++) p.button_channel[i]=2;
     p.button[0]=(struct button_map){.type=BTN_NOTE,.value=60};
     p.button[1]=(struct button_map){.type=BTN_CC_MOMENTARY,.value=64};
     return p;
@@ -71,7 +74,20 @@ static void t_button_toggle_engine_silent(void){
     map_button(&p,2,0,0,sink,0);
     assert(ncap==0);
 }
+static void t_fader_per_channel(void){
+    /* v2: each fader rides its OWN channel, not the profile-wide one (mixer use). */
+    struct profile p=P(); p.fader_channel[0]=0; p.fader_channel[1]=5; ncap=0;
+    map_fader(&p,0,100,0,sink,0); assert(cap[0].status==(0xB0|0));
+    ncap=0; map_fader(&p,1,100,0,sink,0); assert(cap[0].status==(0xB0|5));
+}
+static void t_button_per_channel(void){
+    /* v2: each button rides its OWN channel. */
+    struct profile p=P(); p.button_channel[0]=3; p.button_channel[1]=9; ncap=0;
+    map_button(&p,0,1,0,sink,0); assert(cap[0].status==(0x90|3));   /* note on ch3 */
+    ncap=0; map_button(&p,1,1,0,sink,0); assert(cap[0].status==(0xB0|9)); /* CC ch9 */
+}
 int main(void){ t_fader_cc();t_fader_invert();t_fader_range();t_fader_shift_bank();
     t_button_note();t_button_cc_momentary();t_button_none_silent();
     t_fader_curve_log();t_fader_curve_exp();t_button_toggle_engine_silent();
+    t_fader_per_channel();t_button_per_channel();
     printf("all mapping tests passed\n"); return 0; }

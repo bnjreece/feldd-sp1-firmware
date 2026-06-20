@@ -41,10 +41,13 @@ static const struct proto_store g_store = {
     .reset      = librarian_reset,
     .reset_all  = librarian_reset_all,
     .get_active = librarian_active_index,
-    .profiles   = NUM_PROFILES,
+    .get_mode   = librarian_mode,
+    .set_mode   = librarian_set_mode,
+    .profiles      = NUM_PROFILES,        /* GLOBAL slots 0..15 (read/write/reset) */
+    .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.4.0",
+    .fw         = "0.9.2",
     .uid        = g_uid,
 };
 
@@ -58,8 +61,13 @@ static int     g_depth;    /* JSON brace nesting depth of the current frame */
 static bool    g_instr;    /* currently inside a "..." string literal */
 static bool    g_escape;   /* previous char was a backslash inside a string */
 
-/* Response scratch (largest response is list_r ~405B; 512 is safe). */
-static char    g_resp[512];
+/* Response scratch. The largest response is the 16-entry banked list_r. Its
+ * WORST case is 1184 bytes: each name[16] can be all '"'/'\\', which the
+ * sanitizer escapes to 32 wire bytes (NOT 16), so 16 entries reach 1120, plus a
+ * <=61-byte header and "]}" footer (see the budget comment on the `list` verb in
+ * protocol.c). 1280 (>= 1184) holds it; the prior 768 OVERFLOWED on legal input
+ * (proto_handle returned -1, blocking enumeration). */
+static char    g_resp[1280];
 
 static bool    g_mon;
 
@@ -224,6 +232,18 @@ void config_cdc_monitor_active(int n)
 {
     char buf[48];
     int len = config_cdc_fmt_active(buf, (int)sizeof buf, n);
+    if (len > 0) {
+        cdc_write(buf);
+    }
+}
+
+/* Unsolicited mode-changed push (on-device •• + FWD/RWD flip). Sent independent
+ * of the g_mon gate so a connected host's mode toggle reflects on-device flips,
+ * mirroring config_cdc_monitor_active. DTR-gated poll_out. */
+void config_cdc_monitor_mode(int v)
+{
+    char buf[48];
+    int len = config_cdc_fmt_mode(buf, (int)sizeof buf, v);
     if (len > 0) {
         cdc_write(buf);
     }

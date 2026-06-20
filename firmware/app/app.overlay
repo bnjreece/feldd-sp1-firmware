@@ -14,24 +14,10 @@
     };
     chosen { zephyr,console = &cdc_acm_uart0; };
 
-    /* M4.1 USB-MIDI 2.0 endpoint. The zephyr,midi2-device node sits at the DT
-     * root (NOT under the &usbd bus); the usbd_midi2 class instance it defines
-     * is auto-registered into the composite by usbd_register_all_classes
-     * alongside the CDC ACM node below. One MIDI2 Group Terminal Block at group
-     * 0 (reg = <0 1>), default MIDI-1 protocol. Group 0 matches the UMP the
-     * midi_out USB sink builds. */
-    usb_midi: usb_midi {
-        compatible = "zephyr,midi2-device";
-        status = "okay";
-        #address-cells = <1>;
-        #size-cells = <1>;
-        label = "SP-1 Control Surface";
-        midi_in_out@0 {
-            reg = <0 1>;
-            protocol = "midi1-up-to-64b";
-            label = "SP-1 MIDI";
-        };
-    };
+    /* The USB-MIDI surface is now the hand-rolled USB-MIDI 1.0 class
+     * (usb_midi1.c), which needs no DT node — it is registered via
+     * USBD_DEFINE_CLASS. The old zephyr,midi2-device node was removed along with
+     * the usbd_midi2 function. */
 };
 
 /* M3.2 TRS MIDI out (31250 baud, TX-only) on uart1/uarte1.
@@ -88,6 +74,23 @@
 zephyr_udc0: &usbd {
     status = "okay";
     cdc_acm_uart0: cdc_acm_uart0 { compatible = "zephyr,cdc-acm-uart"; };
+
+    /* Studio phase 2a: a first-party Zephyr usbd_hid boot-keyboard function
+     * (usb_hid.c), joining the same sample_usbd composite as the CDC console +
+     * USB-MIDI 1.0. Mirrors samples/subsys/usb/hid-keyboard's hid_dev_0 node: a
+     * standard 8-byte boot-keyboard input report (modifiers, reserved, 6 keycodes),
+     * polled at 1 ms. The driver (usbd_hid.c, compat zephyr,hid-device) builds the
+     * HID interface + a single interrupt-IN endpoint and self-registers into the
+     * composite via usbd_register_all_classes (it is NOT on the helper's blocklist,
+     * which only excludes dfu_dfu). Presence of this node auto-selects
+     * CONFIG_USBD_HID_SUPPORT (default y when DT_HAS_ZEPHYR_HID_DEVICE_ENABLED). */
+    hid_dev_0: hid_dev_0 {
+        compatible = "zephyr,hid-device";
+        label = "FELDD-HID";
+        protocol-code = "keyboard";
+        in-report-size = <8>;
+        in-polling-period-us = <1000>;
+    };
 };
 
 /* M5.2 NVS storage partition for the profile librarian.
