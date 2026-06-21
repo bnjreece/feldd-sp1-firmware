@@ -204,3 +204,21 @@ void usb_hid_send_key(uint8_t modifiers, uint8_t keycode)
 	ring_buf_put(&hid_ring, release, KB_REPORT_COUNT);
 	k_work_submit(&hid_tx_work);
 }
+
+void usb_hid_send_report(const uint8_t *report)
+{
+	if (!hid_enabled || report == NULL) {
+		return;   /* no host bound the interface — drop, never block */
+	}
+
+	/* One full report (no auto-release): the report itself carries the held
+	 * key set, so a stuck key only happens if the caller stops sending updated
+	 * reports — main.c always sends a fresh report (and an all-zero on the last
+	 * release), so the held state is fully caller-owned. Drop if the ring can't
+	 * take a whole report rather than send a partial one. */
+	if (ring_buf_space_get(&hid_ring) < KB_REPORT_COUNT) {
+		return;
+	}
+	ring_buf_put(&hid_ring, report, KB_REPORT_COUNT);
+	k_work_submit(&hid_tx_work);
+}

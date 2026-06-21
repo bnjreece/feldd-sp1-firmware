@@ -86,12 +86,45 @@ static void t_fmt_mode_basic(void)
     assert(config_cdc_fmt_mode(tiny, (int)sizeof tiny, 1) == -1);
 }
 
+/* 5. inbound RX line-cap budget: a v5 write frame is ~286 chars (240-char base64
+ * + the JSON wrapper). The inbound RX buffer must hold it or config_cdc drops the
+ * frame and v5 writes silently fail (feldd-multi-layer-v5 spec open item 1). Pin
+ * the budget so a future struct growth that overflows the line is caught in CI,
+ * not on a bench flash. */
+static void t_line_cap_fits_v5_write(void)
+{
+    int v5_b64 = ((180 + 2) / 3) * 4;                /* 240 */
+    int frame  = (int)sizeof("{\"t\":\"write\",\"i\":4294967295,\"n\":15,\"data\":\"\"}") - 1
+                 + v5_b64;                            /* wrapper + payload */
+    assert(CONFIG_CDC_LINE_CAP >= frame + 1);        /* +1 for the trailing '\0' */
+    /* the old 256-byte cap was too small for the v5 frame (regression guard) */
+    assert(frame + 1 > 256);
+}
+
+/* 6. inbound RX line-cap budget for v6: a v6 profile is 294 bytes -> 392-char
+ * base64, so a `write` frame is ~437 chars (392 b64 + the JSON wrapper) + the
+ * trailing '\0'. That overflows the old 320-byte cap (a v6 write would be silently
+ * dropped and the bench flash would "succeed" yet store nothing). Pin the new
+ * budget here so a future struct growth that overflows the line is caught in CI. */
+static void t_line_cap_fits_v6_write(void)
+{
+    int v6_b64 = ((294 + 2) / 3) * 4;                /* 392 */
+    int frame  = (int)sizeof("{\"t\":\"write\",\"i\":4294967295,\"n\":15,\"data\":\"\"}") - 1
+                 + v6_b64;                            /* wrapper + payload */
+    assert(CONFIG_CDC_LINE_CAP >= frame + 1);        /* +1 for the trailing '\0' */
+    /* regression guard: the old 320-byte cap was too small for the v6 frame, so a
+     * bump was REQUIRED. (v5's 240-char frame fit in 320; v6's 392-char does not.) */
+    assert(frame + 1 > 320);
+}
+
 int main(void)
 {
     t_fmt_active_basic();
     t_fmt_active_indices();
     t_fmt_active_overflow();
     t_fmt_mode_basic();
+    t_line_cap_fits_v5_write();
+    t_line_cap_fits_v6_write();
     printf("all config_cdc tests passed\n");
     return 0;
 }

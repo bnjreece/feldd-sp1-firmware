@@ -47,14 +47,15 @@ static const struct proto_store g_store = {
     .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.9.2",
+    .fw         = "0.14.0-beta",
     .uid        = g_uid,
 };
 
-/* Frame assembly. Cap at 256; an overrun is dropped and the parser resyncs.
- * Requests are framed by the balanced top-level '}', string-aware so braces
- * inside "..." values are not miscounted. */
-#define LINE_CAP 256
+/* Frame assembly. Cap from config_cdc.h (320 for v5); an overrun is dropped and
+ * the parser resyncs. Requests are framed by the balanced top-level '}', string-
+ * aware so braces inside "..." values are not miscounted. A v5 `write` frame is
+ * ~287 bytes (240-char base64 + JSON wrapper), so the old 256 cap dropped it. */
+#define LINE_CAP CONFIG_CDC_LINE_CAP
 static char    g_line[LINE_CAP];
 static int     g_len;
 static int     g_depth;    /* JSON brace nesting depth of the current frame */
@@ -78,6 +79,9 @@ static bool dtr_asserted(void)
     (void)uart_line_ctrl_get(cdc, UART_LINE_CTRL_DTR, &dtr);
     return dtr != 0;
 }
+
+/* v7: public DTR state for the main loop's chord-flush-on-disconnect edge. */
+int config_cdc_dtr(void){ return dtr_asserted() ? 1 : 0; }
 
 /* Send a NUL-terminated string to the host. poll_out stores each byte and the
  * CDC workqueue does the USB send; discards (never blocks) if the fifo is full. */

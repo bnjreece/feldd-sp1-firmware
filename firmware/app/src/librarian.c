@@ -58,6 +58,38 @@ BUILD_ASSERT(FIXED_PARTITION_OFFSET(storage_partition) +
                  FIXED_PARTITION_SIZE(storage_partition) <= SP1_RESERVED_PAGE,
              "NVS storage_partition must end at/below the reserved page (0xFF000)");
 
+/* v8 NVS BUDGET GUARD (spec §3). The storage_partition is 0x4000 (16 KB) = 4 pages
+ * of 4 KB. NVS reserves ONE page for garbage collection, so usable = 3 pages =
+ * 12,288 B. Each persisted profile costs sizeof(struct profile) + an 8-byte NVS
+ * Allocation Table Entry (ATE); the header costs sizeof(struct lib_header) + ATE. The
+ * whole working set must fit with comfortable GC headroom (the naive full-12B-chord-
+ * per-button design was ~8% free and was REJECTED; chord6 lands at ~30% free).
+ *
+ * usable      = (4 pages - 1 GC) * 4096                         = 12288
+ * occupancy   = NUM_PROFILES * (sizeof(profile) + 8 ATE)
+ *             + (sizeof(lib_header) + 8 ATE)
+ *             = 16 * (528 + 8) + (4 + 8) = 8588
+ * headroom    = 12288 - 8588 = 3700 (~30.1% free). SAFE.
+ *
+ * Derived from FIXED_PARTITION_SIZE + the real page size, NOT hardcoded, so a flash-
+ * map change re-checks this. NVS_ATE = 8 is the nRF52 NVS entry footer size. */
+#define SP1_NVS_PAGE_SIZE   4096u
+#define SP1_NVS_GC_PAGES    1u
+#define SP1_NVS_ATE         8u
+#define SP1_NVS_USABLE \
+    (((FIXED_PARTITION_SIZE(storage_partition) / SP1_NVS_PAGE_SIZE) - SP1_NVS_GC_PAGES) \
+     * SP1_NVS_PAGE_SIZE)
+#define SP1_NVS_OCCUPANCY \
+    ((unsigned)NUM_PROFILES * (sizeof(struct profile) + SP1_NVS_ATE) \
+     + (sizeof(struct lib_header) + SP1_NVS_ATE))
+BUILD_ASSERT(SP1_NVS_USABLE == 12288u,
+             "NVS usable budget must be 12288 B (16 KB partition, 4 pages, 1 GC reserve)");
+BUILD_ASSERT(SP1_NVS_OCCUPANCY <= SP1_NVS_USABLE,
+             "16 v8 profiles + header must fit the usable NVS budget");
+/* headroom >= ~25% of usable: keep a real GC margin (chord6 lands at ~30%). */
+BUILD_ASSERT((SP1_NVS_USABLE - SP1_NVS_OCCUPANCY) * 4u >= SP1_NVS_USABLE,
+             "v8 NVS headroom must stay >= 25% of usable (GC safety)");
+
 /* NVS entry ids. Header is a low fixed id; profiles live in a 0x100+n block so
  * they never collide with the header or any future small bookkeeping ids. */
 #define LIB_ID_HEADER        1u
@@ -72,38 +104,113 @@ static struct profile active_profile;
 static uint8_t        active_within[NUM_MODES];  /* per-mode WITHIN-bank active (0..7 each) */
 static uint8_t        active_mode;               /* current device mode (fast path) */
 
-/* Build slot `slot`'s default profile into *p. Sequential CC layout so the 8
- * slots give a predictable 64-fader control surface with no cross-slot clashes:
- * faders are CC 8*slot+1..+4 on the base layer and +5..+8 on shift (slot 0 ->
- * CC 1-8, slot 7 -> CC 57-64). Buttons are momentary CC 102-110 (a fixed band
- * above the faders). channel 0; faders linear 0..127; name "Default". */
+/* Build slot `slot`'s default profile into *p.
+ *
+ * v6 fader-CC layout — one CLEAN GLOBAL RUNNING COUNTER so every default fader
+ * slot gets a UNIQUE CC across the whole 128-fader surface, zero overlap. For
+ * profile P (within-bank index 0..7), layer L (0..3: L1/L2/L3/L4), fader F (0..3):
+ *
+ *     fader_cc = P*16 + L*4 + F      (P*(NUM_LAYERS*NUM_FADERS) + L*NUM_FADERS + F)
+ *
+ * That runs 0..127 across all 8*4*4 = 128 fader slots, each value unique, max 127
+ * (P7L3F3 = 127). 0-indexed: the very first default fader is CC0 (intentional).
+ * This replaced the old "4 base + 4 shift" +8/profile scheme, which advanced the
+ * base by +8/profile while every profile now fills 16 faders (4 layers x 4), so
+ * P0 = CC 1-16 and P1 restarted at CC 9 — a heavy redundant overlap (Peter).
+ *
+ * Buttons (0.12.1 "stable, non-conflicting default"): split the default across
+ * THREE MIDI channels so a fader and a button can NEVER collide on the same
+ * (channel, CC) pair — the conflict Peter hit (a CC button defaulting onto a
+ * fader's CC on ch1 clobbered the fader; e.g. profile 0 L1 button[0] value 0 ==
+ * fader[0] CC 0). Faders own MIDI ch1 (channel 0); the 4 FRONT track buttons own
+ * ch2 (channel 1); the 4 SIDE buttons own ch3 (channel 2). PLAY (idx 0) is the
+ * gesture button and never emits, so it stays on the profile channel. button
+ * index map (buttons.h): 0=Play, 1..4=Track1..4 (front), 5..8=Vol+/Vol-/FWD/RWD
+ * (side). Each button GROUP gets the SAME clean within*16 + L*4 + slot 0..127
+ * spread the faders use, so ch2 (front) and ch3 (side) each cover CC 0..127 with
+ * no overlap — three full unique surfaces (128 faders + 128 front + 128 side).
+ * See default_btn_channel()/default_btn_value() below.
+ *
+ * channel 0; faders linear 0..127; name "Default". Keyboard layers
+ * (button_key/mod on every layer) default unbound (0, via the memset). */
+
+/* Default per-button MIDI channel: FRONT track buttons (idx 1..4) -> MIDI ch2
+ * (channel 1), SIDE buttons (idx 5..8) -> MIDI ch3 (channel 2), PLAY (idx 0)
+ * stays on the profile channel (ch1 / 0). This is what keeps faders (ch1) and
+ * buttons from ever sharing a (channel, CC). */
+static uint8_t default_btn_channel(int i)
+{
+    if (i >= 1 && i <= 4) return 1;   /* front track buttons -> MIDI ch2 */
+    if (i >= 5 && i <= 8) return 2;   /* side buttons        -> MIDI ch3 */
+    return 0;                          /* PLAY                -> profile channel */
+}
+
+/* Default per-button CC value for layer L (0..3) of within-bank profile `within`
+ * (0..7). Each GROUP (front idx 1..4, side idx 5..8) gets its own 0..3 slot and
+ * the SAME within*16 + L*4 + slot spread the faders use, so on ch2 the 128 front
+ * buttons and on ch3 the 128 side buttons each cover CC 0..127 uniquely. PLAY
+ * (idx 0) emits nothing -> value 0. */
+static uint8_t default_btn_value(int within, int L, int i)
+{
+    if (i >= 1 && i <= 4) return (uint8_t)(within * 16 + L * 4 + (i - 1)); /* front slot 0..3 */
+    if (i >= 5 && i <= 8) return (uint8_t)(within * 16 + L * 4 + (i - 5)); /* side  slot 0..3 */
+    return 0;                                                              /* PLAY */
+}
+
 static void make_default(int slot, struct profile *p)
 {
     memset(p, 0, sizeof(*p));
     p->version = PROFILE_VERSION;
     p->channel = 0;
 
-    /* Per-BANK CC numbering (within-bank index): each mode's 8 slots span CC
-     * 1..64, so the 16-slot store never overflows 127. The old global-index form
-     * (slot * 8 + 1) put slot 15's shift CC at 128 = invalid MIDI CC. Both banks
-     * reuse 1..64; only one profile is active at a time, so reuse is harmless. */
+    /* Within-bank index 0..7 (the •• cycle). Both banks reuse the same 0..127
+     * counter slice; only one profile is active at a time, so reuse is harmless. */
     int within = slot % NUM_BANK_PROFILES;
-    int base = within * (2 * NUM_FADERS) + 1;   /* within 0 -> CC 1, within 7 -> CC 57 */
+    int fbase = within * (NUM_LAYERS * NUM_FADERS);   /* P*16: within 0 -> 0, within 7 -> 112 */
     for (int i = 0; i < NUM_FADERS; i++) {
-        p->fader[i].cc     = (uint8_t)(base + i);                /* base layer CC */
+        p->fader[i].cc     = (uint8_t)(fbase + 0 * NUM_FADERS + i);  /* L1: P*16 + 0..3   */
         p->fader[i].min    = 0;
         p->fader[i].max    = 127;
         p->fader[i].curve  = CURVE_LINEAR;
         p->fader[i].invert = 0;
-        p->shift.fader_cc[i] = (uint8_t)(base + NUM_FADERS + i); /* shift = the next 4 */
+        p->shift.fader_cc[i]    = (uint8_t)(fbase + 1 * NUM_FADERS + i); /* L2: P*16 + 4..7  */
+        p->layer[0].fader_cc[i] = (uint8_t)(fbase + 2 * NUM_FADERS + i); /* L3: P*16 + 8..11 */
+        p->layer[1].fader_cc[i] = (uint8_t)(fbase + 3 * NUM_FADERS + i); /* L4: P*16 + 12..15 */
         p->fader_channel[i]  = p->channel;    /* v2: default to the profile channel */
     }
     for (int i = 0; i < NUM_BUTTONS; i++) {
         p->button[i].type    = BTN_CC_MOMENTARY;
-        p->button[i].value   = (uint8_t)(102 + i);     /* fixed band above the faders */
-        p->shift.button_value[i] = (uint8_t)(102 + i);
-        p->button_channel[i] = p->channel;    /* v2: default to the profile channel */
+        p->button[i].value          = default_btn_value(within, 0, i); /* L1 */
+        p->shift.button_value[i]    = default_btn_value(within, 1, i); /* L2 */
+        p->layer[0].button_value[i] = default_btn_value(within, 2, i); /* L3 */
+        p->layer[1].button_value[i] = default_btn_value(within, 3, i); /* L4 */
+        p->button_channel[i] = default_btn_channel(i); /* faders ch1 / front ch2 / side ch3 */
     }
+
+    /* v6: seed each appended ext bank (L2/L3/L4) to INHERIT L1's per-fader
+     * min/max/curve/invert, L1's button type, and L1's per-control channels. v5
+     * shared these from L1, so inheriting them keeps the v5 "every layer looks
+     * like L1" behavior and makes every layer a complete, sensible default (faders
+     * with a real 0..127 range, not min=max=0). Only the per-layer fader CCs +
+     * button values + keyboard binds (seeded above / left unbound) differ. */
+    for (int L = 0; L < NUM_LAYERS - 1; L++) {       /* ext[0]=L2, [1]=L3, [2]=L4 */
+        for (int i = 0; i < NUM_FADERS; i++) {
+            p->ext[L].fader_min[i]     = p->fader[i].min;
+            p->ext[L].fader_max[i]     = p->fader[i].max;
+            p->ext[L].fader_curve[i]   = p->fader[i].curve;
+            p->ext[L].fader_invert[i]  = p->fader[i].invert;
+            p->ext[L].fader_channel[i] = p->fader_channel[i];
+        }
+        for (int i = 0; i < NUM_BUTTONS; i++) {
+            p->ext[L].button_type[i]    = p->button[i].type;
+            p->ext[L].button_channel[i] = p->button_channel[i];
+        }
+    }
+
+    /* v8: no chords seeded by default (every chord6 slot all-zero, every fader_role =
+     * cc - all from the memset above). Chord velocity defaults to 100 (softer than a
+     * plain note's 127, user-configurable without a version bump). */
+    p->chord_flags[0] = 100;
 
     /* Keyboard profile 1 (the first slot of the Keyboard bank) ships with a
      * starter keymap so flipping into Keyboard mode is never blank: the "Editor

@@ -2,26 +2,15 @@
 
 void gesture_init(gesture_t *g) {
     g->layer = 0;
-    g->armed = 0;
     g->play_was_down = 0;
     g->rocker_seen = 0;
     g->peek_pending = 0;
-    g->since_press = 0;
     g->hold_ticks = 0;
 }
 
-int gesture_step(gesture_t *g, int play_press, int play_held,
+int gesture_step(gesture_t *g, int play_held,
                  int rocker_consumed_this_hold) {
-    /* §3 step 1: advance the inter-tap timer (saturate so it can't wrap) and
-     * expire a stale double-tap arm once the window passes with no second tap. */
-    if (g->since_press < 0xFFFF) {
-        g->since_press++;
-    }
-    if (g->armed && g->since_press > DOUBLE_TAP_WINDOW_SCANS) {
-        g->armed = 0;
-    }
-
-    /* §3 step 2: track the hold. rise/fall edges off play_was_down. */
+    /* step 1: track the hold. rise/fall edges off play_was_down. */
     int held = play_held ? 1 : 0;
     int rose = held && !g->play_was_down;
     int fell = !held && g->play_was_down;
@@ -39,39 +28,24 @@ int gesture_step(gesture_t *g, int play_press, int play_held,
         g->hold_ticks = 0;
     }
 
-    /* a FWD/RWD consumed mid-hold is a MODE switch, not a peek: latch rocker_seen,
-     * clear the double-tap arm, and void any pending peek (folds in gesture_disarm). */
+    /* a FWD/RWD consumed mid-hold is a MODE switch, not a peek: latch rocker_seen
+     * and void any pending peek (folds in gesture_disarm). */
     if (rocker_consumed_this_hold) {
         g->rocker_seen = 1;
-        g->armed = 0;
         g->peek_pending = 0;
     }
 
     g->play_was_down = held;
 
-    /* §3 step 3: double-tap -> LAYER_STEP on the 2nd press inside the window. */
-    if (play_press) {
-        if (g->armed && g->since_press <= DOUBLE_TAP_WINDOW_SCANS) {
-            /* second tap inside the window -> step the layer */
-            g->layer = (uint8_t)((g->layer + 1) % GESTURE_LAYER_COUNT);
-            g->armed = 0;
-            g->hold_ticks = 0;     /* a tap, not a hold: don't let it arm a peek */
-            g->since_press = 0;
-            return GESTURE_LAYER_STEP;
-        }
-        /* first tap (or too-late tap) -> arm and wait for a possible second */
-        g->armed = 1;
-        g->since_press = 0;
-    }
-
-    /* §3 step 4: ARM a peek (arm only, do NOT fire yet) once a clean hold (no
-     * rocker, no pending double-tap arm) has persisted exactly PEEK_HOLD_SCANS. */
-    if (play_held && !g->rocker_seen && !g->armed &&
+    /* step 2: ARM a peek (arm only, do NOT fire yet) once a clean hold (no rocker)
+     * has persisted exactly PEEK_HOLD_SCANS. The PLAY layer-dial taps (release in
+     * 1..40 ticks, classified in main.c) never reach this band (arms at 75). */
+    if (play_held && !g->rocker_seen &&
         g->hold_ticks == PEEK_HOLD_SCANS) {
         g->peek_pending = 1;
     }
 
-    /* §3 step 5: COMMIT the peek on RELEASE if it armed and no rocker voided it. */
+    /* step 3: COMMIT the peek on RELEASE if it armed and no rocker voided it. */
     if (fell && g->peek_pending && !g->rocker_seen) {
         g->peek_pending = 0;
         return GESTURE_PEEK_PROFILE;
@@ -84,6 +58,18 @@ int gesture_layer(const gesture_t *g) {
     return g->layer;
 }
 
+void gesture_set_layer(gesture_t *g, int layer) {
+    /* Clamp into 0..GESTURE_LAYER_COUNT-1. main.c's layer count-dial already
+     * clamps an over-tap to 4 (index 3) before calling, but guard here too so a
+     * stray value can never index past the side LED row. */
+    if (layer < 0) {
+        layer = 0;
+    } else if (layer > GESTURE_LAYER_COUNT - 1) {
+        layer = GESTURE_LAYER_COUNT - 1;
+    }
+    g->layer = (uint8_t)layer;
+}
+
 int gesture_shift(const gesture_t *g) {
     return g->layer & 1;
 }
@@ -93,11 +79,10 @@ int gesture_latched(const gesture_t *g) {
 }
 
 void gesture_disarm(gesture_t *g) {
-    /* Cancel any pending first-tap arm + pending peek WITHOUT disturbing the
-     * engaged layer. The rocker-consumed path inside gesture_step already does
-     * this inline; this thin wrapper keeps existing call sites + the host test
-     * working. Clear armed + since_press + peek_pending, preserve layer. */
-    g->armed = 0;
-    g->since_press = 0;
+    /* Cancel any pending peek WITHOUT disturbing the engaged layer. The
+     * rocker-consumed path inside gesture_step already does this inline; this
+     * thin wrapper keeps existing call sites + the host test working. (The old
+     * double-tap first-tap arm is gone, so this only clears peek_pending now;
+     * the engaged layer, owned by gesture_set_layer, is preserved.) */
     g->peek_pending = 0;
 }

@@ -47,11 +47,16 @@ int midi_out_init(void)
     return 0;
 }
 
-/* TRS sink: raw status/data bytes out uart1 TXD. */
+/* TRS sink: raw status/data bytes out uart1 TXD. Respect m->len so a 1-byte
+ * system real-time message (Start 0xFA / Stop 0xFC / Continue 0xFB, len 1) emits
+ * ONLY its status byte — writing a spurious d1/d2 after it would inject a stray
+ * data byte into the stream and corrupt the next message on the wire. */
 static void trs_send(const struct midi_msg *m)
 {
     uart_poll_out(trs, m->status);
-    uart_poll_out(trs, m->d1);
+    if (m->len >= 2) {
+        uart_poll_out(trs, m->d1);
+    }
     if (m->len == 3) {
         uart_poll_out(trs, m->d2);
     }

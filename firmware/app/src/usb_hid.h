@@ -26,9 +26,24 @@ int feldd_usb_hid_init(void);
  * {modifiers, 0, keycode, 0,0,0,0,0} (press) immediately followed by an all-zero
  * report (release). keycode is a USB HID usage (e.g. HID_KEY_A == 0x04).
  *
+ * This is a momentary TAP (press+release queued together). The Keyboard-mode
+ * path no longer uses it for held buttons (a tap can't auto-repeat); it remains
+ * for any one-shot keystroke that genuinely wants a single tap.
+ *
  * Non-blocking, best-effort: if the host has not made the HID interface ready
  * (enabled==false) the call is dropped silently, never blocked - same
  * graceful-drop posture as usb_midi1_send(). Safe to call from the control loop. */
 void usb_hid_send_key(uint8_t modifiers, uint8_t keycode);
+
+/* Submit ONE raw 8-byte boot-keyboard report verbatim (no auto-release). This is
+ * how a held key stays asserted: main.c builds the report from the currently-held
+ * buttons (kbd_build_report) and sends it on every keyboard-button edge — key-down
+ * on a press, the same keys still present while held, an all-zero report on the
+ * last release. The host OS then does the native typematic auto-repeat.
+ *
+ * report must point to KB_REPORT_COUNT (8) bytes: [mod][reserved][k0..k5].
+ * Same non-blocking graceful-drop posture as usb_hid_send_key: dropped silently
+ * if the host has not enabled the interface, or if the ring is full. */
+void usb_hid_send_report(const uint8_t *report);
 
 #endif

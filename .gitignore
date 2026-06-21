@@ -13,12 +13,7 @@ __pycache__/
 # OS
 .DS_Store
 
-# Compiled host-test binaries (built by firmware/test/Makefile)
-firmware/test/test_buttons
-firmware/test/test_config_cdc
-firmware/test/test_control_logic
-firmware/test/test_gesture
-firmware/test/test_mapping
-firmware/test/test_midi_out
-firmware/test/test_profile
-firmware/test/test_protocol
+# Compiled host-test binaries (built by firmware/test/Makefile): ignore the
+# extensionless test_* executables, keep the test_*.c sources tracked.
+firmware/test/test_*
+!firmware/test/test_*.c

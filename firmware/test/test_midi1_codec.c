@@ -33,18 +33,40 @@ static void test_cable_nibble_and_rejects(void) {
     // cable goes in the high nibble of byte 0
     assert(midi1_event(1, 0xB0, 1, 2, p) == 4);
     assert(p[0] == 0x1B);
-    // system real-time (0xF8 clock) -> reject (hi 0xF > 0xE)
-    assert(midi1_event(0, 0xF8, 0, 0, p) == -1);
-    // system common (0xF0 sysex start) -> reject
+    // system common (0xF0 sysex start) -> still reject (CIN 0xF is single-byte
+    // only; 0xF0..0xF7 system-common framing is unsupported for now)
     assert(midi1_event(0, 0xF0, 0, 0, p) == -1);
     // a data byte mistaken as status (0x40, hi 0x4 < 0x8) -> reject
     assert(midi1_event(0, 0x40, 0, 0, p) == -1);
+}
+
+static void test_system_realtime(void) {
+    uint8_t p[4];
+    // Start (0xFA) -> single-byte event: CIN 0xF, status in out[1], rest 0
+    assert(midi1_event(0, 0xFA, 0, 0, p) == 4);
+    assert(p[0] == 0x0F && p[1] == 0xFA && p[2] == 0 && p[3] == 0);
+    // Stop (0xFC)
+    assert(midi1_event(0, 0xFC, 0, 0, p) == 4);
+    assert(p[0] == 0x0F && p[1] == 0xFC && p[2] == 0 && p[3] == 0);
+    // Continue (0xFB)
+    assert(midi1_event(0, 0xFB, 0, 0, p) == 4);
+    assert(p[0] == 0x0F && p[1] == 0xFB && p[2] == 0 && p[3] == 0);
+    // Clock (0xF8) is also single-byte real-time
+    assert(midi1_event(0, 0xF8, 0, 0, p) == 4);
+    assert(p[0] == 0x0F && p[1] == 0xF8 && p[2] == 0 && p[3] == 0);
+    // cable nibble carries through on a real-time event too
+    assert(midi1_event(2, 0xFA, 0, 0, p) == 4);
+    assert(p[0] == 0x2F && p[1] == 0xFA);
+    // a channel-voice message stays a channel-voice event (unchanged by RT path)
+    assert(midi1_event(0, 0x90, 60, 80, p) == 4);
+    assert(p[0] == 0x09 && p[1] == 0x90 && p[2] == 60 && p[3] == 80);
 }
 
 int main(void) {
     test_channel_voice_packing();
     test_two_byte_messages_zero_d2();
     test_cable_nibble_and_rejects();
+    test_system_realtime();
     printf("all midi1_codec tests passed\n");
     return 0;
 }

@@ -193,13 +193,13 @@ static void t_read(void)
     reset_store();
     g_arr[0] = make_full_profile();
     struct proto_store s = make_store();
-    char out[512];
+    char out[1024];  /* v8 read_r carries a 704-char b64 payload */
     int rc = proto_handle(&s, "{\"t\":\"read\",\"i\":2,\"n\":0}", out, (int)sizeof out, NULL);
     assert(rc > 0);
     assert(strstr(out, "\"t\":\"read_r\""));
     assert(strstr(out, "\"n\":0"));
     assert(strstr(out, "\"i\":2"));
-    char b64[256];
+    char b64[800];
     int n = extract_str_field(out, "data", b64, (int)sizeof b64);
     assert(n > 0);
     struct profile got;
@@ -214,10 +214,10 @@ static void t_write(void)
     reset_store();
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
-    char b64[256];
+    char b64[800];
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[512];
+    char line[1024];  /* v8 write carries a 704-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":3,\"n\":2,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
@@ -250,10 +250,10 @@ static void t_write_bad_version(void)
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
     p.version = PROFILE_VERSION + 1;   /* still encodes to the right length */
-    char b64[256];
+    char b64[800];
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[512];
+    char line[1024];  /* v8 write carries a 704-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":8,\"n\":1,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
@@ -301,7 +301,7 @@ static void t_setactive_within_vs_global_bounds(void)
     struct proto_store s = make_store();
     s.profiles = 16;          /* two banks of 8 (global slots 0..15) */
     s.bank_profiles = 8;      /* the current mode's bank (within 0..7) */
-    char out[512];
+    char out[1024];           /* v8 read_r carries a 704-char b64 payload */
 
     /* within edge: n=7 is the last valid within index -> OK. */
     int rc = proto_handle(&s, "{\"t\":\"setactive\",\"i\":1,\"n\":7}", out, (int)sizeof out, NULL);
@@ -455,10 +455,10 @@ static void t_read_write_other_bank(void)
     reset_store();
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
-    char b64[256];
+    char b64[800];
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[512];
+    char line[1024];  /* v8 write carries a 704-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":3,\"n\":15,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
@@ -588,10 +588,10 @@ static void t_nvs_fail_write(void)
     g_fail_write = 1;
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
-    char b64[256];
+    char b64[800];
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[512];
+    char line[1024];  /* v8 write carries a 704-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":11,\"n\":0,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);

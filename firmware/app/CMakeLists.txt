@@ -22,4 +22,12 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # 0.9.1 LED redesign: side_led.c is the pure SIDE-row render (side_led_pattern =
 # layer rest + temporary mode-flash). main.c's per-tick side-row block calls it
 # every loop, so it must be in the image — it was host-test-only until this wiring.
-target_sources(app PRIVATE src/main.c src/control_logic.c src/controls.c src/buttons.c src/mapping.c src/midi_out.c src/usbdev.c src/usb_midi1.c src/usb_hid.c src/midi1_codec.c src/librarian.c src/profile.c src/protocol.c src/config_cdc.c src/config_cdc_fmt.c src/gesture.c src/mode.c src/dial.c src/side_led.c)
+# 0.9.3-beta stateful buttons: transport.c is the pure BTN_TRANSPORT decision
+# (transport_rt -> MIDI system real-time Start/Stop/Continue). main.c's
+# route_midi_button() now calls it on a transport-button press, so it must be in
+# the image — it was host-test-only (firmware/test) until this wiring landed.
+# Keyboard auto-repeat: kbd_hid.c is the pure Keyboard-mode HELD-key state +
+# boot-keyboard report builder. main.c now latches press/release edges into it and
+# sends usb_hid_send_report() so a held button holds its key (host OS auto-repeats),
+# so it must be in the image — host-test-only (firmware/test) until this wiring.
+target_sources(app PRIVATE src/main.c src/control_logic.c src/controls.c src/buttons.c src/mapping.c src/midi_out.c src/usbdev.c src/usb_midi1.c src/usb_hid.c src/kbd_hid.c src/midi1_codec.c src/transport.c src/librarian.c src/profile.c src/protocol.c src/config_cdc.c src/config_cdc_fmt.c src/gesture.c src/mode.c src/dial.c src/side_led.c src/chord_engine.c src/chord6.c)

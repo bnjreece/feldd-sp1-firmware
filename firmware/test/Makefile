@@ -1,14 +1,14 @@
 SRC=../app/src
 CFLAGS=-Wall -Wextra -I$(SRC)
-TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led
+TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
 test_control_logic: test_control_logic.c $(SRC)/control_logic.c $(SRC)/control_logic.h
 	$(CC) $(CFLAGS) -o $@ test_control_logic.c $(SRC)/control_logic.c
-test_mapping: test_mapping.c $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/profile.h
-	$(CC) $(CFLAGS) -o $@ test_mapping.c $(SRC)/mapping.c
-test_profile: test_profile.c $(SRC)/profile.c $(SRC)/profile.h
-	$(CC) $(CFLAGS) -o $@ test_profile.c $(SRC)/profile.c
+test_mapping: test_mapping.c $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h
+	$(CC) $(CFLAGS) -o $@ test_mapping.c $(SRC)/mapping.c $(SRC)/chord6.c
+test_profile: test_profile.c $(SRC)/profile.c $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h
+	$(CC) $(CFLAGS) -o $@ test_profile.c $(SRC)/profile.c $(SRC)/chord6.c
 test_profile_h_dep: $(SRC)/profile.h
 test_protocol: test_protocol.c $(SRC)/protocol.c $(SRC)/protocol.h $(SRC)/profile.h
 	$(CC) $(CFLAGS) -o $@ test_protocol.c $(SRC)/protocol.c $(SRC)/profile.c
@@ -32,5 +32,15 @@ test_lib_bank: test_lib_bank.c $(SRC)/lib_bank.h $(SRC)/profile.h
 	$(CC) $(CFLAGS) -o $@ test_lib_bank.c
 test_midi1_codec: test_midi1_codec.c $(SRC)/midi1_codec.c $(SRC)/midi1_codec.h
 	$(CC) $(CFLAGS) -o $@ test_midi1_codec.c $(SRC)/midi1_codec.c
+test_transport: test_transport.c $(SRC)/transport.c $(SRC)/transport.h
+	$(CC) $(CFLAGS) -o $@ test_transport.c $(SRC)/transport.c
+test_layer_bank: test_layer_bank.c $(SRC)/layer_takeover.h $(SRC)/profile.h
+	$(CC) $(CFLAGS) -o $@ test_layer_bank.c
+test_kbd_hid: test_kbd_hid.c $(SRC)/kbd_hid.c $(SRC)/kbd_hid.h
+	$(CC) $(CFLAGS) -o $@ test_kbd_hid.c $(SRC)/kbd_hid.c
+test_chord_engine: test_chord_engine.c $(SRC)/chord_engine.c $(SRC)/chord_engine.h $(SRC)/profile.h
+	$(CC) $(CFLAGS) -o $@ test_chord_engine.c $(SRC)/chord_engine.c
+test_chord6: test_chord6.c $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/profile.h
+	$(CC) $(CFLAGS) -o $@ test_chord6.c $(SRC)/chord6.c
 .PHONY: test clean
 clean: ; rm -f $(TESTS)

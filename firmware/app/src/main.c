@@ -36,17 +36,21 @@
 #include "control_logic.h"
 #include "profile.h"
 #include "mapping.h"
+#include "transport.h"
 #include "midi_out.h"
 #include "usbdev.h"
 #include "usb_hid.h"
+#include "kbd_hid.h"
 #include "librarian.h"
 #include "lib_bank.h"
 #include "config_cdc.h"
 #include "gesture.h"
+#include "layer_takeover.h"
 #include "dial.h"
 #include "mode.h"
 #include "side_led.h"
 #include "wdt.h"
+#include "chord_engine.h"
 
 /* TEMPORARY shift-layer test trigger (set to 0 to restore stock behaviour).
  * When 1: double-tapping PLAY (button index 0) latches the shift bank on/off,
@@ -67,17 +71,62 @@
  * the first read seeds last_sent_raw and emits). */
 static fader_t g_fader[NUM_FADERS];
 
-/* Soft-takeover ("pickup") for SHIFT-layer switches. Per fader we remember the
- * last CC each of the 2 banks (0=base, 1=shift) emitted, so on a shift toggle the
- * new bank holds its previous value until the physical fader CROSSES it, then
- * resumes normal snappy tracking - no value jump. g_bank_valid gates the
- * first-ever emit on a bank (seed). g_takeover_arm defers the catch setup to the
- * next fader read (which has a fresh position). Profile switches DO jump (they
- * re-arm + clear this), matching the prior behavior. */
-static takeover_t g_takeover[NUM_FADERS];
-static uint8_t    g_bank_last_cc[NUM_FADERS][2];
-static uint8_t    g_bank_valid[NUM_FADERS][2];
-static uint8_t    g_takeover_arm[NUM_FADERS];
+/* STATEFUL button state (the on/off + run state the pure mapping engine
+ * intentionally does NOT own — see profile.h / mapping.c). map_button() handles
+ * the stateless BTN_NOTE / BTN_CC_MOMENTARY; the control loop owns these:
+ *   - g_btn_toggle[i]: latched on/off for a BTN_CC_TOGGLE (mute), flipped on each
+ *     PRESS edge. Reset to 0 on a profile change (a new profile's buttons differ,
+ *     so a carried-over latch would emit a wrong CC value against the new map).
+ *   - g_transport_playing: shared MIDI run state for BTN_TRANSPORT, threaded
+ *     through transport.c's pure transport_rt() (a play/stop toggle keys off it). */
+static uint8_t g_btn_toggle[NUM_BUTTONS];
+static int     g_transport_playing;
+
+/* v7 chord latch state. Per-button (NUM_BUTTONS) so the two-ladder case (a chord
+ * held on EACH ladder) latches independently - do NOT use a single shared latch.
+ * The LATCHED set drives release Note-Offs (never the live bank), so depth/layer
+ * changes mid-hold still release exactly what was pressed. */
+static uint8_t g_chord_notes[NUM_BUTTONS][MAX_CHORD];
+static uint8_t g_chord_count[NUM_BUTTONS];
+static uint8_t g_chord_chan[NUM_BUTTONS];
+/* The per-tick MIDI-out deferral ring (Section 6.4). Drained Note-Offs-first at
+ * the top of each tick under CHORD_TX_BUDGET. */
+static struct chord_tx_ring g_chord_tx;
+/* Stage-2 per-layer last-emitted chord-depth CC (zero-init -> triad band). */
+static int g_chord_depth_cc[NUM_LAYERS];
+/* Forward decl: defined just above route_midi_button, but called from
+ * enter_bootloader (which appears earlier). Purges the TX ring + emits Offs. */
+static void chord_flush_all(void);
+
+/* Soft-takeover ("pickup") for LAYER switches. Per fader we remember the last CC
+ * each of the NUM_LAYERS layers emitted, so on a layer step the new bank holds
+ * its previous value until the physical fader CROSSES it, then resumes normal
+ * snappy tracking - no value jump. The per-fader/per-layer memory lives in the
+ * pure, host-tested layer_takeover.h (last_cc + valid, indexed [fader][layer]);
+ * the valid flag gates the first-ever emit on a layer (seed). g_takeover_arm
+ * defers the catch setup to the next fader read (which has a fresh position).
+ * Profile switches DO jump (they re-arm + clear this), matching prior behavior. */
+static takeover_t            g_takeover[NUM_FADERS];
+static struct layer_takeover g_layer_takeover;     /* v5: per-fader, per-LAYER pickup memory */
+static uint8_t               g_takeover_arm[NUM_FADERS];
+
+/* Keyboard-mode HELD-key state (Peter auto-repeat). Tracks which buttons are
+ * physically down in Keyboard mode and the (mod,key) each latched at its press
+ * edge; kbd_build_report turns it into the 8-byte boot-keyboard report. A held
+ * button keeps its key asserted (the host OS auto-repeats); releasing it clears
+ * the slot. Cleared (+ an all-zero report sent) whenever we leave Keyboard mode
+ * so no key can stick across a mode flip. */
+static struct kbd_state g_kbd;
+
+/* Rebuild the boot-keyboard report from the held set and send it (no
+ * auto-release). Called after every keyboard-button edge so the host always sees
+ * exactly the currently-held keys; an empty held set sends the all-zero key-up. */
+static void kbd_send_held(void)
+{
+    uint8_t rpt[KBD_REPORT_LEN];
+    kbd_build_report(&g_kbd, rpt);
+    usb_hid_send_report(rpt);
+}
 
 /* Re-arm every fader's send-on-change state so the NEXT read re-emits its
  * current value even if the raw code has not moved. We call this whenever the
@@ -140,6 +189,11 @@ static void charger_init(void)
 
 static void enter_bootloader(void)
 {
+    /* v7: release any held chord notes BEFORE the power-off teardown so a
+     * TRS-attached synth doesn't ring through SYSTEM_OFF. Idempotent + purges the
+     * TX ring first (Fix 6). */
+    chord_flush_all();
+
     /* F6: SYSTEM_OFF on nRF52840 only wakes on a configured DETECT/sense, a
      * full reset, or USB. To return from power-off on a •• press we MUST arm a
      * sense-low wake source on the •• pin BEFORE entering off. We also park the
@@ -173,7 +227,7 @@ static void enter_bootloader(void)
     nrf_gpio_pin_set(SP1_TRS_RING);
 
     /* The •• button is still physically held LOW here (we only reach this after
-     * a ~3 s hold). If we armed the level-sense now, the already-low pin would
+     * a ~5 s hold). If we armed the level-sense now, the already-low pin would
      * re-assert DETECT the instant SYSTEM_OFF latches and wake/reset us straight
      * back into the app -- the power-off would silently fail. Wait for release
      * first, feeding the bootloader WDT so it doesn't reset us mid-wait, then
@@ -334,6 +388,139 @@ static void boot_signature(void)
     }
 }
 
+/* Emit a Note-Off for every latched chord note on every button, then zero the
+ * latches. Idempotent (zero-count latches emit nothing), so it is safe on any
+ * reset/interruption path. Goes straight to midi_out_send (NOT the ring): a
+ * flush is a stop-everything event, so we want the offs out immediately, and a
+ * flush emits at most 9*MAX_CHORD offs only in a pathological all-held case.
+ *
+ * Fix 6 - ORDERING RULE: flush PURGES the ring. The press/release path enqueues
+ * On/Off onto g_chord_tx (drained next tick), so on a map change the ring may
+ * still hold On/Off messages for the now-stale map. If we emitted the direct
+ * Offs but left the ring intact, a queued Note-On could drain AFTER this flush's
+ * Offs (the ring drains at the TOP of the next tick) and re-strand a note. So we
+ * reset the ring HERE, discarding any queued On/Off for the stale map, BEFORE
+ * the direct Offs go out. (Discarded queued Offs are harmless - the direct Offs
+ * below already release everything that was latched.) */
+static void chord_flush_all(void)
+{
+    chord_tx_init(&g_chord_tx);   /* Fix 6: purge any queued On/Off for the stale map FIRST */
+    for (int idx = 0; idx < NUM_BUTTONS; idx++) {
+        for (int n = 0; n < g_chord_count[idx]; n++) {
+            struct midi_msg m = {
+                .status = (uint8_t)(0x80 | (g_chord_chan[idx] & 0x0F)),
+                .d1 = g_chord_notes[idx][n], .d2 = 0, .len = 3,
+            };
+            midi_out_send(&m, NULL);
+        }
+        g_chord_count[idx] = 0;
+    }
+}
+
+/* Queue one chord message onto the per-tick ring (drained under the cap). */
+static void chord_tx_enqueue(uint8_t status, uint8_t d1, uint8_t d2)
+{
+    (void)chord_tx_push(&g_chord_tx, status, d1, d2);
+}
+
+/* Route one button edge to MIDI, owning the STATEFUL button types the pure
+ * mapping engine deliberately leaves to the control loop (mapping.c: BTN_CC_TOGGLE
+ * / BTN_TRANSPORT / BTN_PROFILE_SWITCH emit nothing). The stateless types
+ * (BTN_NOTE, BTN_CC_MOMENTARY, BTN_NONE) are delegated straight to map_button(),
+ * unchanged. The three stateful types act on the PRESS edge ONLY (pressed != 0)
+ * so one physical press = one action (release does nothing) — matching how the
+ * old map_button no-op behaved (release of a momentary still flows through
+ * map_button below). Returns 1 if it switched the active profile (so the caller
+ * can refresh its active tracking + reset the toggle latches), else 0.
+ *
+ * The CC NUMBER for a toggle is the button's `value` field (same convention as
+ * map_button's BTN_CC_MOMENTARY) and we honor the per-button channel + the active
+ * LAYER (0..3) bank exactly like map_button. */
+static int route_midi_button(int idx, int pressed, int layer_now)
+{
+    const struct profile *p = librarian_active();
+    /* v6: the button TYPE + channel are read from the ACTIVE layer's bank (L1
+     * inline, L2/L3/L4 from ext[]), so a stateful button on a cycled layer honors
+     * THAT layer's type/channel — matching map_button's per-layer reads. */
+    switch (profile_layer_button_type(p, idx, layer_now)) {
+    case BTN_CC_TOGGLE:
+        if (pressed) {
+            g_btn_toggle[idx] ^= 1u;
+            struct midi_msg m = {
+                .status = (uint8_t)(0xB0 | (profile_layer_button_channel(p, idx, layer_now) & 0x0F)),
+                .d1     = profile_layer_button_value(p, idx, layer_now),
+                .d2     = g_btn_toggle[idx] ? 127 : 0,
+                .len    = 3,
+            };
+            midi_out_send(&m, NULL);
+        }
+        return 0;
+    case BTN_TRANSPORT:
+        if (pressed) {
+            /* transport.c (pure): value selects Start/Stop/Continue/toggle and
+             * threads g_transport_playing; emit the single-byte real-time status
+             * (len 1 -> trs_send writes ONLY the status; midi1_event encodes the
+             * CIN-0xF single-byte USB event). */
+            uint8_t rt = transport_rt(profile_layer_button_value(p, idx, layer_now), &g_transport_playing);
+            struct midi_msg m = { .status = rt, .d1 = 0, .d2 = 0, .len = 1 };
+            midi_out_send(&m, NULL);
+        }
+        return 0;
+    case BTN_PROFILE_SWITCH:
+        if (pressed) {
+            /* value 0 = NEXT within bank, value 1 = PREV. Both stay inside the
+             * current mode's bank of 8 (never cross banks — that is a mode flip):
+             * NEXT via lib_bank_cycle (wraps 7->0); PREV wraps 0->NUM_BANK_PROFILES-1.
+             * The caller's now_active!=last_active block re-arms the faders for the
+             * new profile's CCs; we reset the toggle latches here because a new
+             * profile has different buttons. */
+            uint8_t cur  = librarian_active_index();
+            uint8_t next = (profile_layer_button_value(p, idx, layer_now) == 1)
+                ? (uint8_t)(cur == 0 ? (NUM_BANK_PROFILES - 1) : (cur - 1))
+                : lib_bank_cycle(cur);
+            if (librarian_set_active(next) == 0) {
+                chord_flush_all();   /* v7: release held chords before the new map */
+                for (int i = 0; i < NUM_BUTTONS; i++) {
+                    g_btn_toggle[i] = 0;
+                }
+                return 1;
+            }
+        }
+        return 0;
+    case BTN_CHORD: {
+        struct chord_def cdef;
+        const struct chord_def *c = profile_layer_chord(p, idx, layer_now, &cdef);
+        uint8_t ch = profile_layer_button_channel(p, idx, layer_now) & 0x0F;
+        if (pressed) {
+            if (!c) return 0;                 /* index 0 -> plays nothing */
+            /* Stage 2: read this layer's cached depth CC; chord_resolve gates it
+             * off for non-eligible qualities / explicit / range. */
+            int depth = chord_depth_from_cc(g_chord_depth_cc[layer_now]);
+            uint8_t notes[MAX_CHORD];
+            int n = chord_resolve(c, depth, notes);
+            /* Latch the EXACT emitted set + channel for a correct release. */
+            for (int k = 0; k < n; k++) g_chord_notes[idx][k] = notes[k];
+            g_chord_count[idx] = (uint8_t)n;
+            g_chord_chan[idx]  = ch;
+            uint8_t vel = p->chord_flags[0];  /* per-profile chord velocity */
+            for (int k = 0; k < n; k++)
+                chord_tx_enqueue((uint8_t)(0x90 | ch), notes[k], vel);   /* low to high */
+        } else {
+            for (int k = 0; k < g_chord_count[idx]; k++)
+                chord_tx_enqueue((uint8_t)(0x80 | g_chord_chan[idx]),
+                                 g_chord_notes[idx][k], 0);
+            g_chord_count[idx] = 0;
+        }
+        return 0;
+    }
+    /* Stateless types (and NONE): the pure engine still owns these. map_button
+     * emits NOTE on press/release and CC_MOMENTARY 127/0 on press/release. */
+    case BTN_NOTE: case BTN_CC_MOMENTARY: case BTN_NONE: default:
+        map_button(p, idx, pressed, layer_now, midi_out_send, NULL);
+        return 0;
+    }
+}
+
 int main(void)
 {
     uint32_t wake_reas = NRF_POWER->RESETREAS;   /* WHY did we boot? read BEFORE clearing */
@@ -366,6 +553,7 @@ int main(void)
 
     controls_init();        /* power the ladder/fader rail + set up SAADC channels */
     buttons_init();         /* reset the ladder decode/debounce state */
+    chord_tx_init(&g_chord_tx);  /* v7: empty the chord MIDI-out deferral ring at boot */
     midi_out_init();        /* bring up uart1 TRS MIDI out + enable the ring PNP */
     usbdev_start();         /* enumerate the USB composite: CDC console + USB-MIDI */
 
@@ -387,12 +575,18 @@ int main(void)
     /* The loop runs at ~8 ms so the button ladders scan + debounce at the
      * cadence buttons.c expects (3-read debounce ~24 ms, DFU hold ~1.2 s). The
      * slower behaviours below are re-throttled to that tick:
-     *   •• hold ~3 s   -> 375 ticks    LED heartbeat ~250 ms -> every 31 ticks
+     *   •• hold ~5 s   -> 625 ticks    LED heartbeat ~250 ms -> every 31 ticks
      *   •• short tap   -> held 1..40 ticks (<= ~320 ms)
      *
      * •• FUNCTION BUTTON GESTURE (spec §8 count-dial — replaces the old single-tap
      * round-robin):
-     *   - HOLD ~3 s (>= 375 ticks)  -> SYSTEM_OFF back to bootloader (power off).
+     *   - HOLD ~5 s (>= 625 ticks)  -> SYSTEM_OFF back to bootloader (power off).
+     *     RAISED from ~3 s / 375 ticks by the #61 gesture pass (spec
+     *     notes/2026-06-20-feldd-gesture-pass-spec.md §4) so a shorter •• hold is
+     *     provably free for a future gesture with zero accidental-shutdown risk:
+     *     the device cannot power off until •• is held a full ~5 continuous
+     *     seconds. The freed 75..624-tick (~0.6..~5 s) band is RESERVED (no action
+     *     this pass; see §3).
      *   - SHORT TAP (held 1..40 ticks, i.e. <= ~320 ms, then released) is fed to
      *     the dial FSM (dial.c) as tap_edge=1. The dial then decides:
      *        1 tap        -> RELATIVE +1 (lib_bank_cycle, the old round-robin)
@@ -400,8 +594,8 @@ int main(void)
      *   This re-uses the single •• button: a quick dot-dot dial cycles/jumps
      *   profiles, a long press powers off. The tap upper bound is TIGHTENED from
      *   <62 to <=40 ticks (spec §8) to widen the margin from rapid dialing to the
-     *   power-off hold; the dead band is now 41..374 ticks (does nothing on
-     *   release), so a "medium" press the user aborts before the 3 s power
+     *   power-off hold; the dead band is now 41..624 ticks (does nothing on
+     *   release), so a "medium" press the user aborts before the ~5 s power
      *   threshold neither dials a profile nor powers off — avoids accidental
      *   switches while the user is on their way to a power-off hold. */
     uint32_t held = 0;
@@ -409,7 +603,7 @@ int main(void)
     /* Honor the •• button only AFTER it has read released (high) at least once
      * since boot. On a low/marginal battery the pin can read low at power-on
      * (stuck, noisy, or brownout-glitched); without this guard that would count
-     * straight toward the 3 s power-off and kill the boot. */
+     * straight toward the ~5 s power-off and kill the boot. */
     int func_armed = 0;
     /* Track the active profile index across ticks so we can re-arm the faders
      * uniformly on ANY active-slot change — a •• short-tap, or a host
@@ -418,11 +612,32 @@ int main(void)
      * so the first loop iteration doesn't spuriously re-arm. */
     uint8_t last_active = librarian_active_index();
 #if FELDD_SHIFT_TRIGGER_PLAY
-    /* Double-tap-PLAY shift latch (test trigger). Pure state machine in
-     * gesture.c; stepped once per tick from the button-scan block below. */
+    /* PLAY peek/mode gesture FSM (test trigger). Pure state machine in gesture.c;
+     * stepped once per tick from the button-scan block below. Layer SELECT no
+     * longer lives here (#61 gesture pass) — it moved to layer_dial (a 2nd dial.c
+     * instance) and commits the engaged layer via gesture_set_layer. */
     gesture_t shift_gesture;
     gesture_init(&shift_gesture);
+    /* PLAY layer count-dial (#61 gesture pass, spec §2) — a SECOND dial.c
+     * instance, reusing the exact burst-timing FSM the •• profile dial uses.
+     * Stepped EVERY tick from the PLAY-scan block below, fed tap_edge=1 only on a
+     * classified short PLAY tap RELEASE (held 1..40 ticks). On commit:
+     *   1 tap (RELATIVE_NEXT) -> layer = (layer+1) % GESTURE_LAYER_COUNT
+     *   2/3/4 taps (ABSOLUTE) -> jump to layer count-1, CLAMPED to 4 (index 3) in
+     *                            main.c (spec Q1 Option b: dial.c stays literal-8,
+     *                            a 5..8-tap PLAY burst silently lands on layer 4).
+     * play_held_ticks is the PLAY tap CLASSIFIER's own hold counter (mirrors the
+     * •• `held` counter): a PLAY press released in 1..40 ticks is a layer-dial
+     * tap; a longer hold is the peek/mode gesture (gesture.c) and the bands are
+     * disjoint (tap <= 40, peek arms at 75). */
+    dial_t   layer_dial;
+    dial_init(&layer_dial);
+    uint32_t play_held_ticks = 0;
 #endif
+    /* v5: per-fader, per-LAYER soft-takeover pickup memory. Statics already zero
+     * (valid=0), but init explicitly so the intent is local to the soft-takeover
+     * state and survives any future move off file scope. */
+    layer_takeover_init(&g_layer_takeover);
     /* •• count-dial (spec §8). Pure burst FSM in dial.c; stepped EVERY tick from
      * the •• handler below with tap_edge=1 only on a classified short-tap release.
      * It owns the relative-vs-absolute decision + the 8-clamp; main.c owns only
@@ -452,12 +667,37 @@ int main(void)
      * window, the calm default) / 1 BLINK (toggle on (tick/12)&1). */
     const int     MODE_FLASH_TICKS  = 150;   /* ~1.2 s non-blocking mode-flash */
     const int     MODE_FLASH_STYLE  = 0;     /* 0 = PULSE (solid), 1 = BLINK */
+    /* v7: last CDC DTR (host-open) state, for the edge-triggered chord flush on a
+     * host disconnect. Starts 0 so a never-connected host never spuriously flushes. */
+    static int    g_last_dtr = 0;
     for (;;) {
         feed_wdt();
+
+        /* Drain the chord TX ring FIRST (Note-Offs prioritized) under the per-tick
+         * cap so a multi-chord burst clears deterministically across ticks without
+         * blowing the 8 ms tick / WDT. */
+        {
+            struct chord_tx_msg txo[CHORD_TX_BUDGET];
+            int nd = chord_tx_drain(&g_chord_tx, txo);
+            for (int i = 0; i < nd; i++) {
+                struct midi_msg m = { .status = txo[i].status, .d1 = txo[i].d1,
+                                      .d2 = txo[i].d2, .len = 3 };
+                midi_out_send(&m, NULL);
+            }
+        }
 
         /* Service the CDC config protocol: drain any host request lines and
          * write their responses. Non-blocking (returns at once if no RX). */
         config_cdc_poll();
+
+        /* On a host disconnect (DTR drop) flush held chords so a TRS-attached
+         * synth doesn't ring forever (USB offs go nowhere once the host is gone,
+         * but TRS keeps working). Edge-triggered: flush only on the 1->0 transition. */
+        {
+            int dtr = config_cdc_dtr();
+            if (g_last_dtr && !dtr) chord_flush_all();
+            g_last_dtr = dtr;
+        }
 
         /* •• function button: long hold powers off; short taps feed the count-
          * dial (spec §8). tap_edge fires for exactly one tick on a classified
@@ -472,17 +712,19 @@ int main(void)
             }
             held = 0;
         } else if (func_low) {
-            if (++held >= 375) {
+            if (++held >= 625) {
                 enter_bootloader();   /* never returns (SYSTEM_OFF) */
             }
         } else {
             /* Release edge. A SHORT tap (held 1..40 ticks, <= ~320 ms) is one
              * dial tap: classify it and raise tap_edge for this single tick. The
-             * dead band (41..374) does nothing — neither a dial tap nor a
-             * power-off. held==0 means the button was never down this iteration
-             * (not a release) so we skip. The TIGHTER <=40 bound (was <62, spec
-             * §8) widens the margin to the 375-tick power-off so rapid dialing
-             * can't bleed into a power-off hold. */
+             * dead band (41..624) does nothing — neither a dial tap nor a
+             * power-off (raised to 625 ticks / ~5 s by the #61 gesture pass, spec
+             * §4; the 75..624 sub-band is RESERVED for a future short-hold
+             * gesture, no action yet). held==0 means the button was never down
+             * this iteration (not a release) so we skip. The TIGHTER <=40 bound
+             * (was <62, spec §8) widens the margin to the power-off hold so rapid
+             * dialing can't bleed into it. */
             if (held >= 1 && held <= 40) {
                 tap_edge = 1;
             }
@@ -532,6 +774,7 @@ int main(void)
          * host/OP-XY until each fader was physically moved. */
         uint8_t now_active = librarian_active_index();
         if (now_active != last_active) {
+            chord_flush_all();   /* v7: release held chords on ANY profile change (dial/host/switch) */
             faders_rearm();
             /* New profile = different CCs: drop soft-takeover memory so each bank
              * re-seeds and emits immediately (the prior jump-on-switch behavior),
@@ -539,34 +782,35 @@ int main(void)
             for (int i = 0; i < NUM_FADERS; i++) {
                 g_takeover[i].pending = 0;
                 g_takeover_arm[i] = 0;
-                g_bank_valid[i][0] = 0;
-                g_bank_valid[i][1] = 0;
+                layer_takeover_clear_fader(&g_layer_takeover, i);
             }
             last_active = now_active;
         }
 
-        /* Shift bank selector for this tick: 0 unless the PLAY double-tap latch
-         * is engaged (FELDD_SHIFT_TRIGGER_PLAY). Read once here — state as of the
-         * previous tick's gesture step — so the faders and the non-PLAY buttons
-         * below all use one consistent value; the latch itself is advanced at the
-         * end of the button-scan block (and re-arms the faders on a flip). */
+        /* Layer bank selector for this tick (v5): the 0..3 engaged layer index
+         * from the PLAY double-tap cycle (FELDD_SHIFT_TRIGGER_PLAY), was the
+         * binary gesture_latched (0/1). Read once here — state as of the previous
+         * tick's gesture step — so the faders and the non-PLAY buttons below all
+         * use one consistent value; the layer itself is advanced at the end of the
+         * button-scan block (and arms the faders' soft-takeover on a step). */
 #if FELDD_SHIFT_TRIGGER_PLAY
-        int shift_now = gesture_latched(&shift_gesture);
+        int layer_now = gesture_layer(&shift_gesture);   /* 0..3 */
 #else
-        const int shift_now = 0;
+        const int layer_now = 0;
 #endif
 
         /* Scan both ladders FIRST (buttons before faders, like the verified
          * looper). Each edge -> the mapping engine -> TRS MIDI; one scan can emit
          * up to 4 edges (a release + a press on each ladder).
-         * SHIFT LAYER (test trigger, FELDD_SHIFT_TRIGGER_PLAY): the shift bank is
-         * driven by a double-tap on PLAY (button 0). PLAY is reserved for this —
-         * its press edges feed the gesture detector and it never reaches
-         * map_button, so it can't double-fire MIDI (it does still report to the
-         * live monitor). When the latch flips, the faders arm soft-takeover so the
-         * new bank holds its last value until the fader crosses it. With
-         * FELDD_SHIFT_TRIGGER_PLAY=0, PLAY maps normally and shift_now is a
-         * constant 0 (stock behaviour). */
+         * LAYER CYCLE (test trigger, FELDD_SHIFT_TRIGGER_PLAY): the active layer
+         * (0..3) is driven by the PLAY layer count-dial (#61 gesture pass: 1 tap =
+         * +1, 2/3/4 taps = jump to layer 2/3/4 — replaces the old double-tap). PLAY
+         * is reserved for this — its presses feed the gesture/dial detectors and it
+         * never reaches map_button, so it can't double-fire MIDI (it does still
+         * report to the live monitor). When the layer changes, the faders arm
+         * soft-takeover so the new bank holds its last value until the fader
+         * crosses it. With FELDD_SHIFT_TRIGGER_PLAY=0, PLAY maps normally and
+         * layer_now is a constant 0 (stock behaviour). */
         struct button_event evt[4];
         int ne = buttons_scan(evt, 4);
         /* PLAY-held = the mode-gesture modifier (phase 2b moved off •• onto PLAY, spec
@@ -580,7 +824,23 @@ int main(void)
          * render + any later edge already see the new mode. */
         int mode_now = librarian_mode();
 #if FELDD_SHIFT_TRIGGER_PLAY
-        int play_press = 0;
+        /* PLAY layer-dial tap CLASSIFIER (#61 gesture pass, spec §5; mirrors the
+         * •• classifier). Track how long PLAY has been continuously held using the
+         * SAME debounced source the peek FSM reads (play_held), and on the RELEASE
+         * edge classify a press held 1..40 ticks as one layer-dial tap (play_tap).
+         * A hold past 40 ticks is NOT a tap — it flows to the peek/mode machinery
+         * untouched (peek arms at 75), so the tap and peek/hold bands are disjoint. */
+        int play_tap = 0;
+        if (play_held) {
+            if (play_held_ticks < 0xFFFFFFFFu) {
+                play_held_ticks++;
+            }
+        } else {
+            if (play_held_ticks >= 1 && play_held_ticks <= 40) {
+                play_tap = 1;   /* short PLAY tap release -> feed the layer dial */
+            }
+            play_held_ticks = 0;
+        }
         /* "A rocker arrived during this PLAY hold" — set on the tick mode_decide
          * consumes a FWD/RWD (md.consumed). Fed to gesture_step below so the
          * gesture FSM latches rocker_seen and VOIDS any pending profile peek (a
@@ -590,10 +850,7 @@ int main(void)
         for (int i = 0; i < ne; i++) {
             uint8_t idx = evt[i].idx;
             int pressed = evt[i].pressed;
-            if (idx == 0) {                  /* PLAY: reserved as the shift trigger */
-                if (pressed) {
-                    play_press = 1;
-                }
+            if (idx == 0) {                  /* PLAY: reserved as the layer-dial/peek trigger */
                 config_cdc_monitor_button(0, pressed);  /* show PLAY pressed */
                 continue;
             }
@@ -611,6 +868,14 @@ int main(void)
                 rocker_consumed_this_hold = 1;
                 if (md.set && librarian_set_mode(md.which) == 0) {
                     mode_now = md.which;
+                    /* A mode flip ends the current Keyboard session: drop any keys
+                     * held at the moment of the flip and send the all-zero key-up so
+                     * nothing sticks on the host (entering Keyboard also starts from
+                     * this clean state). The PLAY+FWD/RWD gesture that triggers the
+                     * flip is consumed above and never enters the held set. */
+                    kbd_state_reset(&g_kbd);
+                    kbd_send_held();
+                    chord_flush_all();   /* v7: a mode flip changes the map; release held chords */
                     /* (0.9.1) Arm the NON-BLOCKING side-row MODE-FLASH for the NEW
                      * mode instead of the deleted blocking chase. The per-tick
                      * side render shows the captured pattern for MODE_FLASH_TICKS,
@@ -631,53 +896,89 @@ int main(void)
                     for (int fi = 0; fi < NUM_FADERS; fi++) {
                         g_takeover[fi].pending = 0;
                         g_takeover_arm[fi] = 0;
-                        g_bank_valid[fi][0] = 0;
-                        g_bank_valid[fi][1] = 0;
+                        layer_takeover_clear_fader(&g_layer_takeover, fi);
                     }
                     last_active = librarian_active_index();   /* don't double-rearm next tick */
                 }
                 config_cdc_monitor_button(idx, pressed);  /* still report the edge */
                 continue;
             }
-            /* Normal routing: KEYBOARD types the per-button HID key on press (mod +
-             * usage from the keymap; usb_hid_send_key drops silently if no HID
-             * host is bound, and an unbound key (0x00) is a harmless empty report).
-             * SHIFT LAYER (v4): the same double-tap-PLAY latch the MIDI path uses
-             * (shift_now) selects the SECOND keymap — button_key_shift/
-             * button_mod_shift — so Keyboard mode gets a Layer 2 exactly like MIDI.
-             * MIDI maps the button as before. Faders are ALWAYS MIDI (handled
-             * below), regardless of mode. */
+            /* Normal routing: KEYBOARD HOLDS the per-button HID key for as long as
+             * the button is physically held (Peter auto-repeat). A press latches
+             * (mod,key) from the keymap into the held set; a release clears it;
+             * after either edge we rebuild + send the full boot-keyboard report, so
+             * the key stays asserted while held and the host OS does the native
+             * typematic repeat (NOT a firmware timer — a real keyboard just holds
+             * the key). An unbound key (0x00) contributes no keycode; an all-zero
+             * report on the last release is the clean key-up. PLAY (idx 0) is the
+             * layer/peek shift trigger and is consumed above (it never reaches here
+             * in this build), so a held PLAY never becomes a typed key.
+             * LAYERS (v5): the same double-tap-PLAY cycle the MIDI path uses
+             * (layer_now, 0..3) selects the per-layer keymap via the mapping
+             * accessors (profile_layer_button_key/mod) — so Keyboard mode gets all
+             * 4 layers exactly like MIDI. The (mod,key) is latched at the PRESS edge
+             * so a layer change mid-hold can't swap or strand a held key. MIDI maps
+             * the button as before. Faders are ALWAYS MIDI (handled below). */
             if (mode_now == MODE_KEYBOARD) {
                 if (pressed) {
                     const struct profile *p = librarian_active();
-                    usb_hid_send_key(
-                        shift_now ? p->button_mod_shift[idx] : p->button_mod[idx],
-                        shift_now ? p->button_key_shift[idx] : p->button_key[idx]);
+                    kbd_state_press(&g_kbd, idx,
+                        profile_layer_button_mod(p, idx, layer_now),
+                        profile_layer_button_key(p, idx, layer_now));
+                } else {
+                    kbd_state_release(&g_kbd, idx);
                 }
+                kbd_send_held();
             } else {
-                map_button(librarian_active(), idx, pressed, shift_now,
-                           midi_out_send, NULL);
+                /* MIDI: route through the stateful dispatcher (it delegates the
+                 * stateless NOTE/CC_MOMENTARY to map_button and owns the
+                 * TOGGLE/TRANSPORT/PROFILE_SWITCH state). A profile-switch button
+                 * returns 1; the now_active!=last_active block above re-arms the
+                 * faders next tick, so no extra work here. */
+                (void)route_midi_button(idx, pressed, layer_now);
             }
             config_cdc_monitor_button(idx, pressed);  /* mon frame */
         }
-        /* Advance the PLAY gesture FSM once per tick with the full signature (spec
-         * §3): the press edge, the DEBOUNCED hold (buttons_track_committed()==0,
-         * already in play_held), and whether a rocker was consumed this hold (which
-         * voids a would-be peek). It returns one of three outcomes:
-         *   GESTURE_LAYER_STEP   - a double-tap stepped the layer (was LATCH_TOGGLED)
-         *   GESTURE_PEEK_PROFILE - a hold-PLAY-alone released past the peek plateau */
-        int gres = gesture_step(&shift_gesture, play_press, play_held,
-                                rocker_consumed_this_hold);
-        if (gres == GESTURE_LAYER_STEP) {
-            /* Layer flipped: ARM soft-takeover on every fader (deferred to the
-             * next fader read, which has a fresh position) instead of re-emitting.
-             * Each fader then holds the new bank's last value until the physical
-             * fader CROSSES it - no jump. (faders_rearm() here would jump the CC
-             * to the fader's current spot, the old behavior.) */
+        /* Step the PLAY layer count-dial once per tick (#61 gesture pass, spec §2).
+         * It owns the burst timing (relative-vs-absolute + the inter-tap/commit
+         * windows); main.c owns the tap CLASSIFIER (play_tap, above) and the
+         * commit-side layer write. */
+        dial_result_t ldres = dial_step(&layer_dial, play_tap);
+        if (ldres.kind == DIAL_RELATIVE_NEXT) {
+            /* 1 tap = next layer (relative +1, wrapping at GESTURE_LAYER_COUNT). */
+            int next = (gesture_layer(&shift_gesture) + 1) % GESTURE_LAYER_COUNT;
+            gesture_set_layer(&shift_gesture, next);
+            chord_flush_all();   /* v7: a layer change changes the map; release held chords */
+            /* Layer changed: ARM soft-takeover on every fader (same as the old
+             * GESTURE_LAYER_STEP path) so each fader holds the new bank's last
+             * value until the physical fader CROSSES it — no jump. */
             for (int i = 0; i < NUM_FADERS; i++) {
                 g_takeover_arm[i] = 1;
             }
-        } else if (gres == GESTURE_PEEK_PROFILE) {
+        } else if (ldres.kind == DIAL_ABSOLUTE) {
+            /* 2/3/4 taps = absolute jump to layer count-1 (1-indexed like the
+             * profile dial). CLAMP to GESTURE_LAYER_COUNT-1 here (spec Q1 Option b:
+             * dial.c stays literal-8, so a 5..8-tap PLAY burst silently pins to the
+             * top layer — acceptable, there are only 4 layers). */
+            int target = ldres.count - 1;
+            if (target > GESTURE_LAYER_COUNT - 1) {
+                target = GESTURE_LAYER_COUNT - 1;
+            }
+            gesture_set_layer(&shift_gesture, target);
+            chord_flush_all();   /* v7: a layer change changes the map; release held chords */
+            for (int i = 0; i < NUM_FADERS; i++) {
+                g_takeover_arm[i] = 1;
+            }
+        }
+
+        /* Advance the PLAY peek/mode gesture FSM once per tick (spec §3): the
+         * DEBOUNCED hold (buttons_track_committed()==0, already in play_held) and
+         * whether a rocker was consumed this hold (which voids a would-be peek).
+         * Layer select moved to layer_dial above; this FSM returns only:
+         *   GESTURE_PEEK_PROFILE - a hold-PLAY-alone released past the peek plateau */
+        int gres = gesture_step(&shift_gesture, play_held,
+                                rocker_consumed_this_hold);
+        if (gres == GESTURE_PEEK_PROFILE) {
             /* Hold-PLAY-alone peek: flash the CURRENT within-bank profile on the
              * track row, non-blocking, via the same CONFIRM render the dial uses
              * (spec §2/§4/§8 — peek and dial share the track row, drawn by
@@ -700,6 +1001,12 @@ int main(void)
             if (md.consumed) {
                 if (md.set && librarian_set_mode(md.which) == 0) {
                     mode_now = md.which;
+                    /* End the Keyboard session on a mode flip: clear held keys +
+                     * send the all-zero key-up so nothing sticks on the host (same
+                     * as the FELDD_SHIFT_TRIGGER_PLAY arm above). */
+                    kbd_state_reset(&g_kbd);
+                    kbd_send_held();
+                    chord_flush_all();   /* v7: a mode flip changes the map; release held chords */
                     /* (0.9.1) Arm the NON-BLOCKING side-row MODE-FLASH (same as the
                      * FELDD_SHIFT_TRIGGER_PLAY arm above) — the deleted blocking
                      * chase is replaced by the per-tick side render. */
@@ -717,24 +1024,36 @@ int main(void)
                     for (int fi = 0; fi < NUM_FADERS; fi++) {
                         g_takeover[fi].pending = 0;
                         g_takeover_arm[fi] = 0;
-                        g_bank_valid[fi][0] = 0;
-                        g_bank_valid[fi][1] = 0;
+                        layer_takeover_clear_fader(&g_layer_takeover, fi);
                     }
                     last_active = librarian_active_index();   /* don't double-rearm next tick */
                 }
                 config_cdc_monitor_button(idx, pressed);
                 continue;
             }
-            /* Normal routing: KEYBOARD types the per-button HID key on press; MIDI
-             * maps (here PLAY maps normally — no shift trigger in this build). */
+            /* Normal routing: KEYBOARD HOLDS the per-button HID key while the button
+             * is held (Peter auto-repeat) — press latches (mod,key), release clears
+             * it, rebuild + send the full report after either edge; the host OS does
+             * the typematic repeat. (Here PLAY maps normally — no shift trigger in
+             * this build, so layer_now is a constant 0 = the inline L1 bank, and
+             * PLAY is just another held key.) See the FELDD_SHIFT_TRIGGER_PLAY arm
+             * above for the full held-key rationale. */
             if (mode_now == MODE_KEYBOARD) {
                 if (pressed) {
                     const struct profile *p = librarian_active();
-                    usb_hid_send_key(p->button_mod[idx], p->button_key[idx]);
+                    kbd_state_press(&g_kbd, idx,
+                        profile_layer_button_mod(p, idx, layer_now),
+                        profile_layer_button_key(p, idx, layer_now));
+                } else {
+                    kbd_state_release(&g_kbd, idx);
                 }
+                kbd_send_held();
             } else {
-                map_button(librarian_active(), idx, pressed, shift_now,
-                           midi_out_send, NULL);
+                /* MIDI: stateful dispatcher (see the FELDD_SHIFT_TRIGGER_PLAY arm
+                 * above) — delegates NOTE/CC_MOMENTARY to map_button, owns
+                 * TOGGLE/TRANSPORT/PROFILE_SWITCH; profile-switch re-arm is handled
+                 * by the now_active!=last_active block. */
+                (void)route_midi_button(idx, pressed, layer_now);
             }
             config_cdc_monitor_button(idx, pressed);  /* mon frame */
         }
@@ -892,9 +1211,9 @@ int main(void)
                  * re-emit the moment the catch releases. */
                 if (g_takeover_arm[idx]) {
                     g_takeover_arm[idx] = 0;
-                    if (g_bank_valid[idx][shift_now]) {
+                    if (layer_takeover_valid(&g_layer_takeover, idx, layer_now)) {
                         takeover_arm(&g_takeover[idx], phys_cc,
-                                     g_bank_last_cc[idx][shift_now]);
+                                     layer_takeover_last(&g_layer_takeover, idx, layer_now));
                     } else {
                         g_takeover[idx].pending = 0;   /* seed: nothing to catch */
                     }
@@ -908,10 +1227,17 @@ int main(void)
 
                 int cc = fader_update(&g_fader[idx], (uint16_t)raw);
                 if (cc >= 0) {
-                    map_fader(librarian_active(), idx, cc, shift_now, midi_out_send, NULL);
+                    map_fader(librarian_active(), idx, cc, layer_now, midi_out_send, NULL);
                     config_cdc_monitor_fader(idx, cc);   /* mon frame if monitoring */
-                    g_bank_last_cc[idx][shift_now] = (uint8_t)cc;
-                    g_bank_valid[idx][shift_now] = 1;
+                    layer_takeover_record(&g_layer_takeover, idx, layer_now, (uint8_t)cc);
+                    /* Stage 2: cache the settled CC of a chord_depth fader so the
+                     * next chord press samples this layer's depth band. The scan is
+                     * idx 0..3 ascending, so the highest-idx chord_depth fader is the
+                     * last writer (the firmware fallback to the UI one-per-layer rule). */
+                    if (profile_layer_fader_role(librarian_active(), idx, layer_now)
+                            == FADER_ROLE_CHORD_DEPTH) {
+                        g_chord_depth_cc[layer_now] = cc;   /* cache the settled CC */
+                    }
                 }
             }
         }

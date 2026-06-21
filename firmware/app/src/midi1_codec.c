@@ -3,9 +3,16 @@
 
 int midi1_event(uint8_t cable, uint8_t status, uint8_t d1, uint8_t d2, uint8_t out[4])
 {
+    if (status >= 0xF8) {                  // system real-time: single-byte msg
+        out[0] = (uint8_t)((cable << 4) | 0xF);  // CIN 0xF = single byte
+        out[1] = status;                   // Start 0xFA / Continue 0xFB / Stop 0xFC / Clock 0xF8...
+        out[2] = 0;
+        out[3] = 0;
+        return 4;
+    }
     uint8_t hi = (uint8_t)(status >> 4);   // channel-voice message type
     if (hi < 0x8 || hi > 0xE) {
-        return -1;                         // not a channel-voice message
+        return -1;                         // not a channel-voice (0xF0-0xF7 system-common unsupported)
     }
     out[0] = (uint8_t)((cable << 4) | hi); // CIN == status high nibble for channel-voice
     out[1] = status;
