@@ -11,6 +11,28 @@ typedef struct {
 // Returns 0..127 CC value to send, or -1 to suppress (jitter / no change).
 int fader_update(fader_t *f, uint16_t raw12);
 
+// Like fader_update, but `rail_loaded` = a button is currently sagging the shared
+// BTN_COM rail (buttons_rail_loaded()). While loaded, the jitter deadband applies
+// EVERYWHERE, including the rail bands the idle path bypasses, so the persistent
+// ~1-2 LSB rail droop never leaks a spurious CC; genuine moves (>> the deadband)
+// still track. rail_loaded=0 is identical to fader_update. (BUG-5 / 0.15: a held
+// button no longer freezes the faders, so there is no snap-to-hardware on release.)
+int fader_update_rail(fader_t *f, uint16_t raw12, int rail_loaded);
+
+// Edge-triggered droop-settle counter for the fader read gate. A button press
+// sags the rail and the first couple of fader reads droop ~1-2 LSB, so the caller
+// skips fader reads while the returned counter is > 0. The skip re-arms ONLY on a
+// rising rail edge (rail && !rail_prev = a fresh press); a SUSTAINED hold counts
+// the counter down to 0 instead of pinning it, so holding a button (e.g. a chord)
+// no longer freezes the faders for the whole hold (BUG-5). Pure; the caller owns
+// the `settle` and `rail_prev` state across ticks.
+#define FADER_SETTLE_TICKS 2
+static inline uint8_t fader_settle_step(int rail, int rail_prev, uint8_t settle) {
+    if (rail && !rail_prev) return FADER_SETTLE_TICKS;   // press edge: arm the skip
+    if (settle > 0) return (uint8_t)(settle - 1);        // count down (even while held)
+    return 0;
+}
+
 // The quantized 0..127 CC for a 12-bit fader reading (the same rescale
 // fader_update emits). Exposed so soft-takeover can compare the physical fader
 // position against a stored target without going through change-suppression.

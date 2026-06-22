@@ -94,12 +94,60 @@ static void test_ladder_decode_matches_first_level_within_tolerance(void) {
     assert(ladder_decode(3100, levels, 5, 150) == -1);   // between plateaus: reject
 }
 
+/* BUG-5 (0.15): while a button sags the shared BTN_COM rail, the fader read must
+ * keep TRACKING (not freeze) yet swallow the persistent ~1-2 LSB droop. */
+static void test_fader_update_rail_tracks_moves_swallows_droop(void) {
+    fader_t f = {0};
+    assert(fader_update_rail(&f, 2084, 1) == 72);  // first read seeds at CC 72
+    assert(fader_update_rail(&f, 2086, 1) == -1);  // +2 LSB droop while held: swallowed
+    assert(fader_update_rail(&f, 2082, 1) == -1);  // -2 LSB droop while held: swallowed
+    assert(fader_update_rail(&f, 2300, 1) == 79);  // a genuine move while held still TRACKS
+}
+
+static void test_fader_update_rail_deadbands_rail_band_droop(void) {
+    // The idle path bypasses the jitter window in the rail bands so a small nudge
+    // still reaches 0/127. While a button sags the rail that same sub-hysteresis
+    // change IS the droop, so rail_loaded=1 keeps the deadband even in the rail
+    // bands (no spurious 127 leaks mid-hold) while a real move still emits.
+    fader_t a = {0};
+    assert(fader_update(&a, 3640) == 126);          // seed just below top
+    assert(fader_update(&a, 3652) == 127);          // idle: +12 into the top rail emits 127
+    fader_t b = {0};
+    assert(fader_update_rail(&b, 3640, 1) == 126);  // seed just below top
+    assert(fader_update_rail(&b, 3652, 1) == -1);   // held: same nudge is droop -> suppressed
+    assert(fader_update_rail(&b, 3700, 1) == 127);  // a real move into the rail (+60) still emits
+}
+
+static void test_fader_update_rail_unloaded_equals_idle(void) {
+    // rail_loaded=0 is exactly fader_update: the rail-band bypass still works.
+    fader_t a = {0};
+    assert(fader_update_rail(&a, 3640, 0) == 126);
+    assert(fader_update_rail(&a, 3652, 0) == 127);  // unloaded: bypass still emits 127
+}
+
+static void test_fader_settle_edge_triggers_not_held(void) {
+    // BUG-5 core: the droop-settle skip arms only on the PRESS EDGE (rail rising)
+    // and then counts down even while the button stays held, so a sustained hold
+    // does NOT keep the faders frozen.
+    uint8_t s = 0;
+    s = fader_settle_step(0, 0, s); assert(s == 0);   // idle: nothing held
+    s = fader_settle_step(1, 0, s); assert(s == 2);   // press EDGE: arm the 2-tick skip
+    s = fader_settle_step(1, 1, s); assert(s == 1);   // still held: counts DOWN (not re-armed)
+    s = fader_settle_step(1, 1, s); assert(s == 0);   // still held: reaches 0 -> faders resume
+    s = fader_settle_step(1, 1, s); assert(s == 0);   // still held: stays 0 (no freeze)
+    s = fader_settle_step(0, 1, s); assert(s == 0);   // release: no new skip
+}
+
 int main(void) {
     test_fader_rescales_to_full_0_127();
     test_fader_suppresses_jitter_and_duplicates();
     test_fader_hysteresis_boundary_emits();
     test_fader_top_rail_bypasses_jitter_window();
     test_fader_bottom_reachable_and_reinit_reemits();
+    test_fader_update_rail_tracks_moves_swallows_droop();
+    test_fader_update_rail_deadbands_rail_band_droop();
+    test_fader_update_rail_unloaded_equals_idle();
+    test_fader_settle_edge_triggers_not_held();
     test_takeover_no_catch_when_at_target();
     test_takeover_catch_from_above();
     test_takeover_catch_from_below();

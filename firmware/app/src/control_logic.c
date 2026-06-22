@@ -24,7 +24,7 @@ uint8_t fader_raw_to_cc(uint16_t raw)
                      / (FADER_RAW_MAX - FADER_RAW_MIN));
 }
 
-int fader_update(fader_t *f, uint16_t raw12)
+int fader_update_rail(fader_t *f, uint16_t raw12, int rail_loaded)
 {
     if (raw12 > 4095) raw12 = 4095;
     if (f->initialized) {
@@ -32,16 +32,29 @@ int fader_update(fader_t *f, uint16_t raw12)
         if (delta < 0) delta = -delta;
         uint8_t new_cc = fader_raw_to_cc(raw12);
         uint8_t old_cc = fader_raw_to_cc(f->last_sent_raw);
-        // require crossing into a new CC step AND clearing the jitter window;
-        // readings in a rail band (<= MIN / >= MAX) bypass the jitter window so
-        // 0 and 127 stay reachable from a sub-hysteresis nudge (the duplicate
-        // suppression above still prevents spam inside a band)
+        // require crossing into a new CC step AND clearing the jitter window
         if (new_cc == old_cc) return -1;
-        if (delta < FADER_HYSTERESIS && raw12 > FADER_RAW_MIN && raw12 < FADER_RAW_MAX) return -1;
+        if (rail_loaded) {
+            // a button is sagging the shared rail: keep the deadband EVERYWHERE,
+            // including the rail bands the idle path bypasses, so the persistent
+            // ~1-2 LSB droop can't leak a spurious 0/127. A genuine move is >>
+            // FADER_HYSTERESIS and still passes (BUG-5: track, don't freeze).
+            if (delta < FADER_HYSTERESIS) return -1;
+        } else if (delta < FADER_HYSTERESIS && raw12 > FADER_RAW_MIN && raw12 < FADER_RAW_MAX) {
+            // idle: readings in a rail band (<= MIN / >= MAX) bypass the jitter
+            // window so 0 and 127 stay reachable from a sub-hysteresis nudge (the
+            // duplicate suppression above still prevents spam inside a band).
+            return -1;
+        }
     }
     f->initialized = 1;
     f->last_sent_raw = raw12;
     return fader_raw_to_cc(raw12);
+}
+
+int fader_update(fader_t *f, uint16_t raw12)
+{
+    return fader_update_rail(f, raw12, 0);
 }
 
 int takeover_arm(takeover_t *t, uint8_t phys_cc, uint8_t target)

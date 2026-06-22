@@ -1180,23 +1180,27 @@ int main(void)
             }
         }
 
-        /* Faders -> CC, AFTER the buttons. SKIP the read while a button is pulling
-         * the shared BTN_COM rail (+ 2 ticks after it lets go): a held button sags
-         * that rail, and because the SAADC ref is internal (not ratiometric) every
-         * fader ADC read drops ~1-2 LSB. We gate on buttons_rail_loaded() — the
+        /* Faders -> CC, AFTER the buttons. A held button sags the shared BTN_COM
+         * rail, and because the SAADC ref is internal (not ratiometric) every fader
+         * ADC read drops ~1-2 LSB. We gate on buttons_rail_loaded() — the
          * INSTANTANEOUS raw ladder read captured by buttons_scan() above — NOT the
-         * 3-read committed state: the committed state lags the press by ~24 ms, so
-         * the drooped reads of those first ticks leaked out as spurious CC dips
-         * (the v0.5.2 regression; petercolombo's bench report, 2026-06-18).
-         * Skipping the UPDATE — not just the emit — keeps each fader's
-         * last_sent_raw at its true pre-press value, so the recovered read
-         * duplicate-suppresses instead of emitting a spurious correction. */
+         * 3-read committed state (which lags the press ~24 ms), so the very first
+         * drooped ticks don't leak spurious CC dips (the v0.5.2 fix; petercolombo's
+         * bench report, 2026-06-18).
+         *
+         * 0.15 (BUG-5, petercolombo): the skip now EDGE-triggers on the press only
+         * (fader_settle_step re-arms on the rising rail edge, then counts down even
+         * while the button stays held) instead of pinning the skip for the whole
+         * hold. A SUSTAINED hold no longer freezes the faders, so riding the faders
+         * while holding a chord button tracks live and there is no snap-to-hardware
+         * on release. During the hold we still read every tick but pass rail_loaded
+         * to fader_update_rail, which widens the droop deadband across the rail
+         * bands so the persistent sag is swallowed while genuine moves pass. */
         static uint8_t fader_settle;
-        if (buttons_rail_loaded()) {
-            fader_settle = 2;
-        } else if (fader_settle > 0) {
-            fader_settle--;
-        }
+        static int     fader_rail_prev;
+        int rail_loaded = buttons_rail_loaded();
+        fader_settle = fader_settle_step(rail_loaded, fader_rail_prev, fader_settle);
+        fader_rail_prev = rail_loaded;
         if (fader_settle == 0) {
             for (int idx = 0; idx < NUM_FADERS; idx++) {
                 int raw = controls_read_raw(2 + idx);
@@ -1225,7 +1229,7 @@ int main(void)
                     continue;
                 }
 
-                int cc = fader_update(&g_fader[idx], (uint16_t)raw);
+                int cc = fader_update_rail(&g_fader[idx], (uint16_t)raw, rail_loaded);
                 if (cc >= 0) {
                     map_fader(librarian_active(), idx, cc, layer_now, midi_out_send, NULL);
                     config_cdc_monitor_fader(idx, cc);   /* mon frame if monitoring */

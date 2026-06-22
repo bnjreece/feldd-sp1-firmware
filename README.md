@@ -6,7 +6,7 @@
 
 > The SP-1 is an unreleased TE device. This is unofficial community firmware, not affiliated with or endorsed by Teenage Engineering.
 
-**Latest firmware: v0.14.0** (get it at [feldd.com](https://feldd.com)).
+**Latest firmware: v0.14.0 (stable), v0.15.0 (beta)** (get it at [feldd.com](https://feldd.com)).
 
 ## What it does
 
