@@ -126,10 +126,12 @@ way as multi mode).
 
 - **The board:** front 4 LEDs = sessions 1-4, side 4 LEDs = sessions 5-8. off = idle,
   solid = working, fast blink = needs you, quick flash = just finished, slow pulse = on
-  autopilot.
+  autopilot. (Up to 8 sessions are shown; a 9th+ stays off-board but is still reachable
+  with the scrubber.)
 - **Track 1-4 = jump:** switches your tmux client to that LED's session (focus follows).
-  **Hold Play + Track 1-4** to address sessions 5-8 (the side row). A Play *tap* (no Track)
-  is still a normal Play.
+  Track 1-4 select the front four; **sessions 5-8 (and any off-board) are reached with the
+  fader-2 scrubber or Vol+.** (There is no Play-held shift: Play and the Track buttons are
+  on one resistor ladder, so the hardware can't report them held together.)
 - **Vol+ = next:** jumps to the next session that needs you, walking the queue.
 - **Faders:** 1 = scroll the focused session, 2 = scrub focus across all sessions (reaches
   sessions past the visible 8), 3 = the **calm dial** (slide down: only needs-you stays
@@ -142,14 +144,16 @@ way as multi mode).
   value, so bumping it never yanks anything.
 
 ### Autopilot drip (cockpit, dangerous mode only)
-Set `faders.assign.preset: "autopilot"` and `autopilot.enabled: true` (it is **off by
-default**, and only makes sense under `--dangerously-skip-permissions`). Dialing fader 4
-up arms the **focused** session at a cadence (`autopilot.steps_s`, e.g. 90/30/10s, 0 =
-disarm). When that session **stops**, the daemon auto-sends `autopilot.nudge`
-(`["continue","Enter"]`) to keep it going, and its LED slow-pulses. Guardrails: a real
-question (needs-you) pauses it, and after `autopilot.deadman` hands-off continues it
-**parks itself** and hard-alerts the LED so nothing loops forever. Pull the fader to 0 to
-disarm.
+Set `faders.assign.preset: "autopilot"`, `autopilot.enabled: true`, **and**
+`permission.enabled: false` (autopilot only arms when the SP-1 permission approve/deny is
+off, the dangerous-mode shape, and only with the `tmux` input backend so it has an exact
+pane). It is **off by default**. Dialing fader 4 up arms the **focused** session at a
+cadence (`autopilot.steps_s`, e.g. 90/30/10s, 0 = disarm). When that session **stops**,
+the daemon auto-sends `autopilot.nudge` (`["continue","Enter"]`) to its exact pane and the
+LED slow-pulses. Guardrails: a real question (needs-you) pauses it (and stays paused even
+if a Stop follows the question); a session with no known pane disarms rather than guess;
+after `autopilot.deadman` hands-off continues it **parks** and hard-alerts, and a held
+fader can't reset that, only a real prompt from you (or pulling the fader to 0) does.
 
 ## Troubleshooting
 - **A second Enter per Play press** , the SP-1 is in **Keyboard mode**; switch it to

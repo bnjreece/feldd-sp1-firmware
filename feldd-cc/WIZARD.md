@@ -80,20 +80,23 @@ For any change, capture the action as one of:
 
 ## Beat 2.5 , Cockpit extras (only if mode = cockpit)
 The cockpit lights all 8 LEDs (front 4 = sessions 1-4, side 4 = 5-8) and changes the
-controls: **Track 1-4 = jump** (tmux focus follows; **hold Play + Track** for the side
-row), **Vol+ = jump to the next needs-you**. Confirm those, then the faders:
+controls: **Track 1-4 = jump** (tmux focus follows; selects the front four, sessions 5-8
+are reached with the scrubber or Vol+ , there is no Play+Track shift, the hardware can't
+chord them), **Vol+ = jump to the next needs-you**. Confirm those, then the faders:
 - **Fader 1 = scroll** the focused session, **2 = scrub** focus across all sessions,
   **3 = calm dial** (down = only needs-you lit, up = show all states). These are good
   defaults; only change `faders.scroll/scrubber/calm` if they want a different layout.
 - **Fader 4 = assignable.** Ask which preset `[coarse]`:
   - `coarse` , snap-scroll the focused session by deciles (safe, useful).
   - `autopilot` , self-drive a stopped session (only offer/recommend if they run
-    `--dangerously-skip-permissions`). If chosen, set `autopilot.enabled: true`, confirm
-    the cadence buckets `autopilot.steps_s` `[0,90,30,10]`, the **deadman cap**
-    `autopilot.deadman` `[8]` (or pitch a time budget), and the `autopilot.nudge`
-    `[["continue","Enter"]]`. Spell out the guardrails: a real question pauses it, the
-    deadman parks it, the LED slow-pulses while armed. **Do not enable autopilot for a
-    permissions-on user** , it's pointless there and you'd be auto-typing past prompts.
+    `--dangerously-skip-permissions`). If chosen, set `autopilot.enabled: true` AND
+    `permission.enabled: false` AND keep `input.backend: tmux` , autopilot refuses to arm
+    unless all three hold (the daemon enforces it, not just docs). Confirm the cadence
+    buckets `autopilot.steps_s` `[0,90,30,10]`, the **deadman cap** `autopilot.deadman`
+    `[8]` (or pitch a time budget), and the `autopilot.nudge` `[["continue","Enter"]]`.
+    Spell out the guardrails: a real question pauses it (sticky even through a Stop), a
+    pane-less session disarms, the deadman parks it (a held fader can't reset it, only
+    your real prompt does), the LED slow-pulses while armed.
   - `rotate` , a second scrubber. `custom` , map `faders.assign.action` to a key list /
     `{"shell":..}` fired at the top of the throw.
 

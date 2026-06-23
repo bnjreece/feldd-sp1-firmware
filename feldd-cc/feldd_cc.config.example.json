@@ -50,7 +50,7 @@
   },
 
   "autopilot": {
-    "_comment": "Fader-4 'autopilot' preset. OFF by default; only enable it if you run --dangerously-skip-permissions. Dialing the fader up arms the FOCUSED session: when it STOPS, the daemon auto-sends 'nudge' every steps_s[bucket] seconds to keep it going. A real question (needs-you) pauses it; after 'deadman' hands-off continues it parks and hard-alerts the LED.",
+    "_comment": "Fader-4 'autopilot' preset. OFF by default and ENFORCED: it only arms when enabled=true AND permission.enabled=false (dangerous-mode shape) AND input.backend='tmux' (needs an exact pane). Dialing the fader up arms the FOCUSED session: when it STOPS, the daemon auto-sends 'nudge' every steps_s[bucket] seconds to its exact pane. A real question (needs-you) pauses it (sticky through a following Stop); a pane-less session disarms; after 'deadman' hands-off continues it parks + hard-alerts (a held fader can't reset that, only your real prompt does).",
     "enabled": false,
     "steps_s": [0, 90, 30, 10],
     "deadman": 8,
