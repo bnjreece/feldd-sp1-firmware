@@ -181,6 +181,8 @@ class State:
         self.fader_target = {}    # fader ix -> logical value (soft-takeover pickup)
         self.fader_last = {}      # fader ix -> last physical value seen
         self.fader_grabbed = set()
+        self.play_down = False    # cockpit: Play held as a shift modifier
+        self.play_chorded = False # cockpit: a Track was pressed during the Play hold
 
     def _ensure(self, sid, cwd, tmux=None):
         s = self.sessions.get(sid)
@@ -457,14 +459,38 @@ def run_button_action(state, action):
             send_keys_to(pane, cwd, *action)
 
 
-def handle_button(state, ix):
-    # Track 1-4 select which session the controls target (multi mode only).
-    if TRK1 <= ix <= TRK4 and not state.single:
-        sid = state.select_by_led(ix - TRK1)
-        log("select led %d -> %s" % (ix - TRK1, (sid or "none")[:8]))
+def _play_action(state):
+    """The normal Play action: resolve a pending permission (allow), else the button."""
+    if state.resolve_active("allow"):
+        log("permission: ALLOW")
         return
-    # If the active session is awaiting a permission decision, Play=allow / Vol-=deny
-    # resolve it (instead of their normal Enter / Esc).
+    run_button_action(state, state.cfg["buttons"].get("play"))
+
+
+def handle_button(state, ix, pressed=True):
+    # Cockpit: Play doubles as a shift modifier. Hold Play + Track = bank 2 (sessions
+    # 5-8). A Play with no Track chord before release = a normal Play tap (on release).
+    if state.cockpit and ix == PLAY:
+        if pressed:
+            state.play_down, state.play_chorded = True, False
+        else:
+            state.play_down = False
+            if not state.play_chorded:
+                _play_action(state)
+        return
+    if not pressed:
+        return                              # every other control acts on press only
+
+    # Track 1-4 select / jump (multi + cockpit). Shifted (Play held) -> bank 2.
+    if TRK1 <= ix <= TRK4 and not state.single:
+        bank = 4 if (state.cockpit and state.play_down) else 0
+        led = (ix - TRK1) + bank
+        if state.cockpit and state.play_down:
+            state.play_chorded = True       # consumed the hold -> suppress the Play tap
+        sid = state.select_by_led(led)
+        log("select led %d -> %s" % (led, (sid or "none")[:8]))
+        return
+    # Permission resolve for non-cockpit Play (cockpit Play is handled above on release).
     if ix == PLAY and state.resolve_active("allow"):
         log("permission: ALLOW")
         return
@@ -577,8 +603,8 @@ class Device:
                     if depth == 0:
                         try:
                             obj = json.loads(bytes(buf).decode("utf-8", "ignore"))
-                            if obj.get("t") == "mon" and obj.get("k") == "b" and obj.get("s") == 1:
-                                handle_button(state, int(obj.get("ix", -1)))
+                            if obj.get("t") == "mon" and obj.get("k") == "b":
+                                handle_button(state, int(obj.get("ix", -1)), obj.get("s") == 1)
                             elif obj.get("t") == "mon" and obj.get("k") == "f":
                                 handle_fader(state, int(obj.get("ix", -1)), int(obj.get("v", 0)))
                         except Exception:

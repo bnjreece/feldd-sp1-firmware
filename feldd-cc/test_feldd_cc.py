@@ -334,6 +334,40 @@ def test_reset_fader_grab_forces_repickup():
     assert st.fader_grab(0, 95) == 95
 
 
+def test_play_held_shifts_track_to_bank_two():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcdefgh":
+        st.set_state(sid, "/p/%s" % sid, "working")   # a..h on leds 0..7
+    fc.handle_button(st, fc.PLAY, True)                # Play DOWN -> shift armed
+    fc.handle_button(st, fc.TRK1, True)               # Track1 shifted -> led 4 = session e
+    fc.handle_button(st, fc.TRK1, False)
+    fc.handle_button(st, fc.PLAY, False)              # Play UP, chorded -> NO play action
+    assert st.active == "e"
+
+
+def test_play_tap_fires_on_release_without_chord():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working", pane="%1", tmux="t")
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda p, c, *k: sent.append(list(k))
+    try:
+        fc.handle_button(st, fc.PLAY, True)
+        assert sent == []                              # nothing on press (deferred)
+        fc.handle_button(st, fc.PLAY, False)           # tap completes -> normal Play
+    finally:
+        fc.send_keys_to = orig
+    assert sent == [["Enter"]]
+
+
+def test_cockpit_track_unshifted_is_bank_one():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcdefgh":
+        st.set_state(sid, "/p/%s" % sid, "working")
+    fc.handle_button(st, fc.TRK1, True)               # no Play held -> led 0 = session a
+    assert st.active == "a"
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []
