@@ -315,6 +315,25 @@ class State:
             s = self.sessions.get(sid)
             return (s.get("tmux"), s.get("pane")) if s else (None, None)
 
+    def set_active(self, sid):
+        with self.lock:
+            if sid in self.sessions:
+                self.active = sid
+
+    def next_needs(self):
+        """The next session in 'needs' state after the active one, by LED order (wraps).
+        Drives Vol+ = 'answer the next doorbell'."""
+        with self.lock:
+            needers = sorted((s["led"], sid) for sid, s in self.sessions.items()
+                             if s["state"] == "needs")
+            if not needers:
+                return None
+            cur_led = self.sessions.get(self.active, {}).get("led", -1)
+            for led, sid in needers:
+                if led > cur_led:
+                    return sid
+            return needers[0][1]        # past the last -> wrap to the first
+
     def led_mask(self, now):
         """8-bit mask of which LEDs should be lit right now (handles blink/done)."""
         lights = self.cfg["lights"]
@@ -512,6 +531,15 @@ def handle_button(state, ix, pressed=True):
             tmux_focus(*state.jump_info(sid))
             state.reset_fader_grab()        # re-pick-up faders for the new focus
         log("select led %d -> %s" % (led, (sid or "none")[:8]))
+        return
+    # Cockpit Vol+ = jump to the next session that needs you (walk the queue).
+    if state.cockpit and ix == VOLU:
+        sid = state.next_needs()
+        if sid:
+            state.set_active(sid)
+            tmux_focus(*state.jump_info(sid))
+            state.reset_fader_grab()
+        log("next-needs -> %s" % ((sid or "none")[:8]))
         return
     # Permission resolve for non-cockpit Play (cockpit Play is handled above on release).
     if ix == PLAY and state.resolve_active("allow"):

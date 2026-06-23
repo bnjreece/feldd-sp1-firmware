@@ -396,6 +396,33 @@ def test_track_jump_only_in_cockpit():
     assert st.active == "b" and calls == []
 
 
+def test_volplus_jumps_to_next_needs():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "needs", pane="%1", tmux="w1")   # led 0
+    st.set_state("b", "/y", "needs", pane="%2", tmux="w2")   # led 1, active=b (auto-focus)
+    calls = []
+    orig = fc.tmux_focus
+    fc.tmux_focus = lambda n, p: calls.append(n)
+    try:
+        fc.handle_button(st, fc.VOLU, True)      # next needer after b wraps to a
+    finally:
+        fc.tmux_focus = orig
+    assert st.active == "a" and calls == ["w1"]
+
+
+def test_volplus_noop_outside_cockpit():
+    st = fc.State(cfg(sessions={"mode": "multi"}))
+    st.set_state("a", "/x", "needs", pane="%1", tmux="w1")
+    calls = []
+    orig = fc.tmux_focus
+    fc.tmux_focus = lambda n, p: calls.append(n)
+    try:
+        fc.handle_button(st, fc.VOLU, True)      # multi: Vol+ runs its config action, no jump
+    finally:
+        fc.tmux_focus = orig
+    assert calls == []
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []
