@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 try:
     import serial  # pyserial
@@ -124,21 +125,24 @@ class State:
         self.single = self.cfg["sessions"]["mode"] == "single"
         # multi mode: project -> fixed Track LED pins. Normalize paths once; drop
         # bad / out-of-range entries. Pinned LEDs stay out of the auto-fill pool.
-        self.assign = []
-        for path, led in (self.cfg["sessions"].get("assign") or {}).items():
+        # A pin KEY matches EITHER a tmux session NAME (exact) OR a project PATH (cwd
+        # is/under it) — so pinning works whether you run claude from project dirs or
+        # from home in named tmux sessions.
+        self.assign = []   # (raw_key, normalized_path, led)
+        for key, led in (self.cfg["sessions"].get("assign") or {}).items():
             try:
                 led = int(led)
             except (TypeError, ValueError):
                 continue
             if 0 <= led < NUM_TRACK_LEDS:
-                self.assign.append((_norm(path), led))
-        self.pinned = {led for _, led in self.assign}
+                self.assign.append((key, _norm(key), led))
+        self.pinned = {led for _, _, led in self.assign}
         self.lock = threading.Lock()
         self.sessions = {}        # sid -> {"led": int, "state": str, "cwd": str, "t": float}
         self.free = [0] if self.single else [i for i in range(NUM_TRACK_LEDS) if i not in self.pinned]
         self.active = None        # sid the buttons currently drive
 
-    def _ensure(self, sid, cwd):
+    def _ensure(self, sid, cwd, tmux=None):
         s = self.sessions.get(sid)
         if s:
             if cwd:
@@ -147,28 +151,32 @@ class State:
         if self.single:
             led = 0                       # all sessions share LED 0 in single mode
         else:
-            led = self._assigned_led(cwd)  # a pinned project always gets its LED
+            led = self._assigned_led(cwd, tmux)  # a pinned session always gets its LED
             if led is None:
                 led = self.free.pop(0) if self.free else min(
                     self.sessions.values(), key=lambda x: x["t"])["led"]
-        s = {"led": led, "state": "idle", "cwd": cwd or "", "t": time.time()}
+        s = {"led": led, "state": "idle", "cwd": cwd or "", "pane": None, "tmux": tmux, "t": time.time()}
         self.sessions[sid] = s
         return s
 
-    def _assigned_led(self, cwd):
-        """The pinned Track LED for a session whose cwd is (or is under) an assigned
-        project path, else None."""
-        if not cwd:
-            return None
-        c = _norm(cwd)
-        for p, led in self.assign:
-            if p and (c == p or c.startswith(p + os.sep)):
+    def _assigned_led(self, cwd, tmux):
+        """The pinned Track LED for a session, matched by tmux session NAME (exact) or
+        by project PATH (cwd is/under it), else None."""
+        c = _norm(cwd) if cwd else None
+        for raw, p, led in self.assign:
+            if tmux and raw == tmux:
+                return led
+            if c and (c == p or c.startswith(p + os.sep)):
                 return led
         return None
 
-    def set_state(self, sid, cwd, st):
+    def set_state(self, sid, cwd, st, pane=None, tmux=None):
         with self.lock:
-            s = self._ensure(sid, cwd)
+            s = self._ensure(sid, cwd, tmux)
+            if pane:
+                s["pane"] = pane
+            if tmux:
+                s["tmux"] = tmux
             s["state"], s["t"] = st, time.time()
             if st == "needs":            # auto-focus the session that wants you
                 self.active = sid
@@ -192,10 +200,11 @@ class State:
                     return sid
         return None
 
-    def active_cwd(self):
+    def active_target(self):
+        """(tmux pane, cwd) of the session the buttons currently drive."""
         with self.lock:
             s = self.sessions.get(self.active)
-            return s["cwd"] if s else None
+            return (s.get("pane"), s.get("cwd")) if s else (None, None)
 
     def led_mask(self, now):
         """8-bit mask of which LEDs should be lit right now (handles blink/done)."""
@@ -222,18 +231,35 @@ class State:
 
 
 # --------------------------------------------------------------------------- hooks -> state
-def apply_hook(state, event):
+_pane_session = {}   # tmux pane id -> session name (cached; a pane's session is stable)
+
+def tmux_session_of(pane):
+    if not pane:
+        return None
+    if pane not in _pane_session:
+        try:
+            out = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", pane, "#{session_name}"],
+                capture_output=True, text=True, timeout=2).stdout.strip()
+        except Exception:
+            out = ""
+        _pane_session[pane] = out or None
+    return _pane_session[pane]
+
+
+def apply_hook(state, event, pane=None):
     name = event.get("hook_event_name") or event.get("event") or ""
     sid = event.get("session_id") or "default"
     cwd = event.get("cwd") or ""
+    tmux = tmux_session_of(pane)   # the hook carried $TMUX_PANE; resolve its tmux session
     if name == "SessionEnd":
         state.end(sid)
         log("hook", name, sid[:8])
         return
     st = state.cfg["lights"]["events"].get(name)
     if st:
-        state.set_state(sid, cwd, st)
-        log("hook", name, sid[:8], "->", st)
+        state.set_state(sid, cwd, st, pane=pane, tmux=tmux)
+        log("hook", name, sid[:8], (tmux or cwd or "?"), "->", st)
 
 
 # --------------------------------------------------------------------------- tmux input
@@ -260,14 +286,14 @@ def find_pane(cwd):
     return claude_panes[0] if claude_panes else None
 
 
-def send_keys(cwd, *keys):
-    pane = find_pane(cwd)
-    if not pane:
-        log("input: no claude tmux pane found (cwd=%s)" % (cwd or "?"))
+def send_keys_to(pane, cwd, *keys):
+    target = pane or find_pane(cwd)   # the exact pane the hook gave us, else best-match by cwd
+    if not target:
+        log("input: no target pane (cwd=%s)" % (cwd or "?"))
         return
     try:
-        subprocess.run(["tmux", "send-keys", "-t", pane, *keys], timeout=2)
-        log("input -> pane %s: %s" % (pane, " ".join(keys)))
+        subprocess.run(["tmux", "send-keys", "-t", target, *keys], timeout=2)
+        log("input -> pane %s: %s" % (target, " ".join(keys)))
     except Exception as e:
         log("input error:", e)
 
@@ -277,13 +303,13 @@ def run_button_action(state, action):
     null/[] = nothing."""
     if not action:
         return
+    pane, cwd = state.active_target()
     if isinstance(action, dict) and action.get("shell"):
         # shell=True is DELIBERATE: `action["shell"]` is a command the user bound to
         # this button in their own feldd_cc.config.json (like a tmux keybinding or a
         # launcher hotkey). The config file is trusted input at the same level as
         # this script, not untrusted network/user input, so this is a feature, not
         # an injection sink. Bind only commands you would run yourself.
-        cwd = state.active_cwd()
         try:
             subprocess.run(action["shell"], shell=True, cwd=cwd or None, timeout=10)  # noqa: S602
             log("input -> shell:", action["shell"])
@@ -291,7 +317,7 @@ def run_button_action(state, action):
             log("shell action error:", e)
         return
     if isinstance(action, list):
-        send_keys(state.active_cwd(), *action)
+        send_keys_to(pane, cwd, *action)
 
 
 def handle_button(state, ix):
@@ -389,11 +415,12 @@ def make_handler(state):
         def log_message(self, *a):  # quiet
             pass
         def do_POST(self):
+            pane = (parse_qs(urlparse(self.path).query).get("pane") or [None])[0]
             n = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(n) if n else b"{}"
             self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
             try:
-                apply_hook(state, json.loads(body or b"{}"))
+                apply_hook(state, json.loads(body or b"{}"), pane or None)
             except Exception as e:
                 log("hook parse error:", e)
         def do_GET(self):

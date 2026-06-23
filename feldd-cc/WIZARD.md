@@ -28,10 +28,12 @@ destructive. Keep it friendly and short. The daemon files live in this folder.
   - one project → you'll edit `<that-project>/.claude/settings.json`
 - **Session model:** "Track a **single** agent, or up to **4 at once** (one per
   Track button)?" `[single]` → `sessions.mode` = `single` or `multi`.
-  - If **multi**, optionally **pin projects to Track LEDs** so the mapping is
-    stable: "Want a project always on a specific Track light? e.g. your main repo
-    on Track 1." Record into `sessions.assign` as `{ "<project path>": <LED 0-3> }`.
-    A session whose cwd is (or is under) that path always lands on that LED.
+  - If **multi**, optionally **pin sessions to Track LEDs** so the mapping is stable.
+    Ask how they run claude: from **named tmux sessions** (often all in one dir) → pin
+    by **tmux session name**; from **project directories** → pin by **path**. Record
+    into `sessions.assign` as `{ "<tmux-session-name or path>": <LED 0-3> }` , a key
+    matches a session name (exact) or a cwd (is/under the path). To see their tmux
+    session names: `tmux list-sessions -F "#{session_name}"`.
 
 ## Beat 2 , Buttons
 Show the default map and ask "keep these, or change any?":

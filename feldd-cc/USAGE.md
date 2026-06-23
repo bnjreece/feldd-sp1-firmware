@@ -9,11 +9,11 @@ The console sends keystrokes to your Claude session with `tmux send-keys`, so yo
 `claude` sessions **must run inside tmux**. If you already run everything in tmux,
 you're set , nothing to change.
 
-How a button finds the right pane: the daemon sends to the tmux pane whose **working
-directory matches the active session's cwd** and that is running `claude`. So:
-- Sessions in **different directories** route cleanly.
-- Two sessions in the **same directory** are ambiguous , it'll pick one. Give
-  concurrent agents distinct dirs (or use pins, below) if you hit this.
+How a button finds the right pane: each hook carries its **tmux pane** (`$TMUX_PANE`),
+so the daemon sends keys to the **exact pane** the session lives in , precise even if
+all your sessions share a working directory (e.g. you launch them all from home in
+named tmux sessions). If a hook arrives without a pane (claude not in tmux), it falls
+back to matching the session's cwd to a `claude` pane.
 
 ## The daemon
 One background process bridges everything. Start it in its own tmux window so it
@@ -35,19 +35,24 @@ session: **solid** = working, **blink** = needs you, **flash** = done.
 Up to four sessions, **one Track LED each**:
 - **Auto-assign by arrival:** the 1st session to fire an event takes **Track 1's
   LED**, the 2nd takes **Track 2's**, and so on.
-- **Pin a project (recommended for multi):** make the mapping stable by pinning a
-  project path to a fixed LED in `feldd_cc.config.json`:
+- **Pin a session (recommended for multi):** make the mapping stable in
+  `feldd_cc.config.json`. A pin key matches **either a tmux session NAME** (exact) or
+  a **project PATH** (cwd is/under it) , pick whichever fits how you run claude:
   ```json
   "sessions": {
     "mode": "multi",
-    "assign": { "~/bnjmn/iamkeen": 0, "~/bnjmn/feldd-sp-1": 1 }
+    "assign": { "iamkeen": 0, "feldd": 1, "~/bnjmn/some-project": 2 }
   }
   ```
-  A session whose cwd **is, or is under,** an assigned path always lands on that LED
-  (Track 1 = LED 0). Everyone else auto-fills the remaining LEDs. Pinned LEDs are
-  reserved, so an unpinned session never steals your main repo's light.
-  **After editing the config, restart the daemon** (`tmux kill-window -t feldd-cc`
-  then start it again) so it reloads.
+  - **By tmux session name** (`"iamkeen": 0`) , best if you launch all your sessions
+    from one directory (e.g. home) in named tmux sessions. Track 1 = your `iamkeen`
+    session, always.
+  - **By project path** (`"~/bnjmn/x": 2`) , best if each session runs in its own
+    project dir. A cwd that is/under the path lands on that LED.
+
+  Pinned LEDs are reserved, so an unpinned session never steals your main repo's
+  light. **After editing the config, restart the daemon** (`tmux kill-window -t
+  feldd-cc`, then start it again) so it reloads.
 - **Which LED is which?** Trigger activity in a session and watch which LED goes
   solid, or `tmux attach -t feldd-cc` and read the `select led N -> <session>` lines.
 
