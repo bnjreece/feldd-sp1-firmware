@@ -309,6 +309,12 @@ class State:
             s = self.sessions.get(self.active)
             return (s.get("pane"), s.get("cwd")) if s else (None, None)
 
+    def jump_info(self, sid):
+        """(tmux session name, pane) of a session, for focus-follows-select jumps."""
+        with self.lock:
+            s = self.sessions.get(sid)
+            return (s.get("tmux"), s.get("pane")) if s else (None, None)
+
     def led_mask(self, now):
         """8-bit mask of which LEDs should be lit right now (handles blink/done)."""
         lights = self.cfg["lights"]
@@ -387,6 +393,20 @@ def find_pane(cwd):
         if is_claude:
             claude_panes.append(pid)
     return claude_panes[0] if claude_panes else None
+
+
+def tmux_focus(tmuxname, pane):
+    """Bring a session to the foreground: switch the attached tmux client to it (cockpit
+    'jump'). Focus-follows-select so the SP-1 surfaces whatever session you pick."""
+    if not tmuxname:
+        return
+    try:
+        subprocess.run(["tmux", "switch-client", "-t", tmuxname], timeout=2)
+        if pane:
+            subprocess.run(["tmux", "select-pane", "-t", pane], timeout=2)
+        log("jump -> %s" % tmuxname)
+    except Exception as e:
+        log("jump error:", e)
 
 
 def send_keys_to(pane, cwd, *keys):
@@ -488,6 +508,9 @@ def handle_button(state, ix, pressed=True):
         if state.cockpit and state.play_down:
             state.play_chorded = True       # consumed the hold -> suppress the Play tap
         sid = state.select_by_led(led)
+        if state.cockpit and sid:           # jump: bring that session to the foreground
+            tmux_focus(*state.jump_info(sid))
+            state.reset_fader_grab()        # re-pick-up faders for the new focus
         log("select led %d -> %s" % (led, (sid or "none")[:8]))
         return
     # Permission resolve for non-cockpit Play (cockpit Play is handled above on release).

@@ -368,6 +368,34 @@ def test_cockpit_track_unshifted_is_bank_one():
     assert st.active == "a"
 
 
+def test_track_jump_switches_tmux_client():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working", pane="%1", tmux="web")   # led 0
+    st.set_state("b", "/y", "working", pane="%2", tmux="api")   # led 1
+    calls = []
+    orig = fc.tmux_focus
+    fc.tmux_focus = lambda tmuxname, pane: calls.append((tmuxname, pane))
+    try:
+        fc.handle_button(st, 2, True)        # Track 2 -> led 1 -> session b -> focus api
+    finally:
+        fc.tmux_focus = orig
+    assert st.active == "b" and calls == [("api", "%2")]
+
+
+def test_track_jump_only_in_cockpit():
+    st = fc.State(cfg(sessions={"mode": "multi"}))
+    st.set_state("a", "/x", "working", pane="%1", tmux="web")
+    st.set_state("b", "/y", "working", pane="%2", tmux="api")
+    calls = []
+    orig = fc.tmux_focus
+    fc.tmux_focus = lambda tmuxname, pane: calls.append(tmuxname)
+    try:
+        fc.handle_button(st, 2, True)        # multi mode: select only, no tmux switch
+    finally:
+        fc.tmux_focus = orig
+    assert st.active == "b" and calls == []
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []
