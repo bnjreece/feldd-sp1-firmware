@@ -1,6 +1,6 @@
 SRC=../app/src
 CFLAGS=-Wall -Wextra -I$(SRC)
-TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6
+TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
 test_control_logic: test_control_logic.c $(SRC)/control_logic.c $(SRC)/control_logic.h
@@ -10,8 +10,8 @@ test_mapping: test_mapping.c $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/profile.h 
 test_profile: test_profile.c $(SRC)/profile.c $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h
 	$(CC) $(CFLAGS) -o $@ test_profile.c $(SRC)/profile.c $(SRC)/chord6.c
 test_profile_h_dep: $(SRC)/profile.h
-test_protocol: test_protocol.c $(SRC)/protocol.c $(SRC)/protocol.h $(SRC)/profile.h
-	$(CC) $(CFLAGS) -o $@ test_protocol.c $(SRC)/protocol.c $(SRC)/profile.c
+test_protocol: test_protocol.c $(SRC)/protocol.c $(SRC)/protocol.h $(SRC)/profile.h $(SRC)/led_override.c $(SRC)/led_override.h
+	$(CC) $(CFLAGS) -o $@ test_protocol.c $(SRC)/protocol.c $(SRC)/profile.c $(SRC)/led_override.c
 test_buttons: test_buttons.c $(SRC)/buttons.c $(SRC)/buttons.h
 	$(CC) $(CFLAGS) -DBUTTONS_HOST_TEST -o $@ test_buttons.c $(SRC)/buttons.c
 test_config_cdc: test_config_cdc.c $(SRC)/config_cdc_fmt.c $(SRC)/config_cdc.h $(SRC)/lib_header.h
@@ -42,5 +42,7 @@ test_chord_engine: test_chord_engine.c $(SRC)/chord_engine.c $(SRC)/chord_engine
 	$(CC) $(CFLAGS) -o $@ test_chord_engine.c $(SRC)/chord_engine.c
 test_chord6: test_chord6.c $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/profile.h
 	$(CC) $(CFLAGS) -o $@ test_chord6.c $(SRC)/chord6.c
+test_led_override: test_led_override.c $(SRC)/led_override.c $(SRC)/led_override.h
+	$(CC) $(CFLAGS) -o $@ test_led_override.c $(SRC)/led_override.c
 .PHONY: test clean
 clean: ; rm -f $(TESTS)

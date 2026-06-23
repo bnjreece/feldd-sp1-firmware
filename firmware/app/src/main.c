@@ -51,6 +51,7 @@
 #include "side_led.h"
 #include "wdt.h"
 #include "chord_engine.h"
+#include "led_override.h"
 
 /* TEMPORARY shift-layer test trigger (set to 0 to restore stock behaviour).
  * When 1: double-tapping PLAY (button index 0) latches the shift bank on/off,
@@ -1252,6 +1253,37 @@ int main(void)
          * -DFELDD_MODE_LED_SINGLE fallback collapses the indicator onto SP1_LED1/
          * P1.13 only. The front/track row is press-feedback + dial/peek, all-dark
          * at rest.) */
+
+        /* feldd-cc console: the host-LED override is the HIGHEST-PRIORITY writer.
+         * It runs LAST in the tick, after the normal track + side render above, so
+         * when a host owns the LEDs (via the `led` CDC verb) all 8 are driven from
+         * its mask and whatever the normal render wrote this tick is overwritten.
+         * When inactive this is a pure no-op, so the normal render is byte-for-byte
+         * unchanged. bit i -> LED i: 0-3 = track row, 4-7 = play/side row. Drives
+         * ONLY the existing LED pins (introduces no new GPIO). */
+        if (host_led_active()) {
+            uint8_t hm = host_led_get_mask();
+            const uint32_t hl_track[4] = {
+                SP1_TRACK_LED1, SP1_TRACK_LED2, SP1_TRACK_LED3, SP1_TRACK_LED4
+            };
+            for (int i = 0; i < 4; i++)
+                ((hm >> i) & 1u) ? nrf_gpio_pin_set(hl_track[i])
+                                 : nrf_gpio_pin_clear(hl_track[i]);
+#ifdef FELDD_MODE_LED_SINGLE
+            /* the 3 spare side pins are never driven in this build: fold the 4 side
+             * bits onto the one validated side LED (P1.13). */
+            if (hm & 0xF0u) nrf_gpio_pin_set(SP1_LED1);
+            else            nrf_gpio_pin_clear(SP1_LED1);
+#else
+            const uint32_t hl_play[4] = {
+                SP1_PLAY_LED1, SP1_PLAY_LED2, SP1_PLAY_LED3, SP1_PLAY_LED4
+            };
+            for (int i = 0; i < 4; i++)
+                ((hm >> (i + 4)) & 1u) ? nrf_gpio_pin_set(hl_play[i])
+                                       : nrf_gpio_pin_clear(hl_play[i]);
+#endif
+        }
+
         tick++;
         k_msleep(8);
     }

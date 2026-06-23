@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "protocol.h"
+#include "led_override.h"
 
 /* The caps array advertised in hello_r. Hardcoded for this task per spec. */
 #define CAPS_JSON "[\"trs\",\"usbmidi\",\"shift\",\"led\",\"mon\"]"
@@ -353,6 +354,35 @@ int proto_handle(const struct proto_store *s, const char *line,
         if (w < 0)
             return -1;
         return off + w;
+    }
+
+    /* ---- led ---- */
+    /* host-LED override for the Claude Code console (feldd-cc): drive the 8 LEDs
+     * from the host. {"ix":N,"on":B} = one LED; {"mask":M} = all 8 (bit i = LED i);
+     * {"release":true} = hand the LEDs back to the normal render.
+     * ix 0-3 = SP1_TRACK_LED1..4, ix 4-7 = SP1_PLAY_LED1..4. Calls the global
+     * host_led_* directly (pure state module, no proto_store plumbing). */
+    if (strcmp(verb, "led") == 0) {
+        int rel = 0, on;
+        uint32_t mask, ix;
+        if (json_bool(line, "release", &rel) == 0 && rel) {
+            host_led_release();
+        } else if (json_uint(line, "mask", &mask) == 0) {
+            if (mask > 255)
+                return emit_err(out, outcap, id, "BAD_VALUE", "mask 0..255");
+            host_led_mask((uint8_t)mask);
+        } else if (json_uint(line, "ix", &ix) == 0) {
+            if (ix > 7)
+                return emit_err(out, outcap, id, "BAD_INDEX", "ix 0..7");
+            if (json_bool(line, "on", &on) < 0)
+                return emit_err(out, outcap, id, "BAD_JSON", "missing on flag");
+            host_led_set((uint8_t)ix, on != 0);
+        } else {
+            return emit_err(out, outcap, id, "BAD_JSON", "need ix+on, mask, or release");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"led_r\",\"i\":%u,\"ok\":true,\"active\":%s,\"mask\":%u}",
+            id, host_led_active() ? "true" : "false", (unsigned)host_led_get_mask());
     }
 
     /* ---- unknown verb ---- */
