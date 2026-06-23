@@ -423,6 +423,34 @@ def test_volplus_noop_outside_cockpit():
     assert calls == []
 
 
+def test_fader_scroll_goes_to_percent():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working", pane="%9", tmux="w")
+    calls = []
+    orig = fc.tmux_scroll
+    fc.tmux_scroll = lambda pane, pct: calls.append((pane, pct))
+    try:
+        fc.fader_scroll(st, 127)             # full throw -> 100%
+    finally:
+        fc.tmux_scroll = orig
+    assert calls == [("%9", 100)]
+
+
+def test_fader_scroll_respects_pickup():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working", pane="%9", tmux="w")
+    st.fader_target[0] = 64
+    calls = []
+    orig = fc.tmux_scroll
+    fc.tmux_scroll = lambda p, pc: calls.append((p, pc))
+    try:
+        fc.fader_scroll(st, 60)              # below target -> ignored (no grab yet)
+        fc.fader_scroll(st, 70)              # crossed -> scrolls
+    finally:
+        fc.tmux_scroll = orig
+    assert calls == [("%9", round(70 * 100 / 127))]
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []

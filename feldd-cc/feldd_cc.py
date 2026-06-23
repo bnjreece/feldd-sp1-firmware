@@ -569,8 +569,36 @@ def handle_fader(state, ix, v):
         fader_assign(state, v)
 
 
+def tmux_scroll(pane, pct):
+    """Scroll a pane to pct (0-100) of its scrollback: 0 = live bottom, 100 = oldest
+    line. (copy-mode mechanics best-effort, to be verified on-device; stubbed in tests.)"""
+    try:
+        if pct <= 0:
+            subprocess.run(["tmux", "send-keys", "-t", pane, "-X", "cancel"], timeout=2)
+            return
+        size = subprocess.run(["tmux", "display", "-p", "-t", pane, "#{history_size}"],
+                              capture_output=True, text=True, timeout=2).stdout.strip()
+        line = int(int(size or 0) * (100 - pct) / 100)   # copy-mode line 0 = top of history
+        subprocess.run(["tmux", "copy-mode", "-t", pane], timeout=2)
+        subprocess.run(["tmux", "send-keys", "-t", pane, "-X", "history-top"], timeout=2)
+        if line:
+            subprocess.run(["tmux", "send-keys", "-t", pane, "-X", "-N", str(line),
+                            "cursor-down"], timeout=2)
+        log("scroll %s -> %d%%" % (pane, pct))
+    except Exception as e:
+        log("scroll error:", e)
+
+
 def fader_scroll(state, v):
-    pass        # Task 7: scroll the focused session
+    """Fader 1: absolute scroll position of the focused session (0-127 -> 0-100%)."""
+    ix = (state.cfg.get("faders") or {}).get("scroll", 0)
+    val = state.fader_grab(ix, v)
+    if val is None:
+        return                       # not picked up yet
+    pane, _ = state.active_target()
+    if not pane:
+        return
+    tmux_scroll(pane, round(val * 100 / 127))
 
 
 def fader_scrubber(state, v):
