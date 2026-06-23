@@ -13,6 +13,9 @@ __pycache__/
 # OS
 .DS_Store
 
+# feldd-cc: the user's runtime config is personal (the example is tracked)
+feldd-cc/feldd_cc.config.json
+
 # Compiled host-test binaries (built by firmware/test/Makefile): ignore the
 # extensionless test_* executables, keep the test_*.c sources tracked.
 firmware/test/test_*

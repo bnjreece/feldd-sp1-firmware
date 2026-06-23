@@ -1,0 +1,32 @@
+{
+  "_comment": "Copy to feldd_cc.config.json to customize. Anything you omit falls back to the daemon defaults. The setup wizard (WIZARD.md) writes this for you.",
+
+  "buttons": {
+    "_comment": "Each value is a list of tmux send-keys args, or {\"shell\": \"a command\"}, or null = do nothing. Track 1-4 are not listed: in multi mode they select the session; in single mode they are unused.",
+    "play": ["Enter"],
+    "vol_minus": ["Escape"],
+    "vol_plus": null,
+    "fwd": ["PageDown"],
+    "rwd": ["PageUp"]
+  },
+
+  "lights": {
+    "events": {
+      "_comment": "Claude Code hook event -> state. States: idle | working | needs | done.",
+      "UserPromptSubmit": "working",
+      "PreToolUse": "working",
+      "Notification": "needs",
+      "PermissionRequest": "needs",
+      "Stop": "done"
+    },
+    "blink_hz": 3.0,
+    "done_hold_s": 0.6,
+    "whole_row": false
+  },
+
+  "sessions": {
+    "mode": "single"
+  },
+
+  "hooks_scope": "global"
+}

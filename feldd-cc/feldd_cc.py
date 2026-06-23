@@ -8,9 +8,15 @@ Run:  python3 feldd_cc.py            (auto-detect the SP-1 CDC port)
       FELDD_PORT=/dev/cu.usbmodemXXXX python3 feldd_cc.py
       python3 feldd_cc.py --dry-run  (no device; logs the LED/input logic)
 
+Behaviour is customizable via feldd_cc.config.json (next to this file, or
+$FELDD_CC_CONFIG): button actions, light behaviour, and the session model. The
+setup wizard (WIZARD.md) writes that file for you. NO config file = the defaults
+below, which are today's exact behaviour.
+
 Hooks: merge hooks.settings.json into ~/.claude/settings.json (POSTs events to :9200/hook).
 """
 import argparse
+import copy
 import glob
 import json
 import os
@@ -25,23 +31,92 @@ try:
 except ImportError:
     serial = None
 
-NUM_TRACK_LEDS = 4            # the 4 reliable front LEDs (ix 0..3); side LEDs (4..7) left off in v1
-BLINK_HZ = 3.0               # "needs you" blink rate
-DONE_HOLD_S = 0.6            # how long the "done" flash stays lit
 RENDER_HZ = 20.0
-# button indices from feldd's monitor stream
+NUM_TRACK_LEDS = 4           # 4 reliable front LEDs (ix 0..3); side LEDs (4..7) off in v1
+# feldd monitor button indices
 PLAY, TRK1, TRK4, VOLU, VOLD, FWD, RWD = 0, 1, 4, 5, 6, 7, 8
+BTN_IX = {"play": PLAY, "vol_plus": VOLU, "vol_minus": VOLD, "fwd": FWD, "rwd": RWD}
+IX_BTN = {v: k for k, v in BTN_IX.items()}
 
 log = lambda *a: print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
 
 
-# ----------------------------------------------------------------------------- state
+# --------------------------------------------------------------------------- config
+# The four customizable axes. feldd_cc.config.json (next to this file, or
+# $FELDD_CC_CONFIG) DEEP-MERGES over these; a missing file = exactly these defaults.
+DEFAULTS = {
+    # button -> action. action = list of tmux send-keys ARGS, or {"shell": "cmd"},
+    # or null/[] = do nothing. Track 1-4 are not here: in "multi" mode they select
+    # the session the buttons target; in "single" mode they are unused.
+    "buttons": {
+        "play":      ["Enter"],      # approve / submit
+        "vol_minus": ["Escape"],     # interrupt
+        "vol_plus":  None,
+        "fwd":       ["PageDown"],   # scroll
+        "rwd":       ["PageUp"],
+    },
+    "lights": {
+        # Claude Code hook event -> session state (idle / working / needs / done).
+        "events": {
+            "SessionStart": "idle",
+            "UserPromptSubmit": "working",
+            "PreToolUse": "working",
+            "SubagentStart": "working",
+            "PostToolUse": "working",
+            "PostToolUseFailure": "working",
+            "Notification": "needs",
+            "PermissionRequest": "needs",
+            "Stop": "done",
+            "SubagentStop": "done",
+            "StopFailure": "done",
+        },
+        "blink_hz": 3.0,        # "needs you" blink rate
+        "done_hold_s": 0.6,     # how long the "done" flash holds
+        "whole_row": False,     # single mode: light 1 LED (False) or all 4 (True)
+    },
+    "sessions": {
+        "mode": "multi",        # "multi" = a LED per session + Track1-4 select;
+                                # "single" = one session, shown on LED 0 (or the row)
+    },
+    "hooks_scope": "global",    # informational for the wizard; the daemon ignores it
+}
+
+
+def _deep_merge(base, over):
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+def load_config(path=None):
+    cfg = copy.deepcopy(DEFAULTS)
+    p = (path or os.environ.get("FELDD_CC_CONFIG")
+         or os.path.join(os.path.dirname(os.path.abspath(__file__)), "feldd_cc.config.json"))
+    if os.path.exists(p):
+        try:
+            with open(p) as f:
+                _deep_merge(cfg, json.load(f))
+            log("config:", p)
+        except Exception as e:
+            log("config load error (%s); using defaults" % e)
+    return cfg
+
+
+CFG = copy.deepcopy(DEFAULTS)   # replaced in main(); tests pass their own to State
+
+
+# --------------------------------------------------------------------------- state
 class State:
     """Per-session LED state + which session the physical controls target."""
-    def __init__(self):
+    def __init__(self, cfg=None):
+        self.cfg = cfg or CFG
+        self.single = self.cfg["sessions"]["mode"] == "single"
         self.lock = threading.Lock()
         self.sessions = {}        # sid -> {"led": int, "state": str, "cwd": str, "t": float}
-        self.free = list(range(NUM_TRACK_LEDS))
+        self.free = [0] if self.single else list(range(NUM_TRACK_LEDS))
         self.active = None        # sid the buttons currently drive
 
     def _ensure(self, sid, cwd):
@@ -50,8 +125,11 @@ class State:
             if cwd:
                 s["cwd"] = cwd
             return s
-        led = self.free.pop(0) if self.free else min(
-            self.sessions.values(), key=lambda x: x["t"])["led"]
+        if self.single:
+            led = 0                       # all sessions share LED 0 in single mode
+        else:
+            led = self.free.pop(0) if self.free else min(
+                self.sessions.values(), key=lambda x: x["t"])["led"]
         s = {"led": led, "state": "idle", "cwd": cwd or "", "t": time.time()}
         self.sessions[sid] = s
         return s
@@ -68,7 +146,7 @@ class State:
     def end(self, sid):
         with self.lock:
             s = self.sessions.pop(sid, None)
-            if s and s["led"] not in self.free:
+            if s and not self.single and s["led"] not in self.free:
                 self.free.append(s["led"])
                 self.free.sort()
             if self.active == sid:
@@ -89,18 +167,21 @@ class State:
 
     def led_mask(self, now):
         """8-bit mask of which LEDs should be lit right now (handles blink/done)."""
+        lights = self.cfg["lights"]
+        blink_hz, done_hold = lights["blink_hz"], lights["done_hold_s"]
+        whole_row = lights.get("whole_row", False)
         with self.lock:
             mask = 0
-            blink_on = int(now * BLINK_HZ * 2) % 2 == 0
+            blink_on = int(now * blink_hz * 2) % 2 == 0
             for s in self.sessions.values():
                 st, led = s["state"], s["led"]
                 on = (st == "working"
                       or (st == "needs" and blink_on)
-                      or (st == "done" and now - s["t"] < DONE_HOLD_S))
-                if st == "done" and now - s["t"] >= DONE_HOLD_S:
+                      or (st == "done" and now - s["t"] < done_hold))
+                if st == "done" and now - s["t"] >= done_hold:
                     s["state"] = "idle"
                 if on:
-                    mask |= (1 << led)
+                    mask |= 0x0F if (self.single and whole_row) else (1 << led)
             return mask
 
     def any_sessions(self):
@@ -108,22 +189,7 @@ class State:
             return bool(self.sessions)
 
 
-# ----------------------------------------------------------------------------- hooks -> state
-# Claude Code hook event name -> session state. (Verify real payloads via capture-hooks.sh first.)
-EVENT_STATE = {
-    "SessionStart": "idle",
-    "UserPromptSubmit": "working",
-    "PreToolUse": "working",
-    "SubagentStart": "working",
-    "PostToolUse": "working",
-    "PostToolUseFailure": "working",
-    "Notification": "needs",
-    "PermissionRequest": "needs",
-    "Stop": "done",
-    "SubagentStop": "done",
-    "StopFailure": "done",
-}
-
+# --------------------------------------------------------------------------- hooks -> state
 def apply_hook(state, event):
     name = event.get("hook_event_name") or event.get("event") or ""
     sid = event.get("session_id") or "default"
@@ -132,13 +198,13 @@ def apply_hook(state, event):
         state.end(sid)
         log("hook", name, sid[:8])
         return
-    st = EVENT_STATE.get(name)
+    st = state.cfg["lights"]["events"].get(name)
     if st:
         state.set_state(sid, cwd, st)
         log("hook", name, sid[:8], "->", st)
 
 
-# ----------------------------------------------------------------------------- tmux input
+# --------------------------------------------------------------------------- tmux input
 def find_pane(cwd):
     """Resolve the tmux pane running `claude` for a given working dir (best match)."""
     try:
@@ -161,6 +227,7 @@ def find_pane(cwd):
             claude_panes.append(pid)
     return claude_panes[0] if claude_panes else None
 
+
 def send_keys(cwd, *keys):
     pane = find_pane(cwd)
     if not pane:
@@ -172,24 +239,41 @@ def send_keys(cwd, *keys):
     except Exception as e:
         log("input error:", e)
 
-BUTTON_KEYS = {
-    PLAY: ["Enter"],         # approve / submit
-    VOLD: ["Escape"],        # interrupt
-    FWD:  ["PageDown"],      # scroll
-    RWD:  ["PageUp"],
-}
+
+def run_button_action(state, action):
+    """Perform a configured button action: a list of tmux keys, {"shell": cmd}, or
+    null/[] = nothing."""
+    if not action:
+        return
+    if isinstance(action, dict) and action.get("shell"):
+        # shell=True is DELIBERATE: `action["shell"]` is a command the user bound to
+        # this button in their own feldd_cc.config.json (like a tmux keybinding or a
+        # launcher hotkey). The config file is trusted input at the same level as
+        # this script, not untrusted network/user input, so this is a feature, not
+        # an injection sink. Bind only commands you would run yourself.
+        cwd = state.active_cwd()
+        try:
+            subprocess.run(action["shell"], shell=True, cwd=cwd or None, timeout=10)  # noqa: S602
+            log("input -> shell:", action["shell"])
+        except Exception as e:
+            log("shell action error:", e)
+        return
+    if isinstance(action, list):
+        send_keys(state.active_cwd(), *action)
+
 
 def handle_button(state, ix):
-    if TRK1 <= ix <= TRK4:                  # track buttons select which session is active
+    # Track 1-4 select which session the controls target (multi mode only).
+    if TRK1 <= ix <= TRK4 and not state.single:
         sid = state.select_by_led(ix - TRK1)
         log("select led %d -> %s" % (ix - TRK1, (sid or "none")[:8]))
         return
-    keys = BUTTON_KEYS.get(ix)
-    if keys:
-        send_keys(state.active_cwd(), *keys)
+    name = IX_BTN.get(ix)
+    if name:
+        run_button_action(state, state.cfg["buttons"].get(name))
 
 
-# ----------------------------------------------------------------------------- SP-1 CDC link
+# --------------------------------------------------------------------------- SP-1 CDC link
 class Device:
     def __init__(self, port_glob, dry):
         self.dry = dry
@@ -267,7 +351,7 @@ class Device:
                     buf.clear()           # resync on junk between objects
 
 
-# ----------------------------------------------------------------------------- HTTP hook server
+# --------------------------------------------------------------------------- HTTP hook server
 def make_handler(state):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet
@@ -285,15 +369,19 @@ def make_handler(state):
     return H
 
 
-# ----------------------------------------------------------------------------- main
+# --------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("FELDD_CC_PORT", "9200")))
     ap.add_argument("--serial-glob", default=os.environ.get("FELDD_PORT", "/dev/cu.usbmodem*"))
+    ap.add_argument("--config", default=None, help="path to feldd_cc.config.json")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    state = State()
+    global CFG
+    CFG = load_config(args.config)
+    log("session mode:", CFG["sessions"]["mode"])
+    state = State(CFG)
     dev = Device(args.serial_glob, args.dry_run)
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))

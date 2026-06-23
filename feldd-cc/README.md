@@ -16,8 +16,10 @@ Claude Code  --hooks (HTTP)-->  feldd_cc daemon  --CDC JSON-->  SP-1 (feldd)
 - **Buttons → Claude:** the daemon reads feldd's CDC monitor stream (each control by index) and sends
   keystrokes to the right Claude pane via `tmux send-keys` (no macOS Accessibility permission needed).
 
-**Setup is itself a Claude Code task** — point your Claude at this folder and tell it to follow
-[`SETUP.md`](SETUP.md); it installs the dependency, runs the daemon, and merges the hooks for you.
+**Setup is itself a Claude Code task.** Point your Claude at this folder and say *"set up my feldd-cc
+console using WIZARD.md."* It runs a short **guided wizard** , conversationally asks about buttons,
+lights, scope, and single-vs-multi session, writes the config, wires the hooks, and self-tests so you
+*see* it work. ([`SETUP.md`](SETUP.md) is the manual runbook if you'd rather do it by hand.)
 
 ## Status
 v1 host daemon. Pairs with the feldd firmware **`led` verb, shipped in feldd 0.16.0-beta** (firmware
@@ -66,7 +68,11 @@ trusting the map.
 - `hooks.settings.json` — the Claude Code hooks snippet (HTTP hooks → the daemon).
 - `capture-hooks.sh` — log every real hook payload so you can verify the event schema first.
 - `bench_led.py` — a tiny standalone tester that drives the 8 LEDs over serial (no daemon needed).
-- `SETUP.md` — the agent-followable setup runbook.
+- `WIZARD.md` — the guided, agent-run setup wizard (the easy path).
+- `SETUP.md` — the manual setup runbook (do-it-by-hand path).
+- `feldd_cc.config.json` — your customizations (button actions / lights / session model); omit any key
+  to keep its default. See `feldd_cc.config.example.json` for the full schema.
+- `test_feldd_cc.py` — host tests for the config + state logic (`python3 test_feldd_cc.py`).
 
 ## Roadmap
 - v1 (here): single/few sessions, track LEDs = state, Play/rocker/Esc input via tmux.
