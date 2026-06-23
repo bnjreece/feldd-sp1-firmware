@@ -93,6 +93,16 @@ DEFAULTS = {
         #   "none"      = lights only, no button input (works everywhere).
         "backend": "tmux",
     },
+    "permission": {
+        # When Claude would prompt you for tool permission, blink the session's LED
+        # and let Play=allow / Vol-=deny resolve it from the SP-1 (driven by the
+        # blocking PermissionRequest hook). Only fires when YOUR OWN permission setup
+        # would have prompted anyway -- no imposed gate list, never under `claude -p`.
+        # After timeout_s with no press, it falls through to the normal on-screen
+        # prompt. Set enabled=false to skip hardware approval (lights only).
+        "enabled": True,
+        "timeout_s": 90,
+    },
     "hooks_scope": "global",    # informational for the wizard; the daemon ignores it
 }
 
@@ -151,6 +161,7 @@ class State:
         self.sessions = {}        # sid -> {"led": int, "state": str, "cwd": str, "t": float}
         self.free = [0] if self.single else [i for i in range(NUM_TRACK_LEDS) if i not in self.pinned]
         self.active = None        # sid the buttons currently drive
+        self.pending = {}         # sid -> {"ev": Event, "result": "allow"|"deny"|None} (awaiting Play/Vol-)
 
     def _ensure(self, sid, cwd, tmux=None):
         s = self.sessions.get(sid)
@@ -192,6 +203,42 @@ class State:
                 self.active = sid
             elif self.active is None:
                 self.active = sid
+
+    def await_decision(self, sid, cwd, pane, tmux):
+        """Register a pending permission decision: blink the session, focus it, and
+        return a slot whose .ev fires when Play/Vol- resolves it (or it's cancelled)."""
+        with self.lock:
+            s = self._ensure(sid, cwd, tmux)
+            if pane:
+                s["pane"] = pane
+            s["state"], s["t"] = "needs", time.time()
+            self.active = sid
+            slot = {"ev": threading.Event(), "result": None}
+            self.pending[sid] = slot
+        return slot
+
+    def resolve_active(self, behavior):
+        """Play=allow / Vol-=deny resolves the ACTIVE session's pending decision, if
+        any. Returns True if it resolved one (so the button skips its normal action)."""
+        with self.lock:
+            slot = self.pending.pop(self.active, None)
+            if not slot:
+                return False
+            slot["result"] = behavior
+            s = self.sessions.get(self.active)
+            if s:
+                s["state"] = "working" if behavior == "allow" else "idle"
+                s["t"] = time.time()
+        slot["ev"].set()
+        return True
+
+    def cancel_pending(self, sid):
+        """Drop a pending decision (it timed out -> the normal on-screen prompt shows)."""
+        with self.lock:
+            if self.pending.pop(sid, None):
+                s = self.sessions.get(sid)
+                if s and s["state"] == "needs":
+                    s["state"], s["t"] = "working", time.time()
 
     def end(self, sid):
         with self.lock:
@@ -372,6 +419,14 @@ def handle_button(state, ix):
         sid = state.select_by_led(ix - TRK1)
         log("select led %d -> %s" % (ix - TRK1, (sid or "none")[:8]))
         return
+    # If the active session is awaiting a permission decision, Play=allow / Vol-=deny
+    # resolve it (instead of their normal Enter / Esc).
+    if ix == PLAY and state.resolve_active("allow"):
+        log("permission: ALLOW")
+        return
+    if ix == VOLD and state.resolve_active("deny"):
+        log("permission: DENY")
+        return
     name = IX_BTN.get(ix)
     if name:
         run_button_action(state, state.cfg["buttons"].get(name))
@@ -460,15 +515,46 @@ def make_handler(state):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet
             pass
+
+        def _send_json(self, body=""):
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_POST(self):
-            pane = (parse_qs(urlparse(self.path).query).get("pane") or [None])[0]
+            parsed = urlparse(self.path)
+            pane = (parse_qs(parsed.query).get("pane") or [None])[0] or None
             n = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(n) if n else b"{}"
-            self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
             try:
-                apply_hook(state, json.loads(body or b"{}"), pane or None)
+                event = json.loads(body or b"{}")
             except Exception as e:
-                log("hook parse error:", e)
+                log("parse error:", e); event = {}
+            if parsed.path == "/await":
+                self._await(event, pane)          # PermissionRequest: hold open for Play/Vol-
+            else:
+                self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+                apply_hook(state, event, pane)    # /hook: reply instantly, drive the lights
+
+        def _await(self, event, pane):
+            perm = state.cfg.get("permission") or {}
+            sid = event.get("session_id") or "default"
+            if not perm.get("enabled", True):
+                self._send_json("")               # hardware approval off -> normal prompt
+                return
+            slot = state.await_decision(sid, event.get("cwd") or "", pane, tmux_session_of(pane))
+            log("permission await:", sid[:8], event.get("tool_name", "?"))
+            if slot["ev"].wait(timeout=float(perm.get("timeout_s", 90))) and slot["result"]:
+                self._send_json(json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": slot["result"]}}}))
+            else:
+                state.cancel_pending(sid)          # timed out -> fall through to the prompt
+                self._send_json("")
+
         def do_GET(self):
             self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
     return H

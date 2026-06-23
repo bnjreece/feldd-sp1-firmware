@@ -78,11 +78,30 @@ Up to four sessions, **one Track LED each**:
   Each button can be a key list (`["Enter"]`, tmux key syntax), a shell command
   (`{"shell": "say done"}`), or `null` (nothing).
 
+## Approving permissions from the SP-1 (`permission`)
+When Claude Code **would prompt you** to allow a tool call, the daemon can hold that
+prompt open and let you answer it from the controller: the session's LED **blinks**,
+**Play = allow**, **Vol- = deny**. The same two buttons you already use, now answering
+the real permission dialog.
+
+- It only fires when **your own permission setup** would have prompted anyway , it
+  reads whatever rules you run with. If you live in `--dangerously-skip-permissions`
+  it never fires; if you allow all `Bash` but prompt on writes, only the writes blink.
+  There is **no imposed gate list**.
+- It never fires under `claude -p` (non-interactive), and after `permission.timeout_s`
+  (default 90s) with no press it **falls through to the normal on-screen prompt** , so
+  walking away never blocks a turn.
+- This needs the **blocking `PermissionRequest` hook** from `hooks.settings.json` (it
+  POSTs to `/await` with a long `--max-time`). The other hooks stay instant.
+- Turn it off with `"permission": {"enabled": false}` , you keep the blink as a
+  notification but answer on screen.
+
 ## Customizing (`feldd_cc.config.json`)
 Edit the file next to `feldd_cc.py`; omit any key to keep its default. Full schema:
 [`feldd_cc.config.example.json`](feldd_cc.config.example.json). Axes: `buttons`,
 `lights` (`events` map, `blink_hz`, `done_hold_s`, `whole_row`), `sessions` (`mode`,
-`assign`). **Restart the daemon after editing.**
+`assign`), `input` (`backend`), `permission` (`enabled`, `timeout_s`). **Restart the
+daemon after editing.**
 
 ## Troubleshooting
 - **A second Enter per Play press** , the SP-1 is in **Keyboard mode**; switch it to

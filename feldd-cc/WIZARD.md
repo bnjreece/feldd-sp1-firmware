@@ -39,6 +39,15 @@ destructive. Keep it friendly and short. The daemon files live in this folder.
   (types into the *focused* window; needs the Accessibility permission), otherwise
   `none` (lights only). The **lights work either way**; this only decides whether the
   buttons type.
+- **Approve permissions from the SP-1?** "When Claude **would ask you** to allow a
+  tool, want to answer it from the controller , the LED blinks, **Play = allow, Vol- =
+  deny**?" `[yes]` → `permission.enabled` = `true`. Make clear it **respects their own
+  permission setup** (it only fires when Claude would have prompted anyway , someone on
+  `--dangerously-skip-permissions` will simply never see it, and that's correct), times
+  out to the on-screen prompt after `permission.timeout_s` `[90]`, and never fires
+  under `claude -p`. No → `enabled: false` (the LED still blinks as a heads-up; they
+  answer on screen). **This is the one hook that blocks** , note that Beat 5 wires a
+  `PermissionRequest` hook with a long timeout for it.
 
 ## Beat 2 , Buttons
 Show the default map and ask "keep these, or change any?":
@@ -75,6 +84,10 @@ Beat 1:
    our entries to each event's array , **do not clobber** the user's existing hooks.
 3. Write valid JSON and **show the diff**. These are HTTP hooks that POST to the
    local daemon; harmless (fast-fail) when the daemon is down.
+4. **One hook blocks on purpose:** `PermissionRequest` POSTs to `/await` with a long
+   `--max-time` so the SP-1 can answer the allow/deny (Beat 1's permission choice). If
+   they set `permission.enabled: false`, the daemon returns immediately and it behaves
+   like the others. All the rest are instant (`--max-time 2`).
 
 ## Beat 6 , Run it + self-test (the payoff)
 1. **Start the daemon** so it keeps running:
@@ -96,6 +109,10 @@ Beat 1:
    no button input (lights only).
 3. **Go live:** start (or restart) a real `claude` session (in a tmux pane if using
    the `tmux` backend) so the new hooks load. The track LED now tracks that session.
+4. **Permission approve/deny (if enabled):** the next time Claude **would prompt** them
+   for a tool, the session LED blinks , **Play allows, Vol- denies**. (Nothing to
+   pre-test: it only fires on a real prompt, and someone running
+   `--dangerously-skip-permissions` correctly never sees it.)
 
 ## Done. To undo
 Remove the feldd-cc `hooks` block from the settings file (restore the `.bak`),

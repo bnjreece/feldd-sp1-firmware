@@ -7,7 +7,7 @@
     "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @-" }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @-" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @-" }] }],
-    "PermissionRequest":[{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @-" }] }],
+    "PermissionRequest":[{ "hooks": [{ "type": "command", "timeout": 120, "command": "curl -s --max-time 115 -X POST \"http://localhost:9200/await?pane=$TMUX_PANE\" -d @-" }] }],
     "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @-" }] }],
     "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @-" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @-" }] }]

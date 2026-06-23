@@ -24,7 +24,8 @@ lights, scope, and single-vs-multi session, writes the config, wires the hooks, 
 *see* it work. ([`SETUP.md`](SETUP.md) is the manual runbook if you'd rather do it by hand.)
 
 ## Status
-v1 host daemon. Pairs with the feldd firmware **`led` verb, shipped in feldd 0.16.0-beta** (firmware
+v2 host daemon (state lights + button input + permission approve/deny). Pairs with the feldd firmware
+**`led` verb, shipped in feldd 0.16.0-beta** (firmware
 source is in this repo's [`firmware/`](../firmware); flash the ready image from
 **[feldd.com/sp-1/guide?beta=1](https://feldd.com/sp-1/guide?beta=1)**). The led verb + the monitor
 stream are **hardware-validated** on a real SP-1. Flashing is SWD-validate-only per the
@@ -41,6 +42,13 @@ never-blind-flash rule.
 
 The session that's *needs-you* auto-becomes the active target, so the common loop is: an LED blinks →
 hit **Play** to approve / answer.
+
+**Approve permissions from the controller.** When Claude *would* prompt you to allow a tool, the daemon
+holds that prompt open: the session LED blinks and **Play = allow, Vol- = deny** answer the real
+permission dialog. It only fires when **your own permission setup** would have prompted anyway (no
+imposed gate list; `--dangerously-skip-permissions` correctly never triggers it), never under
+`claude -p`, and times out to the on-screen prompt after `permission.timeout_s`. Toggle with
+`permission.enabled` (see [`USAGE.md`](USAGE.md)).
 
 ## Wire contract (feldd CDC, JSON objects, brace-framed, no newline)
 - **Controls in (in feldd today):** after `{"t":"monset","on":true}` the device emits
@@ -79,9 +87,11 @@ trusting the map.
 - `test_feldd_cc.py` — host tests for the config + state logic (`python3 test_feldd_cc.py`).
 
 ## Roadmap
-- v1 (here): single/few sessions, track LEDs = state, Play/rocker/Esc input via tmux.
-- v2: the `agentsd` trick — hold a `PermissionRequest` hook open so Play resolves the *real* allow/deny.
-- v3: 4 LEDs = 4 concurrent agents, faders = token-budget / scroll-position, the feldd LED-status language.
+- v1: single/few sessions, track LEDs = state, Play/rocker/Esc input via tmux. **done.**
+- v2: hold a `PermissionRequest` hook open so Play/Vol- resolve the *real* allow/deny (the `agentsd`
+  trick), respecting your own permission setup. **done** , see "Approve permissions from the controller."
+- v3 (next): faders = **scroll position** in the active pane (tmux copy-mode jump). The feldd
+  LED-status language for 4 concurrent agents.
 
 Prior art this is modeled on: `paultyng/agentsd`, `bobek-balinek/claude-lamp`, `danielrosehill/Claude-Macropad-V2`.
 

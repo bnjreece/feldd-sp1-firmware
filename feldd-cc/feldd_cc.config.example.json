@@ -39,5 +39,11 @@
     "backend": "tmux"
   },
 
+  "permission": {
+    "_comment": "Approve/deny tool-permission prompts from the SP-1. When Claude WOULD prompt you (per YOUR OWN permission setup -- no imposed gate list), the session's LED blinks: Play = allow, Vol- = deny. After timeout_s with no press it falls through to the normal on-screen prompt. Never fires under 'claude -p'. enabled=false = lights only, decide on screen.",
+    "enabled": true,
+    "timeout_s": 90
+  },
+
   "hooks_scope": "global"
 }

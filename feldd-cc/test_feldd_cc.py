@@ -192,6 +192,80 @@ def test_input_backend_dispatch():
         fc.send_osascript, fc.send_keys_to = o, t
 
 
+def test_permission_defaults():
+    c = cfg()
+    assert c["permission"]["enabled"] is True
+    assert c["permission"]["timeout_s"] == 90
+
+
+def test_await_decision_focuses_and_blinks():
+    st = fc.State(cfg())
+    slot = st.await_decision("a", "/x", "%1", "web")
+    assert st.active == "a"                       # the awaiting session grabs focus
+    assert st.sessions["a"]["state"] == "needs"   # ...and blinks
+    assert st.sessions["a"]["pane"] == "%1"
+    assert st.pending.get("a") is slot
+    assert not slot["ev"].is_set()                # still waiting on a press
+
+
+def test_play_resolves_allow_without_typing_enter():
+    st = fc.State(cfg())
+    slot = st.await_decision("a", "/x", "%1", "web")
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda pane, cwd, *keys: sent.append(list(keys))
+    try:
+        fc.handle_button(st, fc.PLAY)             # Play -> ALLOW, not a literal Enter
+    finally:
+        fc.send_keys_to = orig
+    assert slot["result"] == "allow" and slot["ev"].is_set()
+    assert sent == []                             # did NOT type Enter into the pane
+    assert "a" not in st.pending                  # consumed
+    assert st.sessions["a"]["state"] == "working"
+
+
+def test_vold_resolves_deny():
+    st = fc.State(cfg())
+    slot = st.await_decision("a", "/x", "%1", "web")
+    fc.handle_button(st, fc.VOLD)                 # Vol- -> DENY
+    assert slot["result"] == "deny" and slot["ev"].is_set()
+    assert "a" not in st.pending
+    assert st.sessions["a"]["state"] == "idle"
+
+
+def test_resolve_active_noop_when_nothing_pending():
+    st = fc.State(cfg())
+    st.set_state("a", "/x", "working", pane="%1", tmux="t")
+    assert st.resolve_active("allow") is False    # no pending -> Play does its normal action
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda pane, cwd, *keys: sent.append(list(keys))
+    try:
+        fc.handle_button(st, fc.PLAY)             # ...so a real Enter goes through
+    finally:
+        fc.send_keys_to = orig
+    assert sent == [["Enter"]]
+
+
+def test_resolve_active_only_touches_the_active_session():
+    st = fc.State(cfg(sessions={"mode": "multi"}))
+    slot_a = st.await_decision("a", "/x", "%1", "web")   # active = a
+    slot_b = st.await_decision("b", "/y", "%2", "api")   # active = b (latest)
+    assert st.resolve_active("allow") is True            # resolves b only
+    assert slot_b["result"] == "allow" and slot_b["ev"].is_set()
+    assert slot_a["result"] is None and not slot_a["ev"].is_set()
+    assert "a" in st.pending                             # a still waiting
+
+
+def test_cancel_pending_reverts_and_does_not_fire():
+    st = fc.State(cfg())
+    slot = st.await_decision("a", "/x", "%1", "web")
+    st.cancel_pending("a")                        # timeout path
+    assert "a" not in st.pending
+    assert not slot["ev"].is_set()                # never resolved
+    assert st.sessions["a"]["state"] == "working" # reverted off the blink
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
