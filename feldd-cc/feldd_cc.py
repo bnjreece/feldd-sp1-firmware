@@ -143,6 +143,9 @@ class State:
     def __init__(self, cfg=None):
         self.cfg = cfg or CFG
         self.single = self.cfg["sessions"]["mode"] == "single"
+        self.cockpit = self.cfg["sessions"]["mode"] == "cockpit"
+        # cockpit drives all 8 LEDs (front 0-3 + side 4-7); multi = 4; single = 1.
+        self.n_leds = 1 if self.single else (8 if self.cockpit else NUM_TRACK_LEDS)
         # multi mode: project -> fixed Track LED pins. Normalize paths once; drop
         # bad / out-of-range entries. Pinned LEDs stay out of the auto-fill pool.
         # A pin KEY matches EITHER a tmux session NAME (exact) OR a project PATH (cwd
@@ -154,12 +157,12 @@ class State:
                 led = int(led)
             except (TypeError, ValueError):
                 continue
-            if 0 <= led < NUM_TRACK_LEDS:
+            if 0 <= led < self.n_leds:
                 self.assign.append((key, _norm(key), led))
         self.pinned = {led for _, _, led in self.assign}
         self.lock = threading.Lock()
         self.sessions = {}        # sid -> {"led": int, "state": str, "cwd": str, "t": float}
-        self.free = [0] if self.single else [i for i in range(NUM_TRACK_LEDS) if i not in self.pinned]
+        self.free = [0] if self.single else [i for i in range(self.n_leds) if i not in self.pinned]
         self.active = None        # sid the buttons currently drive
         self.pending = {}         # sid -> {"ev": Event, "result": "allow"|"deny"|None} (awaiting Play/Vol-)
 

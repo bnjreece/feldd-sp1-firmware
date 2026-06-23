@@ -295,6 +295,23 @@ def test_cancel_pending_reverts_and_does_not_fire():
     assert st.sessions["a"]["state"] == "working" # reverted off the blink
 
 
+# ---- v3 cockpit ----------------------------------------------------------
+def test_cockpit_allocates_eight_leds():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcdefgh":
+        st.set_state(sid, "/p/%s" % sid, "working")
+    assert {st.sessions[s]["led"] for s in "abcdefgh"} == set(range(8))
+    assert st.led_mask(time.time()) == 0xFF
+
+
+def test_cockpit_pin_to_high_led_sticks():
+    st = fc.State(cfg(sessions={"mode": "cockpit", "assign": {"web": 6}}))
+    st.set_state("x", "/home/u", "working", tmux="web")
+    assert st.sessions["x"]["led"] == 6          # a cockpit pin can be 0..7
+    st.set_state("y", "/home/u", "working", tmux="other")
+    assert st.sessions["y"]["led"] == 0          # unpinned -> first free, 6 reserved
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
