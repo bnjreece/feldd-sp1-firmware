@@ -175,6 +175,7 @@ class State:
         self.pinned = {led for _, _, led in self.assign}
         self.lock = threading.Lock()
         self.sessions = {}        # sid -> {"led": int, "state": str, "cwd": str, "t": float}
+        self._seq = 0             # monotonic arrival index (stable scrubber order)
         self.free = [0] if self.single else [i for i in range(self.n_leds) if i not in self.pinned]
         self.active = None        # sid the buttons currently drive
         self.pending = {}         # sid -> {"ev": Event, "result": "allow"|"deny"|None} (awaiting Play/Vol-)
@@ -198,7 +199,9 @@ class State:
             if led is None:
                 led = self.free.pop(0) if self.free else min(
                     self.sessions.values(), key=lambda x: x["t"])["led"]
-        s = {"led": led, "state": "idle", "cwd": cwd or "", "pane": None, "tmux": tmux, "t": time.time()}
+        s = {"led": led, "state": "idle", "cwd": cwd or "", "pane": None, "tmux": tmux,
+             "t": time.time(), "seq": self._seq}
+        self._seq += 1
         self.sessions[sid] = s
         return s
 
@@ -320,6 +323,16 @@ class State:
         with self.lock:
             if sid in self.sessions:
                 self.active = sid
+
+    def session_at_fraction(self, frac):
+        """The session at frac (0..1) along the stable arrival order (scrubber target).
+        Sweeps ALL sessions, so it reaches sessions past the visible 8."""
+        with self.lock:
+            order = [sid for _, sid in sorted((s["seq"], sid)
+                     for sid, s in self.sessions.items())]
+            if not order:
+                return None
+            return order[min(len(order) - 1, int(frac * len(order)))]
 
     def next_needs(self):
         """The next session in 'needs' state after the active one, by LED order (wraps).
@@ -607,7 +620,18 @@ def fader_scroll(state, v):
 
 
 def fader_scrubber(state, v):
-    pass        # Task 9: select / slide the session window
+    """Fader 2: scrub focus across all sessions (continuous twin of the Track buttons,
+    and the way to reach sessions past the visible 8)."""
+    f = state.cfg.get("faders") or {}
+    ix = f.get("scrubber", 1)
+    val = state.fader_grab(ix, v)
+    if val is None:
+        return
+    sid = state.session_at_fraction(val / 127.0)
+    if sid:
+        state.set_active(sid)
+        tmux_focus(*state.jump_info(sid))
+        state.reset_fader_grab(f.get("scroll", 0))   # new focus -> re-pick-up scroll only
 
 
 def fader_calm(state, v):

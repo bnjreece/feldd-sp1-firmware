@@ -466,6 +466,34 @@ def test_calm_default_shows_everything():
     assert st.led_mask(time.time()) & 1      # untouched calm dial = full visibility
 
 
+def test_fader_scrubber_selects_across_sessions():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcd":
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid, tmux="t-%s" % sid)
+    calls = []
+    orig = fc.tmux_focus
+    fc.tmux_focus = lambda n, p: calls.append(n)
+    try:
+        fc.fader_scrubber(st, 127)           # full throw -> last session (d)
+        fc.fader_scrubber(st, 0)             # bottom -> first session (a)
+    finally:
+        fc.tmux_focus = orig
+    assert st.active == "a" and calls == ["t-d", "t-a"]
+
+
+def test_scrubber_reaches_sessions_beyond_eight():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for i in range(12):
+        st.set_state("s%02d" % i, "/p/%d" % i, "working", pane="%%%d" % i, tmux="t%d" % i)
+    orig = fc.tmux_focus
+    fc.tmux_focus = lambda n, p: None
+    try:
+        fc.fader_scrubber(st, 127)           # 12 sessions: full throw reaches the last
+    finally:
+        fc.tmux_focus = orig
+    assert st.active == "s11"
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []
