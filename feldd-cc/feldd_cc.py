@@ -201,8 +201,13 @@ class State:
         else:
             led = self._assigned_led(cwd, tmux)  # a pinned session always gets its LED
             if led is None:
-                led = self.free.pop(0) if self.free else min(
-                    self.sessions.values(), key=lambda x: x["t"])["led"]
+                if self.free:
+                    led = self.free.pop(0)
+                elif self.cockpit:
+                    led = None      # overflow stays OFF-BOARD (not on an LED) rather than
+                                    # colliding onto one; still reachable via scrubber / Vol+
+                else:
+                    led = min(self.sessions.values(), key=lambda x: x["t"])["led"]
         s = {"led": led, "state": "idle", "cwd": cwd or "", "pane": None, "tmux": tmux,
              "t": time.time(), "seq": self._seq, "awaiting": False, "stopped_at": None}
         self._seq += 1
@@ -284,7 +289,12 @@ class State:
         """Soft-takeover (pickup): ignore a fader until its physical value reaches the
         logical target, then 'grab' and track it. Returns the value to apply, or None
         while not yet grabbed. Same idea feldd uses on layer/profile switch, so a fader
-        that's out of position doesn't yank the parameter when you bump it."""
+        that's out of position doesn't yank the parameter when you bump it.
+
+        INVARIANT: fader_grab / reset_fader_grab and the fader_* pickup fields are
+        touched ONLY from the device read_loop thread (via handle_fader / handle_button),
+        so they are intentionally lock-free. Do NOT call them from the HTTP or render
+        thread without adding locking."""
         if ix in self.fader_grabbed:
             self.fader_target[ix] = v
             return v
@@ -308,7 +318,8 @@ class State:
     def end(self, sid):
         with self.lock:
             s = self.sessions.pop(sid, None)
-            if s and not self.single and s["led"] not in self.free and s["led"] not in self.pinned:
+            if (s and not self.single and isinstance(s["led"], int)
+                    and s["led"] not in self.free and s["led"] not in self.pinned):
                 self.free.append(s["led"])
                 self.free.sort()
             if self.active == sid:
@@ -353,11 +364,12 @@ class State:
         """The next session in 'needs' state after the active one, by LED order (wraps).
         Drives Vol+ = 'answer the next doorbell'."""
         with self.lock:
-            needers = sorted((s["led"], sid) for sid, s in self.sessions.items()
-                             if s["state"] == "needs")
+            needers = sorted(((s["led"] if isinstance(s["led"], int) else 99), sid)
+                             for sid, s in self.sessions.items() if s["state"] == "needs")
             if not needers:
                 return None
-            cur_led = self.sessions.get(self.active, {}).get("led", -1)
+            cl = self.sessions.get(self.active, {}).get("led")
+            cur_led = cl if isinstance(cl, int) else -1
             for led, sid in needers:
                 if led > cur_led:
                     return sid
@@ -459,6 +471,8 @@ class State:
             breathe_on = int(now) % 2 == 0          # ~0.5 Hz slow pulse for autopilot
             for sid, s in self.sessions.items():
                 st, led = s["state"], s["led"]
+                if led is None:
+                    continue                     # off-board cockpit session: no LED
                 on = ((st == "working" and show_working)
                       or (st == "needs" and blink_on)
                       or (st == "done" and show_done and now - s["t"] < done_hold))
@@ -744,7 +758,8 @@ def fader_calm(state, v):
     val = state.fader_grab(ix, v)
     if val is None:
         return
-    state.calm = val
+    with state.lock:                # led_mask reads calm under the lock; write under it too
+        state.calm = val
 
 
 def fader_autopilot(state, v, ix=3):
@@ -764,7 +779,7 @@ def fader_assign(state, v):
     """Fader 4: assignable. Route the move to the configured preset."""
     a = (state.cfg.get("faders") or {}).get("assign") or {}
     ix = a.get("ix", 3)
-    preset = a.get("preset", "autopilot")
+    preset = a.get("preset", "coarse")   # safe default (matches DEFAULTS); autopilot is opt-in
     if preset == "autopilot":
         fader_autopilot(state, v, ix)
     elif preset == "coarse":

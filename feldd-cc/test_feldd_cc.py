@@ -461,6 +461,24 @@ def test_cockpit_allocates_eight_leds():
     assert st.led_mask(time.time()) == 0xFF
 
 
+def test_cockpit_overflow_goes_offboard():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for i in range(10):
+        st.set_state("s%d" % i, "/p/%d" % i, "working")
+    leds = [st.sessions["s%d" % i]["led"] for i in range(10)]
+    assert sorted(l for l in leds if l is not None) == list(range(8))   # 8 distinct LEDs
+    assert leds[8] is None and leds[9] is None                          # overflow off-board
+    assert st.led_mask(time.time()) == 0xFF                             # no crash, lights the 8
+
+
+def test_next_needs_handles_offboard():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for i in range(9):
+        st.set_state("s%d" % i, "/p/%d" % i, "working", pane="%%%d" % i, tmux="t%d" % i)
+    st.set_state("s8", "/p/8", "needs")          # the off-board (led None) session needs you
+    assert st.next_needs() == "s8"               # reachable, no sort crash
+
+
 def test_cockpit_pin_to_high_led_sticks():
     st = fc.State(cfg(sessions={"mode": "cockpit", "assign": {"web": 6}}))
     st.set_state("x", "/home/u", "working", tmux="web")
