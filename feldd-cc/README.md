@@ -24,8 +24,10 @@ lights, scope, and single-vs-multi session, writes the config, wires the hooks, 
 *see* it work. ([`SETUP.md`](SETUP.md) is the manual runbook if you'd rather do it by hand.)
 
 ## Status
-v2 host daemon (state lights + button input + permission approve/deny). Pairs with the feldd firmware
-**`led` verb, shipped in feldd 0.16.0-beta** (firmware
+v3 host daemon: state lights + button input + permission approve/deny + a **cockpit mode** (8 LEDs =
+8 sessions, Play-held shift, Track = jump, Vol+ = next-needs-you, four fader jobs, and an opt-in
+autopilot drip). See [`USAGE.md`](USAGE.md#cockpit-mode-sessionsmode-cockpit). Pairs with the feldd
+firmware **`led` verb, shipped in feldd 0.16.0-beta** (firmware
 source is in this repo's [`firmware/`](../firmware); flash the ready image from
 **[feldd.com/sp-1/guide?beta=1](https://feldd.com/sp-1/guide?beta=1)**). The led verb + the monitor
 stream are **hardware-validated** on a real SP-1. Flashing is SWD-validate-only per the
@@ -90,8 +92,10 @@ trusting the map.
 - v1: single/few sessions, track LEDs = state, Play/rocker/Esc input via tmux. **done.**
 - v2: hold a `PermissionRequest` hook open so Play/Vol- resolve the *real* allow/deny (the `agentsd`
   trick), respecting your own permission setup. **done** , see "Approve permissions from the controller."
-- v3 (next): faders = **scroll position** in the active pane (tmux copy-mode jump). The feldd
-  LED-status language for 4 concurrent agents.
+- v3: the **cockpit** , 8 LEDs = 8 sessions, Play-held shift bank, Track = jump (tmux focus follows),
+  Vol+ = next-needs-you, faders = scroll / scrubber / calm dial / assignable, and an opt-in autopilot
+  drip. **done** (daemon + host tests; tmux jump/scroll to be verified on-device).
+- v4 (next): **Macro pad** , the free buttons (Track in single mode, Vol+) send saved prompts.
 
 Prior art this is modeled on: `paultyng/agentsd`, `bobek-balinek/claude-lamp`, `danielrosehill/Claude-Macropad-V2`.
 

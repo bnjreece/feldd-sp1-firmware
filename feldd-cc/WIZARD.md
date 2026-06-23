@@ -26,14 +26,16 @@ destructive. Keep it friendly and short. The daemon files live in this folder.
   or just **one project**?" `[all]`
   - all → you'll edit `~/.claude/settings.json`
   - one project → you'll edit `<that-project>/.claude/settings.json`
-- **Session model:** "Track a **single** agent, or up to **4 at once** (one per
-  Track button)?" `[single]` → `sessions.mode` = `single` or `multi`.
-  - If **multi**, optionally **pin sessions to Track LEDs** so the mapping is stable.
-    Ask how they run claude: from **named tmux sessions** (often all in one dir) → pin
-    by **tmux session name**; from **project directories** → pin by **path**. Record
-    into `sessions.assign` as `{ "<tmux-session-name or path>": <LED 0-3> }` , a key
-    matches a session name (exact) or a cwd (is/under the path). To see their tmux
-    session names: `tmux list-sessions -F "#{session_name}"`.
+- **Session model:** "Track a **single** agent, up to **4 at once** (one per Track
+  button), or the **cockpit** (up to **8**, plus faders to read/select/tune and a
+  self-driving autopilot)?" `[single]` → `sessions.mode` = `single` / `multi` / `cockpit`.
+  - If **multi** or **cockpit**, optionally **pin sessions to LEDs** so the mapping is
+    stable. Ask how they run claude: from **named tmux sessions** (often all in one dir)
+    → pin by **tmux session name**; from **project directories** → pin by **path**.
+    Record into `sessions.assign` as `{ "<tmux-session-name or path>": <LED> }` (multi:
+    0-3; cockpit: 0-7). To see their tmux session names:
+    `tmux list-sessions -F "#{session_name}"`.
+  - If **cockpit**, walk the extras (Beat 2.5).
 - **Input backend:** "Do you run `claude` inside **tmux**?" Yes → `input.backend` =
   `tmux` (precise, multi-session, no permissions). No → on macOS offer `osascript`
   (types into the *focused* window; needs the Accessibility permission), otherwise
@@ -75,6 +77,25 @@ For any change, capture the action as one of:
 - a shell command, e.g. `{"shell": "say done"}` (runs on their machine , only what
   they'd run themselves)
 - `null` = do nothing
+
+## Beat 2.5 , Cockpit extras (only if mode = cockpit)
+The cockpit lights all 8 LEDs (front 4 = sessions 1-4, side 4 = 5-8) and changes the
+controls: **Track 1-4 = jump** (tmux focus follows; **hold Play + Track** for the side
+row), **Vol+ = jump to the next needs-you**. Confirm those, then the faders:
+- **Fader 1 = scroll** the focused session, **2 = scrub** focus across all sessions,
+  **3 = calm dial** (down = only needs-you lit, up = show all states). These are good
+  defaults; only change `faders.scroll/scrubber/calm` if they want a different layout.
+- **Fader 4 = assignable.** Ask which preset `[coarse]`:
+  - `coarse` , snap-scroll the focused session by deciles (safe, useful).
+  - `autopilot` , self-drive a stopped session (only offer/recommend if they run
+    `--dangerously-skip-permissions`). If chosen, set `autopilot.enabled: true`, confirm
+    the cadence buckets `autopilot.steps_s` `[0,90,30,10]`, the **deadman cap**
+    `autopilot.deadman` `[8]` (or pitch a time budget), and the `autopilot.nudge`
+    `[["continue","Enter"]]`. Spell out the guardrails: a real question pauses it, the
+    deadman parks it, the LED slow-pulses while armed. **Do not enable autopilot for a
+    permissions-on user** , it's pointless there and you'd be auto-typing past prompts.
+  - `rotate` , a second scrubber. `custom` , map `faders.assign.action` to a key list /
+    `{"shell":..}` fired at the top of the throw.
 
 ## Beat 3 , Lights
 Show the defaults and ask "keep or tweak?":

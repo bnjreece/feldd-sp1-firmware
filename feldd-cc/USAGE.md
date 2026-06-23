@@ -119,6 +119,38 @@ Edit the file next to `feldd_cc.py`; omit any key to keep its default. Full sche
 `assign`), `input` (`backend`), `permission` (`enabled`, `timeout_s`). **Restart the
 daemon after editing.**
 
+## Cockpit mode (`sessions.mode: "cockpit"`)
+The fleet view: **8 LEDs = 8 sessions**, the buttons fly you between them, the faders
+read and tune. Set `"sessions": {"mode": "cockpit"}` (pin sessions to LEDs 0-7 the same
+way as multi mode).
+
+- **The board:** front 4 LEDs = sessions 1-4, side 4 LEDs = sessions 5-8. off = idle,
+  solid = working, fast blink = needs you, quick flash = just finished, slow pulse = on
+  autopilot.
+- **Track 1-4 = jump:** switches your tmux client to that LED's session (focus follows).
+  **Hold Play + Track 1-4** to address sessions 5-8 (the side row). A Play *tap* (no Track)
+  is still a normal Play.
+- **Vol+ = next:** jumps to the next session that needs you, walking the queue.
+- **Faders:** 1 = scroll the focused session, 2 = scrub focus across all sessions (reaches
+  sessions past the visible 8), 3 = the **calm dial** (slide down: only needs-you stays
+  lit and busy sessions go dark; slide up: show everything), 4 = assignable (`faders.assign.preset`):
+  - `coarse` (default) = snap-scroll the focused session by deciles.
+  - `autopilot` = self-drive a stopped session (see below).
+  - `rotate` = a second scrubber. `custom` = fire an action at the top of the throw.
+
+  Faders use **soft-takeover**: a fader only grabs once you move it past the current
+  value, so bumping it never yanks anything.
+
+### Autopilot drip (cockpit, dangerous mode only)
+Set `faders.assign.preset: "autopilot"` and `autopilot.enabled: true` (it is **off by
+default**, and only makes sense under `--dangerously-skip-permissions`). Dialing fader 4
+up arms the **focused** session at a cadence (`autopilot.steps_s`, e.g. 90/30/10s, 0 =
+disarm). When that session **stops**, the daemon auto-sends `autopilot.nudge`
+(`["continue","Enter"]`) to keep it going, and its LED slow-pulses. Guardrails: a real
+question (needs-you) pauses it, and after `autopilot.deadman` hands-off continues it
+**parks itself** and hard-alerts the LED so nothing loops forever. Pull the fader to 0 to
+disarm.
+
 ## Troubleshooting
 - **A second Enter per Play press** , the SP-1 is in **Keyboard mode**; switch it to
   **MIDI mode** (its own keystrokes are doubling the daemon's).

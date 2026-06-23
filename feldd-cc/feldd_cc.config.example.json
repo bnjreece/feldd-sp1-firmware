@@ -26,13 +26,35 @@
   },
 
   "sessions": {
+    "_mode_comment": "single = one agent on LED 0 (or whole row); multi = up to 4, one Track LED each; cockpit = up to 8 (front 4 + side 4), Play-held shift to drive 5-8, Track = jump (tmux focus follows), Vol+ = next-needs-you, and the faders/autopilot below come alive.",
     "mode": "multi",
-    "_assign_comment": "multi mode only: PIN a session to a fixed Track LED 0-3. A KEY matches EITHER a tmux session NAME (exact) OR a project PATH (cwd is/under it). Use NAMES if you launch claude from one dir (e.g. home) in named tmux sessions; use PATHS if each session runs in its project dir. Others auto-fill the remaining LEDs.",
+    "_assign_comment": "PIN a session to a fixed LED. multi: 0-3. cockpit: 0-7. A KEY matches EITHER a tmux session NAME (exact) OR a project PATH (cwd is/under it). Use NAMES if you launch claude from one dir (e.g. home) in named tmux sessions; use PATHS if each session runs in its project dir. Others auto-fill the rest.",
     "assign": {
       "web": 0,
       "api": 1,
       "~/code/notes": 2
     }
+  },
+
+  "faders": {
+    "_comment": "COCKPIT MODE ONLY. Which fader ix (0-3) does which job. scroll = absolute scroll position of the focused session; scrubber = sweep focus across all sessions; calm = board sensitivity (0 = only needs-you lit, full = all states); assign = fader 4, choose a preset.",
+    "scroll": 0,
+    "scrubber": 1,
+    "calm": 2,
+    "assign": {
+      "_preset_comment": "coarse = snap-scroll the focused session by deciles; autopilot = self-drive a stopped session (needs autopilot.enabled); rotate = a second scrubber; custom = fire 'action' (a key list / {shell}) at the top of the throw.",
+      "ix": 3,
+      "preset": "coarse",
+      "action": null
+    }
+  },
+
+  "autopilot": {
+    "_comment": "Fader-4 'autopilot' preset. OFF by default; only enable it if you run --dangerously-skip-permissions. Dialing the fader up arms the FOCUSED session: when it STOPS, the daemon auto-sends 'nudge' every steps_s[bucket] seconds to keep it going. A real question (needs-you) pauses it; after 'deadman' hands-off continues it parks and hard-alerts the LED.",
+    "enabled": false,
+    "steps_s": [0, 90, 30, 10],
+    "deadman": 8,
+    "nudge": ["continue", "Enter"]
   },
 
   "input": {
