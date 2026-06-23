@@ -494,6 +494,33 @@ def test_scrubber_reaches_sessions_beyond_eight():
     assert st.active == "s11"
 
 
+def test_fader_assign_routes_autopilot():
+    st = fc.State(cfg(sessions={"mode": "cockpit"},
+                      faders={"assign": {"ix": 3, "preset": "autopilot"}}))
+    seen = []
+    orig = fc.fader_autopilot
+    fc.fader_autopilot = lambda s, v, ix: seen.append((v, ix))
+    try:
+        fc.handle_fader(st, 3, 100)          # fader 4 -> assign router -> autopilot
+    finally:
+        fc.fader_autopilot = orig
+    assert seen == [(100, 3)]
+
+
+def test_fader_assign_rotate_scrubs():
+    st = fc.State(cfg(sessions={"mode": "cockpit"},
+                      faders={"assign": {"ix": 3, "preset": "rotate"}}))
+    for sid in "abcd":
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid, tmux="t-%s" % sid)
+    orig = fc.tmux_focus
+    fc.tmux_focus = lambda n, p: None
+    try:
+        fc.handle_fader(st, 3, 127)          # rotate preset -> scrubber on fader 3 -> last
+    finally:
+        fc.tmux_focus = orig
+    assert st.active == "d"
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []

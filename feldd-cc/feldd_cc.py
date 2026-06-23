@@ -619,11 +619,12 @@ def fader_scroll(state, v):
     tmux_scroll(pane, round(val * 100 / 127))
 
 
-def fader_scrubber(state, v):
-    """Fader 2: scrub focus across all sessions (continuous twin of the Track buttons,
-    and the way to reach sessions past the visible 8)."""
+def fader_scrubber(state, v, ix=None):
+    """Fader 2 (or fader-4 'rotate' preset): scrub focus across all sessions. ix is the
+    physical fader whose pickup we track (so 'rotate' on fader 4 tracks fader 4)."""
     f = state.cfg.get("faders") or {}
-    ix = f.get("scrubber", 1)
+    if ix is None:
+        ix = f.get("scrubber", 1)
     val = state.fader_grab(ix, v)
     if val is None:
         return
@@ -632,6 +633,24 @@ def fader_scrubber(state, v):
         state.set_active(sid)
         tmux_focus(*state.jump_info(sid))
         state.reset_fader_grab(f.get("scroll", 0))   # new focus -> re-pick-up scroll only
+
+
+def fader_coarse(state, v, ix):
+    """Fader-4 'coarse read' preset: snap the focused session's scroll to deciles, the
+    coarse companion to fader 1's fine scroll. (Tool-call-mark jumps are a refinement.)"""
+    val = state.fader_grab(ix, v)
+    if val is None:
+        return
+    pane, _ = state.active_target()
+    if pane:
+        tmux_scroll(pane, round(val * 10 / 127) * 10)
+
+
+def fader_custom(state, v, action):
+    """Fader-4 'custom' preset: fire a configured action (key list / {"shell":..}) when
+    the fader reaches the top of its throw. The assignable escape hatch."""
+    if action and v >= 120:
+        run_button_action(state, action)
 
 
 def fader_calm(state, v):
@@ -644,8 +663,23 @@ def fader_calm(state, v):
     state.calm = val
 
 
+def fader_autopilot(state, v, ix=3):
+    pass        # Task 11: autopilot drip
+
+
 def fader_assign(state, v):
-    pass        # Task 10: assignable preset router
+    """Fader 4: assignable. Route the move to the configured preset."""
+    a = (state.cfg.get("faders") or {}).get("assign") or {}
+    ix = a.get("ix", 3)
+    preset = a.get("preset", "autopilot")
+    if preset == "autopilot":
+        fader_autopilot(state, v, ix)
+    elif preset == "coarse":
+        fader_coarse(state, v, ix)
+    elif preset == "rotate":
+        fader_scrubber(state, v, ix)
+    elif preset == "custom":
+        fader_custom(state, v, a.get("action"))
 
 
 # --------------------------------------------------------------------------- SP-1 CDC link
