@@ -13,8 +13,10 @@ Claude Code  --hooks (HTTP)-->  feldd_cc daemon  --CDC JSON-->  SP-1 (feldd)
 
 - **State → lights:** Claude Code hooks POST lifecycle events to the daemon; it maps them to the SP-1's
   track LEDs (a session is *working* / *needs you* / *done*).
-- **Buttons → Claude:** the daemon reads feldd's CDC monitor stream (each control by index) and sends
-  keystrokes to the right Claude pane via `tmux send-keys` (no macOS Accessibility permission needed).
+- **Buttons → Claude:** the daemon reads feldd's CDC monitor stream and types into your session.
+  Default `tmux send-keys` (precise, multi-session, no permissions); non-tmux users can switch to a
+  macOS focused-window backend or lights-only via `input.backend` (see [`USAGE.md`](USAGE.md)). The
+  **lights need no tmux at all** , every Claude Code user gets them.
 
 **Setup is itself a Claude Code task.** Point your Claude at this folder and say *"set up my feldd-cc
 console using WIZARD.md."* It runs a short **guided wizard** , conversationally asks about buttons,

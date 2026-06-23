@@ -83,6 +83,16 @@ DEFAULTS = {
         # the remaining LEDs. e.g. {"~/bnjmn/iamkeen": 0, "~/bnjmn/feldd-sp-1": 1}
         "assign": {},
     },
+    "input": {
+        # how a button press reaches your Claude session:
+        #   "tmux"      = tmux send-keys to the session's pane (precise, multi-session,
+        #                 no permissions; needs tmux) -- the default.
+        #   "osascript" = macOS System Events keystroke to the FOCUSED window (no tmux
+        #                 needed, but needs Accessibility permission and can only type
+        #                 into whatever terminal is frontmost).
+        #   "none"      = lights only, no button input (works everywhere).
+        "backend": "tmux",
+    },
     "hooks_scope": "global",    # informational for the wizard; the daemon ignores it
 }
 
@@ -298,6 +308,36 @@ def send_keys_to(pane, cwd, *keys):
         log("input error:", e)
 
 
+# Tmux key name -> macOS key code, for the osascript / focused-window backend.
+OSA_KEYCODE = {
+    "Enter": 36, "Return": 36, "Escape": 53, "Esc": 53, "Tab": 48, "BTab": 48,
+    "Space": 49, "BSpace": 51, "Up": 126, "Down": 125, "Left": 123, "Right": 124,
+    "PageUp": 116, "PageDown": 121, "Home": 115, "End": 119, "Delete": 117,
+}
+_OSA_MOD = {"C": "control down", "M": "option down", "S": "shift down"}
+
+
+def _osa_fragment(key):
+    if key in OSA_KEYCODE:
+        return "key code %d" % OSA_KEYCODE[key]
+    if len(key) >= 3 and key[1] == "-" and key[0] in _OSA_MOD:   # C-c, M-x, S-Tab ...
+        base = key[2:]
+        return 'keystroke "%s" using %s' % (base.replace('"', '\\"'), _OSA_MOD[key[0]])
+    return 'keystroke "%s"' % key.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def send_osascript(keys):
+    """Type into the FOCUSED window via macOS System Events (no tmux; needs the
+    Accessibility permission). Focus-based, so it can't target a specific session."""
+    script = ("tell application \"System Events\"\n"
+              + "\n".join(_osa_fragment(k) for k in keys) + "\nend tell")
+    try:
+        subprocess.run(["osascript", "-e", script], timeout=3)
+        log("input -> focused (osascript): %s" % " ".join(keys))
+    except Exception as e:
+        log("osascript error:", e)
+
+
 def run_button_action(state, action):
     """Perform a configured button action: a list of tmux keys, {"shell": cmd}, or
     null/[] = nothing."""
@@ -317,7 +357,13 @@ def run_button_action(state, action):
             log("shell action error:", e)
         return
     if isinstance(action, list):
-        send_keys_to(pane, cwd, *action)
+        backend = (state.cfg.get("input") or {}).get("backend", "tmux")
+        if backend == "none":
+            return
+        if backend == "osascript":
+            send_osascript(action)
+        else:
+            send_keys_to(pane, cwd, *action)
 
 
 def handle_button(state, ix):

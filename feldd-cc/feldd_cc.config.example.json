@@ -34,5 +34,10 @@
     }
   },
 
+  "input": {
+    "_comment": "how a button press reaches your session: 'tmux' (default; precise, multi-session, no permissions, needs tmux), 'osascript' (macOS keystroke to the FOCUSED window; no tmux but needs Accessibility permission, can't target a specific session), or 'none' (lights only, works everywhere).",
+    "backend": "tmux"
+  },
+
   "hooks_scope": "global"
 }

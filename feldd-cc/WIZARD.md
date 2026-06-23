@@ -21,7 +21,7 @@ destructive. Keep it friendly and short. The daemon files live in this folder.
    configure without hardware.
 2. **Dependency:** `pip3 install --break-system-packages pyserial`.
 
-## Beat 1 , Basics (two quick questions)
+## Beat 1 , Basics (a few quick questions)
 - **Hooks scope:** "Should the console react to **all** your Claude Code sessions,
   or just **one project**?" `[all]`
   - all → you'll edit `~/.claude/settings.json`
@@ -34,6 +34,11 @@ destructive. Keep it friendly and short. The daemon files live in this folder.
     into `sessions.assign` as `{ "<tmux-session-name or path>": <LED 0-3> }` , a key
     matches a session name (exact) or a cwd (is/under the path). To see their tmux
     session names: `tmux list-sessions -F "#{session_name}"`.
+- **Input backend:** "Do you run `claude` inside **tmux**?" Yes → `input.backend` =
+  `tmux` (precise, multi-session, no permissions). No → on macOS offer `osascript`
+  (types into the *focused* window; needs the Accessibility permission), otherwise
+  `none` (lights only). The **lights work either way**; this only decides whether the
+  buttons type.
 
 ## Beat 2 , Buttons
 Show the default map and ask "keep these, or change any?":

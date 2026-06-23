@@ -161,6 +161,37 @@ def test_pin_tilde_expansion():
     assert st.sessions["x"]["led"] == 3
 
 
+def test_osa_key_translation():
+    assert fc._osa_fragment("Enter") == "key code 36"
+    assert fc._osa_fragment("Escape") == "key code 53"
+    assert fc._osa_fragment("C-c") == 'keystroke "c" using control down'
+    assert fc._osa_fragment("x") == 'keystroke "x"'
+
+
+def test_input_backend_dispatch():
+    calls = {"osa": [], "tmux": []}
+    o, t = fc.send_osascript, fc.send_keys_to
+    fc.send_osascript = lambda keys: calls["osa"].append(list(keys))
+    fc.send_keys_to = lambda pane, cwd, *keys: calls["tmux"].append(list(keys))
+    try:
+        st = fc.State(cfg(input={"backend": "osascript"}))
+        st.set_state("a", "/x", "working", pane="%1")
+        fc.handle_button(st, 0)                       # play -> osascript
+        assert calls["osa"] == [["Enter"]] and calls["tmux"] == []
+
+        st2 = fc.State(cfg(input={"backend": "none"}))
+        st2.set_state("a", "/x", "working", pane="%1")
+        fc.handle_button(st2, 0)                      # none -> nothing
+        assert calls["osa"] == [["Enter"]]            # unchanged
+
+        st3 = fc.State(cfg())                          # default backend = tmux
+        st3.set_state("a", "/x", "working", pane="%1")
+        fc.handle_button(st3, 0)
+        assert calls["tmux"] == [["Enter"]]
+    finally:
+        fc.send_osascript, fc.send_keys_to = o, t
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

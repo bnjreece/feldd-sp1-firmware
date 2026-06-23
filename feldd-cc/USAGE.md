@@ -4,16 +4,22 @@ Setup is in [`WIZARD.md`](WIZARD.md) (the guided agent path) or [`SETUP.md`](SET
 (by hand). This is how you *use* it once it's running, and how to make a multi-agent
 setup legible.
 
-## tmux is required (and that's fine)
-The console sends keystrokes to your Claude session with `tmux send-keys`, so your
-`claude` sessions **must run inside tmux**. If you already run everything in tmux,
-you're set , nothing to change.
+## Lights work everywhere; buttons have a backend
+The **lights** (state out) need no tmux at all , every Claude Code user gets them.
+The **buttons** (input) need a way to type into your session, chosen by
+`input.backend` in `feldd_cc.config.json`:
 
-How a button finds the right pane: each hook carries its **tmux pane** (`$TMUX_PANE`),
-so the daemon sends keys to the **exact pane** the session lives in , precise even if
-all your sessions share a working directory (e.g. you launch them all from home in
-named tmux sessions). If a hook arrives without a pane (claude not in tmux), it falls
-back to matching the session's cwd to a `claude` pane.
+- **`tmux`** (default) , `tmux send-keys` to the session's **exact pane**. Precise,
+  multi-session, no permissions. Each hook carries its pane (`$TMUX_PANE`), so it
+  targets the right session even if all your sessions share a working directory (e.g.
+  launched from home in named tmux sessions). **Requires your `claude` to run in tmux.**
+- **`osascript`** , macOS System Events types into the **focused** window. No tmux
+  needed, but it needs the **Accessibility permission** (System Settings → Privacy &
+  Security → Accessibility) and is focus-based , keys go to whatever terminal is
+  frontmost, so it can't target a specific session.
+- **`none`** , lights only, no buttons. Works anywhere.
+
+Linux note: `osascript` is macOS-only; on Linux use `tmux` (or `none`).
 
 ## The daemon
 One background process bridges everything. Start it in its own tmux window so it
