@@ -77,6 +77,10 @@ DEFAULTS = {
     "sessions": {
         "mode": "multi",        # "multi" = a LED per session + Track1-4 select;
                                 # "single" = one session, shown on LED 0 (or the row)
+        # multi mode: PIN a project to a fixed Track LED (0..3). A session whose cwd
+        # is (or is under) the path always lands on that LED; everyone else auto-fills
+        # the remaining LEDs. e.g. {"~/bnjmn/iamkeen": 0, "~/bnjmn/feldd-sp-1": 1}
+        "assign": {},
     },
     "hooks_scope": "global",    # informational for the wizard; the daemon ignores it
 }
@@ -108,15 +112,30 @@ def load_config(path=None):
 CFG = copy.deepcopy(DEFAULTS)   # replaced in main(); tests pass their own to State
 
 
+def _norm(p):
+    return os.path.normpath(os.path.expanduser(p or ""))
+
+
 # --------------------------------------------------------------------------- state
 class State:
     """Per-session LED state + which session the physical controls target."""
     def __init__(self, cfg=None):
         self.cfg = cfg or CFG
         self.single = self.cfg["sessions"]["mode"] == "single"
+        # multi mode: project -> fixed Track LED pins. Normalize paths once; drop
+        # bad / out-of-range entries. Pinned LEDs stay out of the auto-fill pool.
+        self.assign = []
+        for path, led in (self.cfg["sessions"].get("assign") or {}).items():
+            try:
+                led = int(led)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= led < NUM_TRACK_LEDS:
+                self.assign.append((_norm(path), led))
+        self.pinned = {led for _, led in self.assign}
         self.lock = threading.Lock()
         self.sessions = {}        # sid -> {"led": int, "state": str, "cwd": str, "t": float}
-        self.free = [0] if self.single else list(range(NUM_TRACK_LEDS))
+        self.free = [0] if self.single else [i for i in range(NUM_TRACK_LEDS) if i not in self.pinned]
         self.active = None        # sid the buttons currently drive
 
     def _ensure(self, sid, cwd):
@@ -128,11 +147,24 @@ class State:
         if self.single:
             led = 0                       # all sessions share LED 0 in single mode
         else:
-            led = self.free.pop(0) if self.free else min(
-                self.sessions.values(), key=lambda x: x["t"])["led"]
+            led = self._assigned_led(cwd)  # a pinned project always gets its LED
+            if led is None:
+                led = self.free.pop(0) if self.free else min(
+                    self.sessions.values(), key=lambda x: x["t"])["led"]
         s = {"led": led, "state": "idle", "cwd": cwd or "", "t": time.time()}
         self.sessions[sid] = s
         return s
+
+    def _assigned_led(self, cwd):
+        """The pinned Track LED for a session whose cwd is (or is under) an assigned
+        project path, else None."""
+        if not cwd:
+            return None
+        c = _norm(cwd)
+        for p, led in self.assign:
+            if p and (c == p or c.startswith(p + os.sep)):
+                return led
+        return None
 
     def set_state(self, sid, cwd, st):
         with self.lock:
@@ -146,7 +178,7 @@ class State:
     def end(self, sid):
         with self.lock:
             s = self.sessions.pop(sid, None)
-            if s and not self.single and s["led"] not in self.free:
+            if s and not self.single and s["led"] not in self.free and s["led"] not in self.pinned:
                 self.free.append(s["led"])
                 self.free.sort()
             if self.active == sid:

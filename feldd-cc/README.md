@@ -70,6 +70,8 @@ trusting the map.
 - `bench_led.py` — a tiny standalone tester that drives the 8 LEDs over serial (no daemon needed).
 - `WIZARD.md` — the guided, agent-run setup wizard (the easy path).
 - `SETUP.md` — the manual setup runbook (do-it-by-hand path).
+- `USAGE.md` — running it day to day: sessions, the LED↔session mapping, pinning
+  projects to Track LEDs, the buttons, the daemon, and troubleshooting.
 - `feldd_cc.config.json` — your customizations (button actions / lights / session model); omit any key
   to keep its default. See `feldd_cc.config.example.json` for the full schema.
 - `test_feldd_cc.py` — host tests for the config + state logic (`python3 test_feldd_cc.py`).

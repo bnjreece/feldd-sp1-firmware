@@ -25,7 +25,12 @@
   },
 
   "sessions": {
-    "mode": "single"
+    "mode": "multi",
+    "_assign_comment": "multi mode only: PIN a project (by cwd) to a fixed Track LED 0-3. A session in (or under) the path always lands on that LED; everyone else auto-fills the remaining LEDs.",
+    "assign": {
+      "~/bnjmn/iamkeen": 0,
+      "~/bnjmn/feldd-sp-1": 1
+    }
   },
 
   "hooks_scope": "global"

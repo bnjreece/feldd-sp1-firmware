@@ -109,6 +109,34 @@ def test_shell_action():
     assert calls and calls[0][0][0] == "echo hi" and calls[0][1].get("shell") is True
 
 
+def test_pin_assigns_led_and_reserves_it():
+    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"/proj/a": 2}}))
+    st.set_state("x", "/proj/a", "working")
+    assert st.sessions["x"]["led"] == 2          # pinned project -> its LED
+    st.set_state("y", "/proj/b", "working")
+    assert st.sessions["y"]["led"] == 0          # unpinned -> first free (LED 2 reserved)
+
+
+def test_pin_matches_subdir():
+    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"/proj/a": 2}}))
+    st.set_state("x", "/proj/a/src/deep", "working")
+    assert st.sessions["x"]["led"] == 2          # a cwd UNDER the pinned path matches
+
+
+def test_pin_reserves_led_from_autofill():
+    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"/proj/a": 1}}))
+    st.set_state("u", "/u", "working")
+    st.set_state("v", "/v", "working")
+    assert {st.sessions["u"]["led"], st.sessions["v"]["led"]} == {0, 2}   # skip reserved 1
+
+
+def test_pin_tilde_expansion():
+    home_proj = os.path.expanduser("~/projX")
+    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"~/projX": 3}}))
+    st.set_state("x", home_proj, "working")
+    assert st.sessions["x"]["led"] == 3
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
