@@ -178,6 +178,9 @@ class State:
         self.free = [0] if self.single else [i for i in range(self.n_leds) if i not in self.pinned]
         self.active = None        # sid the buttons currently drive
         self.pending = {}         # sid -> {"ev": Event, "result": "allow"|"deny"|None} (awaiting Play/Vol-)
+        self.fader_target = {}    # fader ix -> logical value (soft-takeover pickup)
+        self.fader_last = {}      # fader ix -> last physical value seen
+        self.fader_grabbed = set()
 
     def _ensure(self, sid, cwd, tmux=None):
         s = self.sessions.get(sid)
@@ -255,6 +258,31 @@ class State:
                 s = self.sessions.get(sid)
                 if s and s["state"] == "needs":
                     s["state"], s["t"] = "working", time.time()
+
+    def fader_grab(self, ix, v):
+        """Soft-takeover (pickup): ignore a fader until its physical value reaches the
+        logical target, then 'grab' and track it. Returns the value to apply, or None
+        while not yet grabbed. Same idea feldd uses on layer/profile switch, so a fader
+        that's out of position doesn't yank the parameter when you bump it."""
+        if ix in self.fader_grabbed:
+            self.fader_target[ix] = v
+            return v
+        tgt = self.fader_target.get(ix)
+        last = self.fader_last.get(ix)
+        self.fader_last[ix] = v
+        if tgt is None or v == tgt or (last is not None and (last - tgt) * (v - tgt) <= 0):
+            self.fader_grabbed.add(ix)
+            self.fader_target[ix] = v
+            return v
+        return None
+
+    def reset_fader_grab(self, ix=None):
+        """Force a fader (or all) to re-pick-up, e.g. after the focused session changes
+        so the per-session scroll fader doesn't jump."""
+        if ix is None:
+            self.fader_grabbed.clear()
+        else:
+            self.fader_grabbed.discard(ix)
 
     def end(self, sid):
         with self.lock:

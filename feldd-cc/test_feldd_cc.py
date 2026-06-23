@@ -312,6 +312,28 @@ def test_cockpit_pin_to_high_led_sticks():
     assert st.sessions["y"]["led"] == 0          # unpinned -> first free, 6 reserved
 
 
+def test_fader_pickup_grabs_after_crossing():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.fader_target[0] = 64
+    assert st.fader_grab(0, 60) is None      # below target, not crossed -> ignored
+    assert st.fader_grab(0, 70) == 70        # crossed 64 -> grabs and tracks
+    assert st.fader_grab(0, 72) == 72        # grabbed -> tracks directly
+
+
+def test_fader_pickup_grabs_immediately_when_no_target():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    assert st.fader_grab(2, 40) == 40        # no prior target -> grab on first move
+
+
+def test_reset_fader_grab_forces_repickup():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.fader_grab(0, 40)                      # grabbed at 40
+    st.reset_fader_grab(0)
+    st.fader_target[0] = 90                   # underlying moved
+    assert st.fader_grab(0, 41) is None       # must re-pick-up past 90
+    assert st.fader_grab(0, 95) == 95
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []
