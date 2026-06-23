@@ -186,8 +186,6 @@ class State:
         self.fader_target = {}    # fader ix -> logical value (soft-takeover pickup)
         self.fader_last = {}      # fader ix -> last physical value seen
         self.fader_grabbed = set()
-        self.play_down = False    # cockpit: Play held as a shift modifier
-        self.play_chorded = False # cockpit: a Track was pressed during the Play hold
         self.calm = 127           # cockpit "calm dial": 0 = only needs-you, 127 = all states
         self.autopilot = {}       # sid -> {"rate": s, "drips": n} (self-driving sessions)
         self.autopilot_parked = set()  # sids the deadman parked; must disarm (fader 0) to re-arm
@@ -619,34 +617,17 @@ def run_button_action(state, action):
             send_keys_to(pane, cwd, *action)
 
 
-def _play_action(state):
-    """The normal Play action: resolve a pending permission (allow), else the button."""
-    if state.resolve_active("allow"):
-        log("permission: ALLOW")
-        return
-    run_button_action(state, state.cfg["buttons"].get("play"))
-
-
 def handle_button(state, ix, pressed=True):
-    # Cockpit: Play doubles as a shift modifier. Hold Play + Track = bank 2 (sessions
-    # 5-8). A Play with no Track chord before release = a normal Play tap (on release).
-    if state.cockpit and ix == PLAY:
-        if pressed:
-            state.play_down, state.play_chorded = True, False
-        else:
-            state.play_down = False
-            if not state.play_chorded:
-                _play_action(state)
-        return
+    # All controls act on press. There are NO held-button modifiers: PLAY and Track 1-4
+    # are decoded from a single resistor ladder, so the hardware physically can't report
+    # two of them held at once (a Play+Track "shift" would emit Play-release THEN
+    # Track-press, never both). Sessions 5-8 are reached via the fader-2 scrubber and Vol+.
     if not pressed:
-        return                              # every other control acts on press only
+        return
 
-    # Track 1-4 select / jump (multi + cockpit). Shifted (Play held) -> bank 2.
+    # Track 1-4 select / jump. In cockpit, selecting also brings the session forward.
     if TRK1 <= ix <= TRK4 and not state.single:
-        bank = 4 if (state.cockpit and state.play_down) else 0
-        led = (ix - TRK1) + bank
-        if state.cockpit and state.play_down:
-            state.play_chorded = True       # consumed the hold -> suppress the Play tap
+        led = ix - TRK1
         sid = state.select_by_led(led)
         if state.cockpit and sid:           # jump: bring that session to the foreground
             tmux_focus(*state.jump_info(sid))
