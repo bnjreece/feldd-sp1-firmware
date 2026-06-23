@@ -77,10 +77,11 @@ Beat 1:
    local daemon; harmless (fast-fail) when the daemon is down.
 
 ## Beat 6 , Run it + self-test (the payoff)
-1. **Start the daemon** in its own tmux window so it persists:
-   ```bash
-   tmux new-window -n feldd-cc 'cd <this folder> && python3 feldd_cc.py'
-   ```
+1. **Start the daemon** so it keeps running:
+   - in tmux: `tmux new-window -n feldd-cc 'cd <this folder> && python3 feldd_cc.py'`
+   - without tmux: `nohup python3 feldd_cc.py >/tmp/feldd-cc.log 2>&1 &` (or a
+     login/launchd service)
+
    Confirm the log shows `opened SP-1 at ...` and `hook server on ...`.
 2. **Self-test** , fire a fake session at the LEDs and have them watch the track row:
    ```bash
@@ -89,10 +90,12 @@ Beat 1:
    curl -s -X POST $H -d "$S,\"hook_event_name\":\"Notification\"}";     sleep 7   # BLINK (needs you)
    curl -s -X POST $H -d "$S,\"hook_event_name\":\"Stop\"}";             sleep 4   # FLASH then off (done)
    ```
-   Ask them to confirm they saw solid → blink → flash. Then have them **press Play**
-   on the SP-1 and confirm an Enter lands in a Claude pane.
-3. **Go live:** start (or restart) a real `claude` in a tmux pane so the new hooks
-   load. The track LED now tracks that session.
+   Ask them to confirm they saw solid → blink → flash. Then test input for their
+   backend: **press Play** , with `tmux` an Enter lands in the Claude pane; with
+   `osascript` it lands in the focused terminal (focus it first); with `none` there's
+   no button input (lights only).
+3. **Go live:** start (or restart) a real `claude` session (in a tmux pane if using
+   the `tmux` backend) so the new hooks load. The track LED now tracks that session.
 
 ## Done. To undo
 Remove the feldd-cc `hooks` block from the settings file (restore the `.bak`),
