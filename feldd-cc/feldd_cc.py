@@ -109,12 +109,16 @@ DEFAULTS = {
         "scroll": 0,        # scroll the focused session
         "scrubber": 1,      # select / slide the 8-session window
         "calm": 2,          # board sensitivity ("calm dial")
-        "assign": {"ix": 3, "preset": "autopilot"},
+        # assignable; preset = coarse (safe default) | autopilot | rotate | custom
+        "assign": {"ix": 3, "preset": "coarse"},
     },
-    # autopilot drip (dangerous-mode only): fader value -> cadence step (0 = off).
+    # autopilot drip: a fader auto-sends the nudge to a STOPPED session on a cadence.
+    # OFF by default; only sensible (and only enable it) in --dangerously-skip-permissions.
     "autopilot": {
-        "steps_s": [0, 90, 30, 10],   # cadence buckets across the fader throw
+        "enabled": False,              # hard gate: must opt in
+        "steps_s": [0, 90, 30, 10],    # cadence buckets across the fader throw (0 = off)
         "deadman": 8,                  # auto-continues with no human touch -> park
+        "nudge": ["continue", "Enter"],
     },
     "hooks_scope": "global",    # informational for the wizard; the daemon ignores it
 }
@@ -185,6 +189,7 @@ class State:
         self.play_down = False    # cockpit: Play held as a shift modifier
         self.play_chorded = False # cockpit: a Track was pressed during the Play hold
         self.calm = 127           # cockpit "calm dial": 0 = only needs-you, 127 = all states
+        self.autopilot = {}       # sid -> {"rate": s, "drips": n} (self-driving sessions)
 
     def _ensure(self, sid, cwd, tmux=None):
         s = self.sessions.get(sid)
@@ -348,6 +353,55 @@ class State:
                     return sid
             return needers[0][1]        # past the last -> wrap to the first
 
+    def arm_autopilot(self, sid, rate):
+        """Arm a session for autopilot at `rate` seconds (rate<=0 disarms). Hard no-op
+        unless autopilot.enabled is set (safety: off by default; only enable it in
+        --dangerously-skip-permissions). Returns True if it changed an armed session."""
+        if not (self.cfg.get("autopilot") or {}).get("enabled", False):
+            return False
+        with self.lock:
+            if sid not in self.sessions:
+                return False
+            if rate <= 0:
+                self.autopilot.pop(sid, None)
+            else:
+                self.autopilot[sid] = {"rate": rate, "drips": 0}
+            return True
+
+    def autopilot_tick(self, now, nudge):
+        """Drip the nudge to armed, STOPPED sessions past their cadence. A needs-you
+        state pauses the drip (never types over a real question); the deadman cap parks
+        a session (and hard-alerts it) after too many hands-off continues."""
+        ap_cfg = self.cfg.get("autopilot") or {}
+        deadman = ap_cfg.get("deadman", 8)
+        backend = (self.cfg.get("input") or {}).get("backend", "tmux")
+        fires = []
+        with self.lock:
+            for sid, ap in list(self.autopilot.items()):
+                s = self.sessions.get(sid)
+                if not s:
+                    self.autopilot.pop(sid, None)
+                    continue
+                if s["state"] == "needs":
+                    continue                       # a real question pauses the drip
+                if s["state"] in ("done", "idle") and now - s["t"] >= ap["rate"]:
+                    if ap["drips"] >= deadman:
+                        self.autopilot.pop(sid, None)        # park
+                        s["state"], s["t"] = "needs", now    # hard alert
+                        log("autopilot PARKED %s (deadman)" % sid[:8])
+                        continue
+                    ap["drips"] += 1
+                    s["t"] = now
+                    fires.append((s.get("pane"), s.get("cwd")))
+        for pane, cwd in fires:                    # send outside the lock
+            if backend == "none":
+                continue
+            if backend == "osascript":
+                send_osascript(nudge)
+            else:
+                send_keys_to(pane, cwd, *nudge)
+        return fires
+
     def led_mask(self, now):
         """8-bit mask of which LEDs should be lit right now (handles blink/done)."""
         lights = self.cfg["lights"]
@@ -360,13 +414,16 @@ class State:
             # steady working shows only in the upper half. Non-cockpit = show all.
             show_done = (not self.cockpit) or self.calm >= 1
             show_working = (not self.cockpit) or self.calm >= 64
-            for s in self.sessions.values():
+            breathe_on = int(now) % 2 == 0          # ~0.5 Hz slow pulse for autopilot
+            for sid, s in self.sessions.items():
                 st, led = s["state"], s["led"]
                 on = ((st == "working" and show_working)
                       or (st == "needs" and blink_on)
                       or (st == "done" and show_done and now - s["t"] < done_hold))
                 if st == "done" and now - s["t"] >= done_hold:
                     s["state"] = "idle"
+                if self.cockpit and sid in self.autopilot:   # self-driving -> slow pulse
+                    on = on or breathe_on
                 if on:
                     mask |= 0x0F if (self.single and whole_row) else (1 << led)
             return mask
@@ -664,7 +721,15 @@ def fader_calm(state, v):
 
 
 def fader_autopilot(state, v, ix=3):
-    pass        # Task 11: autopilot drip
+    """Fader-4 'autopilot' preset: arm the FOCUSED session at the cadence step for v
+    (0 = disarm). Self-driving: the daemon then drips the nudge while it's stopped."""
+    val = state.fader_grab(ix, v)
+    if val is None:
+        return
+    steps = (state.cfg.get("autopilot") or {}).get("steps_s", [0, 90, 30, 10])
+    rate = steps[min(len(steps) - 1, int(val / 128.0 * len(steps)))]
+    if state.active:
+        state.arm_autopilot(state.active, rate)
 
 
 def fader_assign(state, v):
@@ -837,7 +902,9 @@ def main():
         while True:
             if state.any_sessions():
                 dev.released = False
-                dev.push_mask(state.led_mask(time.time()))
+                now = time.time()
+                state.autopilot_tick(now, CFG["autopilot"].get("nudge", ["continue", "Enter"]))
+                dev.push_mask(state.led_mask(now))
             else:
                 dev.release()
             time.sleep(period)

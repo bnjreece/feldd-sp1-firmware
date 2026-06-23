@@ -295,6 +295,87 @@ def test_cancel_pending_reverts_and_does_not_fire():
     assert st.sessions["a"]["state"] == "working" # reverted off the blink
 
 
+# ---- v3 cockpit autopilot -------------------------------------------------
+def test_autopilot_disabled_by_default():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "done")
+    assert st.arm_autopilot("a", 30) is False     # off unless explicitly enabled
+    assert "a" not in st.autopilot
+
+
+def test_autopilot_drips_continue_after_idle():
+    st = fc.State(cfg(sessions={"mode": "cockpit"},
+                      autopilot={"enabled": True, "steps_s": [0, 90, 30, 10], "deadman": 8}))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+    assert st.arm_autopilot("a", 30) is True
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda p, c, *k: sent.append(list(k))
+    try:
+        st.sessions["a"]["t"] -= 31               # pretend 31s idle
+        st.autopilot_tick(time.time(), ["continue", "Enter"])
+    finally:
+        fc.send_keys_to = orig
+    assert sent == [["continue", "Enter"]] and st.autopilot["a"]["drips"] == 1
+
+
+def test_autopilot_does_not_drip_while_working():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}, autopilot={"enabled": True}))
+    st.set_state("a", "/x", "working", pane="%1", tmux="w")
+    st.arm_autopilot("a", 10)
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda p, c, *k: sent.append(1)
+    try:
+        st.sessions["a"]["t"] -= 99               # working, even if "old"
+        st.autopilot_tick(time.time(), ["continue", "Enter"])
+    finally:
+        fc.send_keys_to = orig
+    assert sent == []                             # never pokes a busy session
+
+
+def test_autopilot_pauses_on_needs():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}, autopilot={"enabled": True}))
+    st.set_state("a", "/x", "needs", pane="%1", tmux="w")
+    st.arm_autopilot("a", 10)
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda p, c, *k: sent.append(1)
+    try:
+        st.sessions["a"]["t"] -= 11
+        st.autopilot_tick(time.time(), ["continue", "Enter"])
+    finally:
+        fc.send_keys_to = orig
+    assert sent == [] and "a" in st.autopilot     # a real question pauses, stays armed
+
+
+def test_autopilot_deadman_parks():
+    st = fc.State(cfg(sessions={"mode": "cockpit"},
+                      autopilot={"enabled": True, "deadman": 2}))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+    st.arm_autopilot("a", 10)
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda p, c, *k: sent.append(1)
+    try:
+        for _ in range(4):
+            st.sessions["a"]["t"] -= 11            # force past cadence each tick
+            st.autopilot_tick(time.time(), ["continue", "Enter"])
+    finally:
+        fc.send_keys_to = orig
+    assert len(sent) == 2 and "a" not in st.autopilot   # parks after 2 drips
+
+
+def test_fader_autopilot_arms_and_disarms_focused():
+    st = fc.State(cfg(sessions={"mode": "cockpit"},
+                      autopilot={"enabled": True, "steps_s": [0, 90, 30, 10]}))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")     # active = a
+    fc.fader_autopilot(st, 127, 3)                # full throw -> fastest cadence
+    assert st.autopilot["a"]["rate"] == 10
+    fc.fader_autopilot(st, 0, 3)                  # zero -> disarm
+    assert "a" not in st.autopilot
+
+
 # ---- v3 cockpit ----------------------------------------------------------
 def test_cockpit_allocates_eight_leds():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
