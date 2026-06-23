@@ -451,6 +451,21 @@ def test_fader_scroll_respects_pickup():
     assert calls == [("%9", round(70 * 100 / 127))]
 
 
+def test_calm_dial_gates_working_leds():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working")       # led 0, solid
+    fc.fader_calm(st, 0)                      # quietest -> hide busy sessions
+    assert (st.led_mask(time.time()) & 1) == 0
+    fc.fader_calm(st, 127)                    # loudest -> show everything
+    assert st.led_mask(time.time()) & 1
+
+
+def test_calm_default_shows_everything():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working")
+    assert st.led_mask(time.time()) & 1      # untouched calm dial = full visibility
+
+
 def test_handle_fader_dispatches_by_ix():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     seen = []

@@ -183,6 +183,7 @@ class State:
         self.fader_grabbed = set()
         self.play_down = False    # cockpit: Play held as a shift modifier
         self.play_chorded = False # cockpit: a Track was pressed during the Play hold
+        self.calm = 127           # cockpit "calm dial": 0 = only needs-you, 127 = all states
 
     def _ensure(self, sid, cwd, tmux=None):
         s = self.sessions.get(sid)
@@ -342,11 +343,15 @@ class State:
         with self.lock:
             mask = 0
             blink_on = int(now * blink_hz * 2) % 2 == 0
+            # calm dial (cockpit): needs-you always shows; done shows above the floor;
+            # steady working shows only in the upper half. Non-cockpit = show all.
+            show_done = (not self.cockpit) or self.calm >= 1
+            show_working = (not self.cockpit) or self.calm >= 64
             for s in self.sessions.values():
                 st, led = s["state"], s["led"]
-                on = (st == "working"
+                on = ((st == "working" and show_working)
                       or (st == "needs" and blink_on)
-                      or (st == "done" and now - s["t"] < done_hold))
+                      or (st == "done" and show_done and now - s["t"] < done_hold))
                 if st == "done" and now - s["t"] >= done_hold:
                     s["state"] = "idle"
                 if on:
@@ -606,7 +611,13 @@ def fader_scrubber(state, v):
 
 
 def fader_calm(state, v):
-    pass        # Task 8: board sensitivity
+    """Fader 3: board sensitivity. 0 = only needs-you sessions stay lit (busy ones go
+    dark); full = show every state. One knob for 'leave me alone' vs 'show me all'."""
+    ix = (state.cfg.get("faders") or {}).get("calm", 2)
+    val = state.fader_grab(ix, v)
+    if val is None:
+        return
+    state.calm = val
 
 
 def fader_assign(state, v):
