@@ -48,6 +48,18 @@ destructive. Keep it friendly and short. The daemon files live in this folder.
   under `claude -p`. No → `enabled: false` (the LED still blinks as a heads-up; they
   answer on screen). **This is the one hook that blocks** , note that Beat 5 wires a
   `PermissionRequest` hook with a long timeout for it.
+- **Run in a bypass / dangerous mode?** If they run `--dangerously-skip-permissions`,
+  no prompts ever fire, so the approve/deny above is moot for them , `PermissionRequest`
+  hooks don't fire in bypass mode. Offer the alternative: **make Play a one-press "keep
+  going" nudge** that types a word then Enter to push a stopped agent onward (useful
+  after a `Stop`, when a bare Enter would submit nothing). Ask the word `[continue]`
+  (e.g. `continue`, `keep going`, `yes`, `proceed`) and write `buttons.play` =
+  `["<word>", "Enter"]`. A multi-word phrase is fine as long as it stays **one** config
+  string (`["keep going", "Enter"]`); avoid a bare word that is itself a tmux key name
+  (`Space`, `Tab`, `Up`, `Enter`, `C-c`, ...) , those get interpreted, not typed. Leave
+  Play = `["Enter"]` for anyone who runs with permissions on. Prefer to keep Play =
+  approve/submit? Put the nudge on the free **Vol+** instead: `buttons.vol_plus` =
+  `["continue", "Enter"]`.
 
 ## Beat 2 , Buttons
 Show the default map and ask "keep these, or change any?":

@@ -3,6 +3,7 @@
 
   "buttons": {
     "_comment": "Each value is a list of tmux send-keys args, or {\"shell\": \"a command\"}, or null = do nothing. Track 1-4 are not listed: in multi mode they select the session; in single mode they are unused.",
+    "_nudge_recipe": "Dangerous-mode 'keep going' button: set play (or vol_plus) to [\"continue\", \"Enter\"] to type a word + Enter and push a stopped agent onward. Keep a phrase as ONE string; avoid bare tmux key-names (Space/Tab/Up/...). Leave play as [\"Enter\"] if you run with permissions on (Play then approves/submits).",
     "play": ["Enter"],
     "vol_minus": ["Escape"],
     "vol_plus": null,

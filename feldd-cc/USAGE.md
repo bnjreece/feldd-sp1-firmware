@@ -96,6 +96,22 @@ the real permission dialog.
 - Turn it off with `"permission": {"enabled": false}` , you keep the blink as a
   notification but answer on screen.
 
+### Recipe: a one-press "keep going" nudge (for `--dangerously-skip-permissions`)
+If you run with permissions off, Claude never prompts you, so the approve/deny flow
+above never fires. Instead, make **Play** push a stopped agent onward , type a word,
+then Enter:
+```json
+"buttons": { "play": ["continue", "Enter"] }
+```
+Now after a turn finishes, one press of Play sends `continue` + Enter. Pick any word
+(`"yes"`, `"proceed"`, or a phrase as a single string like `"keep going"`). Two
+caveats from how `tmux send-keys` parses args: keep a phrase as **one** string
+(`["keep going", "Enter"]`, not `["keep", "going", "Enter"]`, which would drop the
+space), and don't use a bare word that is itself a tmux key name (`Space`, `Tab`,
+`Up`, `Enter`, `C-c`, ...) , those get interpreted instead of typed. A plain word like
+`continue` is safe as-is. Want to keep Play = approve/submit? Put the nudge on the
+otherwise-free **Vol+** instead: `"vol_plus": ["continue", "Enter"]`.
+
 ## Customizing (`feldd_cc.config.json`)
 Edit the file next to `feldd_cc.py`; omit any key to keep its default. Full schema:
 [`feldd_cc.config.example.json`](feldd_cc.config.example.json). Axes: `buttons`,

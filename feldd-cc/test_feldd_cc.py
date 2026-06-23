@@ -192,6 +192,35 @@ def test_input_backend_dispatch():
         fc.send_osascript, fc.send_keys_to = o, t
 
 
+def test_nudge_play_types_word_then_enter_tmux():
+    # dangerous-mode recipe: Play = ["continue", "Enter"] is passed straight to
+    # tmux send-keys (the word is literal text, Enter is the key) -- no new daemon code.
+    st = fc.State(cfg(buttons={"play": ["continue", "Enter"]}))
+    st.set_state("a", "/x", "working", pane="%1", tmux="t")
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda pane, cwd, *keys: sent.append(list(keys))
+    try:
+        fc.handle_button(st, fc.PLAY)
+    finally:
+        fc.send_keys_to = orig
+    assert sent == [["continue", "Enter"]]
+
+
+def test_nudge_play_via_osascript():
+    st = fc.State(cfg(buttons={"play": ["continue", "Enter"]}, input={"backend": "osascript"}))
+    st.set_state("a", "/x", "working", pane="%1")
+    sent = []
+    orig = fc.send_osascript
+    fc.send_osascript = lambda keys: sent.append(list(keys))
+    try:
+        fc.handle_button(st, fc.PLAY)
+    finally:
+        fc.send_osascript = orig
+    assert sent == [["continue", "Enter"]]
+    assert fc._osa_fragment("continue") == 'keystroke "continue"'   # literal word, not a keycode
+
+
 def test_permission_defaults():
     c = cfg()
     assert c["permission"]["enabled"] is True
