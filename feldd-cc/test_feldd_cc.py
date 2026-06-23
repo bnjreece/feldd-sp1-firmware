@@ -296,6 +296,21 @@ def test_cancel_pending_reverts_and_does_not_fire():
 
 
 # ---- v3 cockpit autopilot -------------------------------------------------
+def _ap_cfg(**ap):
+    # dangerous-mode cockpit cfg with autopilot enabled (permission OFF, tmux backend)
+    base = {"enabled": True}
+    base.update(ap)
+    return cfg(sessions={"mode": "cockpit"}, permission={"enabled": False},
+               input={"backend": "tmux"}, autopilot=base)
+
+
+def _stub_send():
+    sent = []
+    orig = fc.send_keys_to
+    fc.send_keys_to = lambda p, c, *k: sent.append(list(k))
+    return sent, orig
+
+
 def test_autopilot_disabled_by_default():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     st.set_state("a", "/x", "done")
@@ -303,72 +318,133 @@ def test_autopilot_disabled_by_default():
     assert "a" not in st.autopilot
 
 
-def test_autopilot_drips_continue_after_idle():
-    st = fc.State(cfg(sessions={"mode": "cockpit"},
-                      autopilot={"enabled": True, "steps_s": [0, 90, 30, 10], "deadman": 8}))
+def test_autopilot_requires_dangerous_mode():
+    # autopilot enabled but the SP-1 permission approve/deny is ON = not dangerous mode
+    st = fc.State(cfg(sessions={"mode": "cockpit"}, autopilot={"enabled": True}))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+    assert st.arm_autopilot("a", 30) is False
+
+
+def test_autopilot_refuses_non_tmux_backend():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}, permission={"enabled": False},
+                      input={"backend": "osascript"}, autopilot={"enabled": True}))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+    assert st.arm_autopilot("a", 30) is False     # needs an exact pane, never focused window
+
+
+def test_autopilot_drips_continue_after_stop():
+    st = fc.State(_ap_cfg(steps_s=[0, 90, 30, 10], deadman=8))
     st.set_state("a", "/x", "done", pane="%1", tmux="w")
     assert st.arm_autopilot("a", 30) is True
-    sent = []
-    orig = fc.send_keys_to
-    fc.send_keys_to = lambda p, c, *k: sent.append(list(k))
+    sent, orig = _stub_send()
     try:
-        st.sessions["a"]["t"] -= 31               # pretend 31s idle
+        st.sessions["a"]["stopped_at"] -= 31      # 31s since the Stop
         st.autopilot_tick(time.time(), ["continue", "Enter"])
     finally:
         fc.send_keys_to = orig
     assert sent == [["continue", "Enter"]] and st.autopilot["a"]["drips"] == 1
 
 
-def test_autopilot_does_not_drip_while_working():
-    st = fc.State(cfg(sessions={"mode": "cockpit"}, autopilot={"enabled": True}))
-    st.set_state("a", "/x", "working", pane="%1", tmux="w")
+def test_autopilot_skips_never_stopped_session():
+    st = fc.State(_ap_cfg())
+    st.set_state("a", "/x", "working", pane="%1", tmux="w")   # never stopped
     st.arm_autopilot("a", 10)
-    sent = []
-    orig = fc.send_keys_to
-    fc.send_keys_to = lambda p, c, *k: sent.append(1)
+    sent, orig = _stub_send()
     try:
-        st.sessions["a"]["t"] -= 99               # working, even if "old"
         st.autopilot_tick(time.time(), ["continue", "Enter"])
     finally:
         fc.send_keys_to = orig
-    assert sent == []                             # never pokes a busy session
+    assert sent == []                             # stopped_at is None -> no drip
 
 
 def test_autopilot_pauses_on_needs():
-    st = fc.State(cfg(sessions={"mode": "cockpit"}, autopilot={"enabled": True}))
-    st.set_state("a", "/x", "needs", pane="%1", tmux="w")
+    st = fc.State(_ap_cfg())
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
     st.arm_autopilot("a", 10)
-    sent = []
-    orig = fc.send_keys_to
-    fc.send_keys_to = lambda p, c, *k: sent.append(1)
+    st.set_state("a", "/x", "needs")              # a question arrives
+    sent, orig = _stub_send()
     try:
-        st.sessions["a"]["t"] -= 11
+        st.sessions["a"]["stopped_at"] = time.time() - 11
         st.autopilot_tick(time.time(), ["continue", "Enter"])
     finally:
         fc.send_keys_to = orig
-    assert sent == [] and "a" in st.autopilot     # a real question pauses, stays armed
+    assert sent == [] and "a" in st.autopilot     # paused, still armed
 
 
-def test_autopilot_deadman_parks():
-    st = fc.State(cfg(sessions={"mode": "cockpit"},
-                      autopilot={"enabled": True, "deadman": 2}))
-    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+def test_autopilot_stays_paused_after_question_then_stop():
+    # the blocker: Notification(needs) then Stop(done) must NOT type over the question
+    st = fc.State(_ap_cfg())
+    st.set_state("a", "/x", "working", pane="%1", tmux="w")
     st.arm_autopilot("a", 10)
-    sent = []
-    orig = fc.send_keys_to
-    fc.send_keys_to = lambda p, c, *k: sent.append(1)
+    st.set_state("a", "/x", "needs")              # Claude asks
+    st.set_state("a", "/x", "done")               # then yields the turn (Stop)
+    sent, orig = _stub_send()
     try:
-        for _ in range(4):
-            st.sessions["a"]["t"] -= 11            # force past cadence each tick
+        st.sessions["a"]["stopped_at"] = time.time() - 11
+        st.autopilot_tick(time.time(), ["continue", "Enter"])
+    finally:
+        fc.send_keys_to = orig
+    assert sent == []                             # awaiting sticky through the Stop
+
+
+def test_autopilot_disarms_on_missing_pane():
+    st = fc.State(_ap_cfg())
+    st.set_state("a", "/x", "done", tmux="w")     # no pane captured
+    st.arm_autopilot("a", 10)
+    sent, orig = _stub_send()
+    try:
+        st.sessions["a"]["stopped_at"] = time.time() - 11
+        st.autopilot_tick(time.time(), ["continue", "Enter"])
+    finally:
+        fc.send_keys_to = orig
+    assert sent == [] and "a" not in st.autopilot   # no exact target -> disarm, never guess
+
+
+def test_autopilot_deadman_holds_against_held_fader():
+    # the blocker: a held/jittering fader re-arms every frame; the deadman must still hold
+    st = fc.State(_ap_cfg(deadman=2))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+    sent, orig = _stub_send()
+    try:
+        for _ in range(5):
+            st.arm_autopilot("a", 10)             # held fader re-arms each frame
+            st.sessions["a"]["stopped_at"] = time.time() - 11
             st.autopilot_tick(time.time(), ["continue", "Enter"])
     finally:
         fc.send_keys_to = orig
-    assert len(sent) == 2 and "a" not in st.autopilot   # parks after 2 drips
+    assert len(sent) == 2                          # parked after exactly 2 drips
+    assert "a" not in st.autopilot and "a" in st.autopilot_parked
+
+
+def test_autopilot_parked_needs_disarm_before_rearm():
+    st = fc.State(_ap_cfg(deadman=1))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+    st.arm_autopilot("a", 10)
+    sent, orig = _stub_send()
+    try:
+        st.sessions["a"]["stopped_at"] = time.time() - 11
+        st.autopilot_tick(time.time(), ["continue", "Enter"])   # drip 1 (drips 0->1)
+        st.sessions["a"]["stopped_at"] = time.time() - 11
+        st.autopilot_tick(time.time(), ["continue", "Enter"])   # drips 1>=1 -> park
+        assert "a" in st.autopilot_parked
+        assert st.arm_autopilot("a", 10) is False               # parked -> refuse
+        assert st.arm_autopilot("a", 0) is True                 # fader to 0 disarms+unparks
+        assert st.arm_autopilot("a", 10) is True                # now re-arm allowed
+    finally:
+        fc.send_keys_to = orig
+
+
+def test_human_prompt_resets_deadman():
+    st = fc.State(_ap_cfg(deadman=2))
+    st.set_state("a", "/x", "done", pane="%1", tmux="w")
+    st.arm_autopilot("a", 10)
+    st.autopilot["a"]["drips"] = 1
+    fc.apply_hook(st, {"hook_event_name": "UserPromptSubmit", "session_id": "a", "cwd": "/x"})
+    assert st.autopilot["a"]["drips"] == 0        # a real human prompt resets the cap
 
 
 def test_fader_autopilot_arms_and_disarms_focused():
-    st = fc.State(cfg(sessions={"mode": "cockpit"},
-                      autopilot={"enabled": True, "steps_s": [0, 90, 30, 10]}))
+    st = fc.State(_ap_cfg(steps_s=[0, 90, 30, 10]))
     st.set_state("a", "/x", "done", pane="%1", tmux="w")     # active = a
     fc.fader_autopilot(st, 127, 3)                # full throw -> fastest cadence
     assert st.autopilot["a"]["rate"] == 10

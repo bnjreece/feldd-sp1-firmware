@@ -190,6 +190,7 @@ class State:
         self.play_chorded = False # cockpit: a Track was pressed during the Play hold
         self.calm = 127           # cockpit "calm dial": 0 = only needs-you, 127 = all states
         self.autopilot = {}       # sid -> {"rate": s, "drips": n} (self-driving sessions)
+        self.autopilot_parked = set()  # sids the deadman parked; must disarm (fader 0) to re-arm
 
     def _ensure(self, sid, cwd, tmux=None):
         s = self.sessions.get(sid)
@@ -205,7 +206,7 @@ class State:
                 led = self.free.pop(0) if self.free else min(
                     self.sessions.values(), key=lambda x: x["t"])["led"]
         s = {"led": led, "state": "idle", "cwd": cwd or "", "pane": None, "tmux": tmux,
-             "t": time.time(), "seq": self._seq}
+             "t": time.time(), "seq": self._seq, "awaiting": False, "stopped_at": None}
         self._seq += 1
         self.sessions[sid] = s
         return s
@@ -228,7 +229,18 @@ class State:
                 s["pane"] = pane
             if tmux:
                 s["tmux"] = tmux
-            s["state"], s["t"] = st, time.time()
+            now = time.time()
+            s["state"], s["t"] = st, now
+            # Track an autopilot-relevant edge that survives the done->idle decay:
+            #   needs  -> awaiting a human answer (sticky through a following Stop)
+            #   working-> resumed/answered (clears both)
+            #   done   -> stopped, eligible for a drip after the cadence
+            if st == "needs":
+                s["awaiting"] = True
+            elif st == "working":
+                s["awaiting"], s["stopped_at"] = False, None
+            elif st == "done":
+                s["stopped_at"] = now
             if st == "needs":            # auto-focus the session that wants you
                 self.active = sid
             elif self.active is None:
@@ -353,28 +365,57 @@ class State:
                     return sid
             return needers[0][1]        # past the last -> wrap to the first
 
-    def arm_autopilot(self, sid, rate):
-        """Arm a session for autopilot at `rate` seconds (rate<=0 disarms). Hard no-op
-        unless autopilot.enabled is set (safety: off by default; only enable it in
-        --dangerously-skip-permissions). Returns True if it changed an armed session."""
+    def _autopilot_allowed(self):
+        """Autopilot only runs when explicitly enabled AND in a dangerous-mode-shaped
+        setup: the SP-1 permission approve/deny must be OFF (it does nothing for a
+        --dangerously-skip-permissions user, and we must not auto-type past real
+        prompts), and the input backend must be tmux (we need an EXACT pane, never a
+        focused window)."""
         if not (self.cfg.get("autopilot") or {}).get("enabled", False):
+            return False
+        if (self.cfg.get("permission") or {}).get("enabled", True):
+            return False
+        if (self.cfg.get("input") or {}).get("backend", "tmux") != "tmux":
+            return False
+        return True
+
+    def arm_autopilot(self, sid, rate):
+        """Arm a session for autopilot at `rate` seconds (rate<=0 disarms). No-op unless
+        _autopilot_allowed(). Re-arming an already-armed session PRESERVES its drip count
+        (so a held/jittering fader can't reset the deadman); a session the deadman parked
+        cannot re-arm until it is first disarmed (fader to 0)."""
+        if not self._autopilot_allowed():
             return False
         with self.lock:
             if sid not in self.sessions:
                 return False
             if rate <= 0:
                 self.autopilot.pop(sid, None)
-            else:
-                self.autopilot[sid] = {"rate": rate, "drips": 0}
+                self.autopilot_parked.discard(sid)   # fader back to 0 clears the park
+                return True
+            if sid in self.autopilot_parked:
+                return False                         # parked by deadman; needs a 0 first
+            existing = self.autopilot.get(sid)
+            self.autopilot[sid] = {"rate": rate, "drips": existing["drips"] if existing else 0}
             return True
 
+    def human_touch(self, sid):
+        """A genuine human prompt (UserPromptSubmit) resets the deadman counter and
+        clears any park: you are back in the loop."""
+        with self.lock:
+            ap = self.autopilot.get(sid)
+            if ap:
+                ap["drips"] = 0
+            self.autopilot_parked.discard(sid)
+
     def autopilot_tick(self, now, nudge):
-        """Drip the nudge to armed, STOPPED sessions past their cadence. A needs-you
-        state pauses the drip (never types over a real question); the deadman cap parks
-        a session (and hard-alerts it) after too many hands-off continues."""
-        ap_cfg = self.cfg.get("autopilot") or {}
-        deadman = ap_cfg.get("deadman", 8)
-        backend = (self.cfg.get("input") or {}).get("backend", "tmux")
+        """Drip the nudge to armed, STOPPED sessions past their cadence. Guardrails: an
+        awaiting-a-human session is skipped (never type over a real question, even after
+        a following Stop); a session with no exact pane is disarmed (never guess a
+        target); the deadman cap parks + hard-alerts after too many hands-off continues."""
+        if (self.cfg.get("input") or {}).get("backend", "tmux") != "tmux":
+            return []                               # drip only via an exact tmux pane
+        deadman = (self.cfg.get("autopilot") or {}).get("deadman", 8)
         fires = []
         with self.lock:
             for sid, ap in list(self.autopilot.items()):
@@ -382,24 +423,27 @@ class State:
                 if not s:
                     self.autopilot.pop(sid, None)
                     continue
-                if s["state"] == "needs":
-                    continue                       # a real question pauses the drip
-                if s["state"] in ("done", "idle") and now - s["t"] >= ap["rate"]:
-                    if ap["drips"] >= deadman:
-                        self.autopilot.pop(sid, None)        # park
-                        s["state"], s["t"] = "needs", now    # hard alert
-                        log("autopilot PARKED %s (deadman)" % sid[:8])
-                        continue
-                    ap["drips"] += 1
-                    s["t"] = now
-                    fires.append((s.get("pane"), s.get("cwd")))
-        for pane, cwd in fires:                    # send outside the lock
-            if backend == "none":
-                continue
-            if backend == "osascript":
-                send_osascript(nudge)
-            else:
-                send_keys_to(pane, cwd, *nudge)
+                if s.get("awaiting"):
+                    continue                        # a real question pauses the drip
+                stopped_at = s.get("stopped_at")
+                if stopped_at is None or now - stopped_at < ap["rate"]:
+                    continue                        # not stopped, or not past cadence yet
+                pane = s.get("pane")
+                if not pane:
+                    self.autopilot.pop(sid, None)   # no exact target -> disarm, never guess
+                    log("autopilot DISARMED %s (no pane)" % sid[:8])
+                    continue
+                if ap["drips"] >= deadman:
+                    self.autopilot.pop(sid, None)
+                    self.autopilot_parked.add(sid)
+                    s["state"], s["t"], s["awaiting"] = "needs", now, True   # hard alert
+                    log("autopilot PARKED %s (deadman)" % sid[:8])
+                    continue
+                ap["drips"] += 1
+                s["stopped_at"] = now               # reset cadence; cleared when it resumes
+                fires.append((pane, s.get("cwd")))
+        for pane, cwd in fires:                     # send outside the lock (tmux only)
+            send_keys_to(pane, cwd, *nudge)
         return fires
 
     def led_mask(self, now):
@@ -462,6 +506,8 @@ def apply_hook(state, event, pane=None):
     st = state.cfg["lights"]["events"].get(name)
     if st:
         state.set_state(sid, cwd, st, pane=pane, tmux=tmux)
+        if name == "UserPromptSubmit":
+            state.human_touch(sid)       # a real human prompt resets the autopilot deadman
         log("hook", name, sid[:8], (tmux or cwd or "?"), "->", st)
 
 
@@ -728,8 +774,9 @@ def fader_autopilot(state, v, ix=3):
         return
     steps = (state.cfg.get("autopilot") or {}).get("steps_s", [0, 90, 30, 10])
     rate = steps[min(len(steps) - 1, int(val / 128.0 * len(steps)))]
-    if state.active:
-        state.arm_autopilot(state.active, rate)
+    sid = state.active                  # snapshot once (arm re-validates under the lock)
+    if sid:
+        state.arm_autopilot(sid, rate)
 
 
 def fader_assign(state, v):
