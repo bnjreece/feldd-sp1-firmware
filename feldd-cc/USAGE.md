@@ -47,13 +47,13 @@ Up to four sessions, **one Track LED each**:
   ```json
   "sessions": {
     "mode": "multi",
-    "assign": { "iamkeen": 0, "feldd": 1, "~/bnjmn/some-project": 2 }
+    "assign": { "web": 0, "api": 1, "~/code/notes": 2 }
   }
   ```
-  - **By tmux session name** (`"iamkeen": 0`) , best if you launch all your sessions
-    from one directory (e.g. home) in named tmux sessions. Track 1 = your `iamkeen`
-    session, always.
-  - **By project path** (`"~/bnjmn/x": 2`) , best if each session runs in its own
+  - **By tmux session name** (`"web": 0`) , best if you launch all your sessions from
+    one directory (e.g. home) in named tmux sessions. Track 1 = your `web` session,
+    always.
+  - **By project path** (`"~/code/notes": 2`) , best if each session runs in its own
     project dir. A cwd that is/under the path lands on that LED.
 
   Pinned LEDs are reserved, so an unpinned session never steals your main repo's

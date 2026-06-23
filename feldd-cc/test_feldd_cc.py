@@ -92,25 +92,25 @@ def test_button_keys_route_to_active_pane():
 
 def test_pin_by_tmux_session_name():
     # all sessions share cwd (home), so the tmux session NAME disambiguates the pin
-    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"iamkeen": 2}}))
-    st.set_state("x", "/Users/bnjmn", "working", pane="%5", tmux="iamkeen")
+    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"web": 2}}))
+    st.set_state("x", "/home/u", "working", pane="%5", tmux="web")
     assert st.sessions["x"]["led"] == 2          # pinned by name
-    st.set_state("y", "/Users/bnjmn", "working", pane="%6", tmux="other")
+    st.set_state("y", "/home/u", "working", pane="%6", tmux="other")
     assert st.sessions["y"]["led"] == 0          # unpinned -> first free
 
 
 def test_pin_mixed_name_and_path():
-    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"feldd": 0, "/proj/x": 1}}))
-    st.set_state("a", "/Users/bnjmn", "working", tmux="feldd")   # name match -> 0
+    st = fc.State(cfg(sessions={"mode": "multi", "assign": {"web": 0, "/proj/x": 1}}))
+    st.set_state("a", "/home/u", "working", tmux="web")          # name match -> 0
     st.set_state("b", "/proj/x/sub", "working", tmux="zzz")      # path match -> 1
     assert st.sessions["a"]["led"] == 0 and st.sessions["b"]["led"] == 1
 
 
 def test_active_target_carries_pane():
     st = fc.State(cfg(sessions={"mode": "multi"}))
-    st.set_state("a", "/Users/bnjmn", "needs", pane="%9", tmux="feldd")  # needs -> active
+    st.set_state("a", "/home/u", "needs", pane="%9", tmux="web")  # needs -> active
     assert st.active == "a"
-    assert st.active_target() == ("%9", "/Users/bnjmn")
+    assert st.active_target() == ("%9", "/home/u")
 
 
 def test_single_mode_track_is_noop():

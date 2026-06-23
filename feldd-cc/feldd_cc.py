@@ -80,7 +80,7 @@ DEFAULTS = {
                                 # "single" = one session, shown on LED 0 (or the row)
         # multi mode: PIN a project to a fixed Track LED (0..3). A session whose cwd
         # is (or is under) the path always lands on that LED; everyone else auto-fills
-        # the remaining LEDs. e.g. {"~/bnjmn/iamkeen": 0, "~/bnjmn/feldd-sp-1": 1}
+        # the remaining LEDs. e.g. {"web": 0, "~/code/api": 1}  (name or path)
         "assign": {},
     },
     "input": {

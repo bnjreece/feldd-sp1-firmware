@@ -28,9 +28,9 @@
     "mode": "multi",
     "_assign_comment": "multi mode only: PIN a session to a fixed Track LED 0-3. A KEY matches EITHER a tmux session NAME (exact) OR a project PATH (cwd is/under it). Use NAMES if you launch claude from one dir (e.g. home) in named tmux sessions; use PATHS if each session runs in its project dir. Others auto-fill the remaining LEDs.",
     "assign": {
-      "iamkeen": 0,
-      "feldd": 1,
-      "~/bnjmn/some-project": 2
+      "web": 0,
+      "api": 1,
+      "~/code/notes": 2
     }
   },
 
