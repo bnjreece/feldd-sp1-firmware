@@ -1,0 +1,15 @@
+{
+  "_comment": "Merge the 'hooks' block into ~/.claude/settings.json. Each event POSTs its JSON (stdin) to the feldd-cc daemon. The daemon replies 200 instantly so it never stalls a turn. Verify event names against your Claude Code version (run the capture config first); adjust matcher syntax if your version requires it.",
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "PermissionRequest":[{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST http://localhost:9200/hook -d @-" }] }]
+  }
+}

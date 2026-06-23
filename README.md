@@ -28,6 +28,15 @@
 
 Flash once, then configure and reconfigure from the browser whenever you like.
 
+## 🤖 Claude Code console (feldd-cc)
+
+Turn the SP-1 into a physical console for **Claude Code**: the track lights show when an agent is
+working / needs you / done, and the buttons drive the session (Play = approve, rocker = scroll). It's
+a small local daemon plus Claude Code hooks, talking to feldd's `led` verb (shipped in 0.16.0-beta)
+and its button monitor stream over USB. Setup is itself a Claude Code task — point your agent at
+[`feldd-cc/`](feldd-cc) and have it follow [`feldd-cc/SETUP.md`](feldd-cc/SETUP.md). The led verb +
+monitor stream are hardware-validated.
+
 ## ⚠️ Flashing safety
 
 You're modifying an irreplaceable device. feldd links above the TE bootloader (`0x20000`) and keeps the Track 1 + 4 DFU escape hatch plus a charge-standby gate, so a bad flash is recoverable by re-flashing the known-good `sp1_looper.bin`. Read the warnings on the [flash page](https://feldd.com/sp-1/flash) before you start.
