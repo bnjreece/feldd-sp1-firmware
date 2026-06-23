@@ -312,6 +312,30 @@ def test_cockpit_pin_to_high_led_sticks():
     assert st.sessions["y"]["led"] == 0          # unpinned -> first free, 6 reserved
 
 
+def test_handle_fader_dispatches_by_ix():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    seen = []
+    orig = fc.fader_scroll
+    fc.fader_scroll = lambda state, v: seen.append(("scroll", v))
+    try:
+        fc.handle_fader(st, 0, 100)          # ix 0 = scroll by default
+    finally:
+        fc.fader_scroll = orig
+    assert seen == [("scroll", 100)]
+
+
+def test_handle_fader_noop_when_not_cockpit():
+    st = fc.State(cfg(sessions={"mode": "multi"}))
+    seen = []
+    orig = fc.fader_scroll
+    fc.fader_scroll = lambda state, v: seen.append(v)
+    try:
+        fc.handle_fader(st, 0, 100)
+    finally:
+        fc.fader_scroll = orig
+    assert seen == []                         # faders only act in cockpit mode
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

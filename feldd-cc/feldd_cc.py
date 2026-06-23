@@ -103,6 +103,19 @@ DEFAULTS = {
         "enabled": True,
         "timeout_s": 90,
     },
+    # cockpit mode only: which fader ix (0-3) does which job. assign.preset is one of
+    # autopilot | coarse | rotate | custom.
+    "faders": {
+        "scroll": 0,        # scroll the focused session
+        "scrubber": 1,      # select / slide the 8-session window
+        "calm": 2,          # board sensitivity ("calm dial")
+        "assign": {"ix": 3, "preset": "autopilot"},
+    },
+    # autopilot drip (dangerous-mode only): fader value -> cadence step (0 = off).
+    "autopilot": {
+        "steps_s": [0, 90, 30, 10],   # cadence buckets across the fader throw
+        "deadman": 8,                  # auto-continues with no human touch -> park
+    },
     "hooks_scope": "global",    # informational for the wizard; the daemon ignores it
 }
 
@@ -435,6 +448,38 @@ def handle_button(state, ix):
         run_button_action(state, state.cfg["buttons"].get(name))
 
 
+# --------------------------------------------------------------------------- faders (cockpit)
+def handle_fader(state, ix, v):
+    """Route a fader move (ix 0-3, value 0-127) to its configured job. Cockpit only."""
+    if not state.cockpit:
+        return
+    f = state.cfg.get("faders") or {}
+    if ix == f.get("scroll"):
+        fader_scroll(state, v)
+    elif ix == f.get("scrubber"):
+        fader_scrubber(state, v)
+    elif ix == f.get("calm"):
+        fader_calm(state, v)
+    elif ix == (f.get("assign") or {}).get("ix"):
+        fader_assign(state, v)
+
+
+def fader_scroll(state, v):
+    pass        # Task 7: scroll the focused session
+
+
+def fader_scrubber(state, v):
+    pass        # Task 9: select / slide the session window
+
+
+def fader_calm(state, v):
+    pass        # Task 8: board sensitivity
+
+
+def fader_assign(state, v):
+    pass        # Task 10: assignable preset router
+
+
 # --------------------------------------------------------------------------- SP-1 CDC link
 class Device:
     def __init__(self, port_glob, dry):
@@ -506,6 +551,8 @@ class Device:
                             obj = json.loads(bytes(buf).decode("utf-8", "ignore"))
                             if obj.get("t") == "mon" and obj.get("k") == "b" and obj.get("s") == 1:
                                 handle_button(state, int(obj.get("ix", -1)))
+                            elif obj.get("t") == "mon" and obj.get("k") == "f":
+                                handle_fader(state, int(obj.get("ix", -1)), int(obj.get("v", 0)))
                         except Exception:
                             pass
                         buf.clear()
