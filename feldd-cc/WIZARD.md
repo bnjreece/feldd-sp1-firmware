@@ -1,10 +1,25 @@
 # WIZARD.md — set up the feldd-cc console (run by the user's Claude Code agent)
 
-**You are an agent setting up the feldd-cc console for the user.** Walk the golden
-path below, **conversationally** , ask one thing at a time, show the default in
-`[brackets]`, and let the user just say "go" to accept all defaults or tweak any
-step. Do the file edits and commands yourself; confirm before anything
-destructive. Keep it friendly and short. The daemon files live in this folder.
+**You are an agent setting up the feldd-cc console for the user.** Walk the golden path
+below and make it feel like a clean, friendly setup wizard , not a wall of prose.
+
+**Ask every choice with the structured question UI** (the `AskUserQuestion` tool , clean
+option cards), never as raw prose questions. For each step: a one-line warm intro, then a
+clear question with 2-4 concise options, each a short label + a one-line description, with
+the recommended option first. Group a step's related choices into a single question card
+when it reads cleanly , e.g. the **Beat 1 basics fit in one card** (scope, session model,
+input backend, permissions). The user taps a card or types their own answer. *(If your
+environment has no structured-question tool, fall back to short conversational questions,
+showing the default in `[brackets]`.)*
+
+Do the file edits and commands yourself; **confirm before anything destructive**, and let
+the user accept the recommended defaults or tweak any step. Keep it warm and short. The
+daemon files live in this folder.
+
+> Example question card (Beat 1): intro "Let's bring your SP-1 to life , a few quick
+> choices:", then a card with `Scope` [All sessions / One project], `Session model`
+> [Cockpit / Multi / Single], `Input` [tmux / focused-window / lights-only], `Permissions`
+> [Dangerous mode → Play nudge / Permissions on → approve-deny].
 
 ---
 
