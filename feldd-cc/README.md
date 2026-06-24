@@ -46,10 +46,10 @@ source is in this repo's [`firmware/`](../firmware); flash the ready image from
 stream are **hardware-validated** on a real SP-1. Flashing is SWD-validate-only per the
 never-blind-flash rule.
 
-## The control map (v1)
+## The control map (single / multi mode)
 | SP-1 control | monitor ix | does |
 |---|---|---|
-| **Play** | 0 | send **Enter** to the active Claude pane (approve / submit) |
+| **Play** | 0 | **Enter** (approve / submit) to the active pane , or, in dangerous mode, your `continue` nudge |
 | **Track 1-4** | 1-4 | **select** which session the controls target (its LED) |
 | **Vol-** | 6 | send **Esc** (interrupt) to the active pane |
 | **FWD / RWD** | 7 / 8 | **scroll** the active pane (PageDown / PageUp) |
@@ -57,6 +57,18 @@ never-blind-flash rule.
 
 The session that's *needs-you* auto-becomes the active target, so the common loop is: an LED blinks →
 hit **Play** to approve / answer.
+
+### Cockpit mode adds (8-session fleet , full details in [`USAGE.md`](USAGE.md#cockpit-mode-sessionsmode-cockpit))
+| SP-1 control | does |
+|---|---|
+| **8 LEDs** | front 4 (Track buttons) = an **MRU cache** of the sessions you most recently focused or that need you; side 4 = the bench |
+| **Track 1-4** | **jump** , switch your tmux client to that front session (focus follows) |
+| **Vol+** | **next** , jump to the next session that needs you |
+| **Fader 1 / 2 / 3** | scroll the focused session / scrub focus across all sessions / **calm dial** (board sensitivity) |
+| **Fader 4** | assignable: `coarse` read · `autopilot` (dangerous-mode self-driver) · `rotate` · `custom` |
+
+(No Play+Track shift , Play and the Track buttons share one resistor ladder, so the hardware can't report
+them held together; you reach bench sessions with the scrubber or Vol+.)
 
 **Approve permissions from the controller.** When Claude *would* prompt you to allow a tool, the daemon
 holds that prompt open: the session LED blinks and **Play = allow, Vol- = deny** answer the real
