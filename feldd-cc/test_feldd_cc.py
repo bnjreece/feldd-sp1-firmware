@@ -461,6 +461,44 @@ def test_cockpit_allocates_eight_leds():
     assert st.led_mask(time.time()) == 0xFF
 
 
+def test_mru_new_background_session_waits_on_bench():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcd":
+        st.set_state(sid, "/p/%s" % sid, "working")   # front 0-3
+    st.set_state("x", "/p/x", "working")              # 5th: benches, doesn't evict a-d
+    assert st.sessions["x"]["led"] == 4
+    assert {st.sessions[s]["led"] for s in "abcd"} == {0, 1, 2, 3}
+
+
+def test_mru_jump_promotes_and_evicts_lru():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcdefgh":
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid, tmux="t-%s" % sid)
+    st.focus("e")                                     # jump to a bench session
+    assert st.sessions["e"]["led"] < 4                # e now on a front button
+    assert st.sessions["a"]["led"] == 4               # LRU front (a) took e's vacated bench slot
+    assert all(st.sessions[s]["led"] is not None for s in "abcdefgh")  # nobody fell off
+
+
+def test_mru_needs_claims_a_front_button():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcde":
+        st.set_state(sid, "/p/%s" % sid, "working")   # a-d front, e bench (4)
+    st.set_state("e", "/p/e", "needs")                # e needs you -> promotes to front
+    assert st.sessions["e"]["led"] < 4
+
+
+def test_mru_pinned_session_never_evicted():
+    st = fc.State(cfg(sessions={"mode": "cockpit", "assign": {"keep": 0}}))
+    st.set_state("p", "/p/p", "working", tmux="keep")   # pinned to LED 0
+    for sid in "abc":
+        st.set_state(sid, "/x/%s" % sid, "working")     # a,b,c -> front 1,2,3
+    st.set_state("d", "/x/d", "working")                # d -> bench 4
+    st.focus("d")                                       # promote d; must not touch the pin
+    assert st.sessions["p"]["led"] == 0                 # pinned anchor holds
+    assert st.sessions["d"]["led"] < 4 and st.sessions["d"]["led"] != 0
+
+
 def test_cockpit_overflow_goes_offboard():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for i in range(10):

@@ -196,23 +196,96 @@ class State:
             if cwd:
                 s["cwd"] = cwd
             return s
+        pinned = False
         if self.single:
             led = 0                       # all sessions share LED 0 in single mode
         else:
             led = self._assigned_led(cwd, tmux)  # a pinned session always gets its LED
+            pinned = led is not None
             if led is None:
-                if self.free:
+                if self.cockpit:
+                    led = self._tier_place()   # front 0-3 free -> front; side 4-7 -> bench; else off
+                elif self.free:
                     led = self.free.pop(0)
-                elif self.cockpit:
-                    led = None      # overflow stays OFF-BOARD (not on an LED) rather than
-                                    # colliding onto one; still reachable via scrubber / Vol+
                 else:
                     led = min(self.sessions.values(), key=lambda x: x["t"])["led"]
+        now = time.time()
         s = {"led": led, "state": "idle", "cwd": cwd or "", "pane": None, "tmux": tmux,
-             "t": time.time(), "seq": self._seq, "awaiting": False, "stopped_at": None}
+             "t": now, "seq": self._seq, "awaiting": False, "stopped_at": None,
+             "focus_t": now, "pinned": pinned}
         self._seq += 1
         self.sessions[sid] = s
         return s
+
+    # ---- cockpit MRU: front row (0-3) is a sticky LRU cache of the sessions you most
+    # recently focused or that most recently needed you; side row (4-7) is the bench.
+    # Pinned sessions anchor their LED and are exempt. (All called under self.lock.)
+    def _tier_place(self):
+        """A NEW session's LED: first free front (0-3), then first free bench (4-7), else
+        off-board. Never evicts , a new background session can't steal a front button."""
+        occ = {self.sessions[x]["led"] for x in self.sessions
+               if isinstance(self.sessions[x]["led"], int)}
+        for i in list(range(4)) + list(range(4, 8)):
+            if i not in self.pinned and i not in occ:
+                return i
+        return None
+
+    def _bench_slot_for(self, sid, vacated=None):
+        """An LED for a session being demoted to the bench: the slot the promoted session
+        just vacated if usable, else a free bench LED, else evict the least-recently-active
+        bench session off-board and take its LED, else off-board (None)."""
+        side = [i for i in range(4, 8) if i not in self.pinned]
+        if isinstance(vacated, int) and vacated in side:
+            return vacated
+        occ = {self.sessions[x]["led"] for x in self.sessions
+               if x != sid and isinstance(self.sessions[x]["led"], int) and self.sessions[x]["led"] in side}
+        free = [i for i in side if i not in occ]
+        if free:
+            return free[0]
+        bench = [(self.sessions[x]["t"], x) for x in self.sessions
+                 if x != sid and isinstance(self.sessions[x]["led"], int) and self.sessions[x]["led"] in side]
+        if bench:
+            oldest = min(bench)[1]
+            freed = self.sessions[oldest]["led"]
+            self.sessions[oldest]["led"] = None      # bench full -> push the LRU one off-board
+            return freed
+        return None
+
+    def _promote(self, sid, now):
+        """Ensure sid occupies a FRONT LED (0-3), evicting the least-recently-focused
+        front session (preferring one that isn't needs-you) to the bench. No-op for
+        pinned sessions, already-front sessions, and non-cockpit modes."""
+        if not self.cockpit:
+            return
+        s = self.sessions.get(sid)
+        if not s or s.get("pinned"):
+            return
+        s["focus_t"] = now
+        cur = s["led"]
+        if isinstance(cur, int) and cur < 4:
+            return                                   # already a front session
+        front = [i for i in range(4) if i not in self.pinned]
+        occ = {self.sessions[x]["led"]: x for x in self.sessions
+               if isinstance(self.sessions[x]["led"], int) and self.sessions[x]["led"] in front}
+        freeslots = [i for i in front if i not in occ]
+        if freeslots:
+            s["led"] = freeslots[0]
+            return
+        if not front:
+            return                                   # all front LEDs are pinned
+        cands = [(self.sessions[x]["focus_t"], x) for x in occ.values()]
+        nonneeds = [c for c in cands if self.sessions[c[1]]["state"] != "needs"]
+        evict = min(nonneeds or cands)[1]
+        target = self.sessions[evict]["led"]
+        self.sessions[evict]["led"] = self._bench_slot_for(evict, vacated=cur)
+        s["led"] = target
+
+    def focus(self, sid):
+        """Make sid the active target AND promote it onto a front button (cockpit)."""
+        with self.lock:
+            if sid in self.sessions:
+                self.active = sid
+                self._promote(sid, time.time())
 
     def _assigned_led(self, cwd, tmux):
         """The pinned Track LED for a session, matched by tmux session NAME (exact) or
@@ -244,8 +317,9 @@ class State:
                 s["awaiting"], s["stopped_at"] = False, None
             elif st == "done":
                 s["stopped_at"] = now
-            if st == "needs":            # auto-focus the session that wants you
+            if st == "needs":            # auto-focus the session that wants you...
                 self.active = sid
+                self._promote(sid, now)  # ...and let it claim a front button (cockpit)
             elif self.active is None:
                 self.active = sid
 
@@ -644,6 +718,7 @@ def handle_button(state, ix, pressed=True):
         led = ix - TRK1
         sid = state.select_by_led(led)
         if state.cockpit and sid:           # jump: bring that session to the foreground
+            state.focus(sid)                # refresh its recency (keeps its front slot)
             tmux_focus(*state.jump_info(sid))
             state.reset_fader_grab()        # re-pick-up faders for the new focus
         log("select led %d -> %s" % (led, (sid or "none")[:8]))
@@ -652,7 +727,7 @@ def handle_button(state, ix, pressed=True):
     if state.cockpit and ix == VOLU:
         sid = state.next_needs()
         if sid:
-            state.set_active(sid)
+            state.focus(sid)                # promote it onto a front button
             tmux_focus(*state.jump_info(sid))
             state.reset_fader_grab()
         log("next-needs -> %s" % ((sid or "none")[:8]))
@@ -728,7 +803,7 @@ def fader_scrubber(state, v, ix=None):
         return
     sid = state.session_at_fraction(val / 127.0)
     if sid:
-        state.set_active(sid)
+        state.focus(sid)                             # seat it on a front button as you reach it
         tmux_focus(*state.jump_info(sid))
         state.reset_fader_grab(f.get("scroll", 0))   # new focus -> re-pick-up scroll only
 
