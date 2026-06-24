@@ -242,14 +242,28 @@ class State:
         free = [i for i in side if i not in occ]
         if free:
             return free[0]
-        bench = [(self.sessions[x]["t"], x) for x in self.sessions
+        bench = [((self.sessions[x]["state"] == "needs", self.sessions[x]["focus_t"]), x)
+                 for x in self.sessions
                  if x != sid and isinstance(self.sessions[x]["led"], int) and self.sessions[x]["led"] in side]
         if bench:
-            oldest = min(bench)[1]
-            freed = self.sessions[oldest]["led"]
-            self.sessions[oldest]["led"] = None      # bench full -> push the LRU one off-board
+            victim = min(bench)[1]       # spare needs (False<True), then least-recently focused
+            freed = self.sessions[victim]["led"]
+            self.sessions[victim]["led"] = None   # bench full -> push the victim off-board
             return freed
         return None
+
+    def _rehome_offboard(self):
+        """Cockpit: after a slot frees up, pull off-board sessions back onto the board
+        (needs first, then most-recently focused) so a working session never stays dark
+        while LEDs sit empty."""
+        offboard = sorted((x for x in self.sessions if self.sessions[x]["led"] is None),
+                          key=lambda x: (self.sessions[x]["state"] != "needs",
+                                         -self.sessions[x]["focus_t"]))
+        for x in offboard:
+            slot = self._tier_place()
+            if slot is None:
+                break
+            self.sessions[x]["led"] = slot
 
     def _promote(self, sid, now):
         """Ensure sid occupies a FRONT LED (0-3), evicting the least-recently-focused
@@ -396,10 +410,14 @@ class State:
                     and s["led"] not in self.free and s["led"] not in self.pinned):
                 self.free.append(s["led"])
                 self.free.sort()
+            if self.cockpit:
+                self._rehome_offboard()      # a freed slot pulls an off-board session back on
             if self.active == sid:
                 self.active = next(iter(self.sessions), None)
 
     def select_by_led(self, led):
+        if led is None:
+            return None              # never let an off-board (led None) session match
         with self.lock:
             for sid, s in self.sessions.items():
                 if s["led"] == led:

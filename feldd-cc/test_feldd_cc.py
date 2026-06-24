@@ -499,6 +499,32 @@ def test_mru_pinned_session_never_evicted():
     assert st.sessions["d"]["led"] < 4 and st.sessions["d"]["led"] != 0
 
 
+def test_mru_bench_offboard_spares_needs():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for sid in "abcdefgh":
+        st.set_state(sid, "/p/%s" % sid, "working")   # a-d front, e-h bench (4-7)
+    st.sessions["e"]["state"] = "needs"               # e is a needs session sitting on the bench
+    with st.lock:
+        st._bench_slot_for("newcomer", vacated=None)  # bench full -> must off-board a NON-needs
+    assert st.sessions["e"]["led"] is not None        # the needs session is spared
+
+
+def test_mru_rehomes_offboard_on_end():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for i in range(9):
+        st.set_state("s%d" % i, "/p/%d" % i, "working")   # s0-s7 on board, s8 off-board
+    assert st.sessions["s8"]["led"] is None
+    st.end("s0")                                          # a slot frees
+    assert st.sessions["s8"]["led"] is not None           # s8 is re-homed, not left dark
+
+
+def test_select_by_led_none_is_noop():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    for i in range(9):
+        st.set_state("s%d" % i, "/p/%d" % i, "working")   # s8 is off-board (led None)
+    assert st.select_by_led(None) is None                 # never matches an off-board session
+
+
 def test_cockpit_overflow_goes_offboard():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for i in range(10):
