@@ -1,5 +1,5 @@
 {
-  "_comment": "Merge the 'hooks' block into ~/.claude/settings.json. Each event POSTs its JSON (stdin) to the feldd-cc daemon, which replies 200 instantly so it never stalls a turn. The trailing '|| true' makes every hook FAIL-SOFT: if the daemon is down/restarting, curl's non-zero exit is swallowed so Claude Code never reports a hook error (PermissionRequest's success output is on stdout, untouched by || true). Verify event names against your Claude Code version (run the capture config first); adjust matcher syntax if your version requires it.",
+  "_comment": "Merge the 'hooks' block into ~/.claude/settings.json. Each event POSTs its JSON (stdin) to the feldd-cc daemon, which replies 200 instantly so it never stalls a turn. The OBSERVATIONAL hooks end with '|| true' so a down/restarting daemon's non-zero curl exit is swallowed and Claude Code never reports a hook error. PermissionRequest is DELIBERATELY different: it gates tool permissions, so it uses 'curl -sf' and NO '|| true' , a daemon failure (down, or HTTP >=400) must fail CLOSED (Claude Code denies / falls back to the on-screen prompt), never get swallowed into a silent success. Verify event names against your Claude Code version (run the capture config first); adjust matcher syntax if your version requires it.",
   "hooks": {
     "SessionStart":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }],
     "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }],
@@ -7,7 +7,7 @@
     "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }],
     "Notification":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }],
-    "PermissionRequest":[{ "hooks": [{ "type": "command", "timeout": 120, "command": "curl -s --max-time 115 -X POST \"http://localhost:9200/await?pane=$TMUX_PANE\" -d @- || true" }] }],
+    "PermissionRequest":[{ "hooks": [{ "type": "command", "timeout": 120, "command": "curl -sf --max-time 115 -X POST \"http://localhost:9200/await?pane=$TMUX_PANE\" -d @-" }] }],
     "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }],
     "SubagentStop":     [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "curl -s --max-time 2 -X POST \"http://localhost:9200/hook?pane=$TMUX_PANE\" -d @- || true" }] }]
