@@ -79,10 +79,13 @@ For any change, capture the action as one of:
 - `null` = do nothing
 
 ## Beat 2.5 , Cockpit extras (only if mode = cockpit)
-The cockpit lights all 8 LEDs (front 4 = sessions 1-4, side 4 = 5-8) and changes the
-controls: **Track 1-4 = jump** (tmux focus follows; selects the front four, sessions 5-8
-are reached with the scrubber or Vol+ , there is no Play+Track shift, the hardware can't
-chord them), **Vol+ = jump to the next needs-you**. Confirm those, then the faders:
+The cockpit lights all 8 LEDs and **follows your attention (MRU)**: the front 4 (the
+Track buttons) hold the sessions you most recently focused or that need you, the side 4
+are the bench. Controls: **Track 1-4 = jump** to the four front sessions (tmux focus
+follows); reach a **bench/off-board** session with the **scrubber or Vol+**, which
+**promotes it onto a front button** (there is no Play+Track shift, the hardware can't
+chord same-ladder buttons). **Vol+ = jump to the next needs-you.** Confirm those, then
+the faders:
 - **Fader 1 = scroll** the focused session, **2 = scrub** focus across all sessions,
   **3 = calm dial** (down = only needs-you lit, up = show all states). These are good
   defaults; only change `faders.scroll/scrubber/calm` if they want a different layout.

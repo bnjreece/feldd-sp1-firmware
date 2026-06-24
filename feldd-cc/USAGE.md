@@ -124,15 +124,21 @@ The fleet view: **8 LEDs = 8 sessions**, the buttons fly you between them, the f
 read and tune. Set `"sessions": {"mode": "cockpit"}` (pin sessions to LEDs 0-7 the same
 way as multi mode).
 
-- **The board:** front 4 LEDs = sessions 1-4, side 4 LEDs = sessions 5-8. off = idle,
+- **The board follows you (MRU).** The **front 4 LEDs (the Track buttons) hold the 4
+  sessions you've most recently focused or that most recently need you** , a sticky
+  cache. A session keeps its exact front LED until it's evicted, so nothing shuffles
+  under your fingers. The **side 4 LEDs are the bench** (the next most-recent sessions,
+  there for glance); anything past that is off-board. Each LED's pattern: off = idle,
   solid = working, fast blink = needs you, quick flash = just finished, slow pulse = on
-  autopilot. (Up to 8 sessions are shown; a 9th+ stays off-board but is still reachable
-  with the scrubber.)
-- **Track 1-4 = jump:** switches your tmux client to that LED's session (focus follows).
-  Track 1-4 select the front four; **sessions 5-8 (and any off-board) are reached with the
-  fader-2 scrubber or Vol+.** (There is no Play-held shift: Play and the Track buttons are
-  on one resistor ladder, so the hardware can't report them held together.)
-- **Vol+ = next:** jumps to the next session that needs you, walking the queue.
+  autopilot.
+- **Track 1-4 = jump** to the four front sessions (switches your tmux client to it, focus
+  follows). To reach a **bench or off-board** session, sweep the **fader-2 scrubber** (or
+  **Vol+** if it needs you) , doing so **promotes it onto a front button** (evicting the
+  least-recently-used front session to the bench). A **needs-you** session also auto-claims
+  a front button. A new background session never steals a button just by appearing; it
+  waits on the bench until it needs you. (There is no Play-held shift: Play and the Track
+  buttons share one resistor ladder, so the hardware can't report them held together.)
+- **Vol+ = next:** jumps to (and promotes) the next session that needs you.
 - **Faders:** 1 = scroll the focused session, 2 = scrub focus across all sessions (reaches
   sessions past the visible 8), 3 = the **calm dial** (slide down: only needs-you stays
   lit and busy sessions go dark; slide up: show everything), 4 = assignable (`faders.assign.preset`):
