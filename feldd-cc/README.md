@@ -2,14 +2,17 @@
 
 ## ▶ Quick start (do this first)
 **Setup is a guided wizard your own Claude Code agent runs , not a config file to hand-edit.**
-Open Claude Code in this folder and say:
+Open Claude Code in this folder (`feldd-cc/`) and paste this starter prompt:
 
-> **"Read WIZARD.md and set up my feldd-cc console."**
+```text
+Read WIZARD.md in this folder and run it to set up my feldd-cc console. My SP-1 is plugged in, flashed with feldd 0.16.0-beta, and in MIDI mode. Walk me through it as the wizard.
+```
 
-Your agent will walk you through it (firmware check, a few questions, writes the config, wires the
-hooks, self-tests on the device). Don't start by editing `feldd_cc.config.json` or running
-`feldd_cc.py` by hand , the wizard does both, in the right order. (Prefer to do it manually? See
-[`SETUP.md`](SETUP.md). Already on a real SP-1 and want a hardware punch-list? [`BRINGUP.md`](BRINGUP.md).)
+Your agent will walk you through it , a firmware check (`bench_led.py --probe`), a few questions via
+clean option cards, then it writes the config, wires the hooks, and self-tests on the device. Don't
+start by editing `feldd_cc.config.json` or running `feldd_cc.py` by hand , the wizard does both, in the
+right order. (Prefer to do it manually? See [`SETUP.md`](SETUP.md). Already on a real SP-1 and want a
+hardware punch-list? [`BRINGUP.md`](BRINGUP.md).)
 
 ---
 
