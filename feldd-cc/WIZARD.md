@@ -27,10 +27,12 @@ daemon files live in this folder.
 1. **Firmware:** the SP-1 must run **feldd 0.16.0-beta+** (it has the `led` verb)
    and be in **MIDI mode**, plugged in over USB. Verify with:
    ```bash
-   python3 bench_led.py
+   python3 bench_led.py --probe
    ```
-   It finds the SP-1 and walks the 8 LEDs. If it can't find a port: the SP-1 isn't
-   plugged in, isn't in MIDI mode, or isn't flashed. **Do not flash it for them** ,
+   `--probe` is NON-INTERACTIVE (no prompts , safe to run headless): it finds the SP-1,
+   prints the firmware + caps from the hello line, flashes the 8 LEDs once, and exits.
+   (Plain `bench_led.py` is the interactive walk for a human.) If it can't find a port: the
+   SP-1 isn't plugged in, isn't in MIDI mode, or isn't flashed. **Do not flash it for them** ,
    point them to https://feldd.com/sp-1/guide?beta=1 (flash onto an SWD-recoverable
    unit) and continue once it's ready. They can still proceed with `--dry-run` to
    configure without hardware.
@@ -83,9 +85,12 @@ you compose the real config in Beat 4 from only what the user changed.
   `["<word>", "Enter"]`. A multi-word phrase is fine as long as it stays **one** config
   string (`["keep going", "Enter"]`); avoid a bare word that is itself a tmux key name
   (`Space`, `Tab`, `Up`, `Enter`, `C-c`, ...) , those get interpreted, not typed. Leave
-  Play = `["Enter"]` for anyone who runs with permissions on. Prefer to keep Play =
-  approve/submit? Put the nudge on the free **Vol+** instead: `buttons.vol_plus` =
-  `["continue", "Enter"]`.
+  Play = `["Enter"]` for anyone who runs with permissions on. In **single/multi** keep Play =
+  approve and put the nudge on the free **Vol+** (`buttons.vol_plus`). **In cockpit, Vol+
+  is taken (it's next-needs), and Play already serves BOTH** , the daemon resolves Play as
+  *approve* when a permission prompt is pending and falls through to the *nudge* otherwise
+  , so in cockpit set `buttons.play` = `["continue","Enter"]` and leave Vol+ for
+  navigation. **Never put the nudge on Vol+ in cockpit.**
 
 ## Beat 2 , Buttons
 Show the default map and ask "keep these, or change any?":
@@ -126,6 +131,18 @@ the faders:
     your real prompt does), the LED slow-pulses while armed.
   - `rotate` , a second scrubber. `custom` , map `faders.assign.action` to a key list /
     `{"shell":..}` fired at the top of the throw.
+
+**Reconcile these conflicts BEFORE writing the config (cockpit):**
+- **Autopilot and SP-1 approve/deny are mutually exclusive.** Autopilot arms only with
+  `permission.enabled: false`, so it cannot coexist with Beat 1's "approve permissions from
+  the SP-1" (`permission.enabled: true`). If the user picked **both**, STOP and make them
+  choose: **Path A** = SP-1 approve/deny (`permission.enabled: true`, no autopilot; Play =
+  approve-when-pending + nudge-otherwise), or **Path B** = autopilot (`permission.enabled:
+  false`, Fader 4 self-driver; permissioned sessions get answered on-screen; Play = nudge).
+  Never write a config with both.
+- **Vol+ is next-needs in cockpit**, so the keep-going nudge cannot live there. It goes on
+  Play (which already serves approve-when-pending + nudge-otherwise). If the user asked for
+  a nudge on Vol+, tell them Play already covers it and keep Vol+ for navigation.
 
 ## Beat 3 , Lights
 Show the defaults and ask "keep or tweak?":

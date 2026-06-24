@@ -5,7 +5,8 @@ Drives the SP-1's 8 LEDs from the host over the CDC config port, one step at a
 time (press Enter between steps so you can watch). Auto-finds the config port by
 hello-probing each /dev/cu.usbmodem*. Requires: pip3 install pyserial.
 
-    python3 bench_led.py
+    python3 bench_led.py            # interactive walk (press Enter between steps, for a human)
+    python3 bench_led.py --probe    # non-interactive: confirm + flash once, then exit (agents / Beat 0)
 
 ix 0-3 = the 4 front TRACK LEDs, ix 4-7 = the 4 SIDE LEDs (the layer row).
 """
@@ -33,13 +34,28 @@ def find_cfg_port():
 
 
 def main():
+    probe = "--probe" in sys.argv
     s, port = find_cfg_port()
     print(f"config port: {port}\n")
 
     def led(**kw):
         s.write((json.dumps({"t": "led", **kw}) + "\n").encode())
-        time.sleep(0.05)
-        print(f"  sent {json.dumps(kw)}   <- {s.readline().decode().strip()}")
+        time.sleep(0.06)
+        print(f"  sent {json.dumps(kw)}   <- {s.readline().decode('utf-8', 'ignore').strip()}")
+
+    if probe:                       # non-interactive: confirm + flash once, no prompts (headless-safe)
+        s.reset_input_buffer()
+        s.write(b'{"t":"hello"}\n')
+        time.sleep(0.25)
+        print("hello   <-", s.readline().decode("utf-8", "ignore").strip())
+        led(mask=255)
+        time.sleep(0.7)
+        led(mask=0)
+        time.sleep(0.3)
+        led(release=True)
+        s.close()
+        print("\nprobe OK: SP-1 present, led verb responds (firmware + caps in the hello line above).")
+        return
 
     steps = [
         ("ALL 8 ON  (mask 255)  -> every track + side LED lights", dict(mask=255)),
