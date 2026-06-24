@@ -1,5 +1,18 @@
 # feldd-cc — the SP-1 as a Claude Code console
 
+## ▶ Quick start (do this first)
+**Setup is a guided wizard your own Claude Code agent runs , not a config file to hand-edit.**
+Open Claude Code in this folder and say:
+
+> **"Read WIZARD.md and set up my feldd-cc console."**
+
+Your agent will walk you through it (firmware check, a few questions, writes the config, wires the
+hooks, self-tests on the device). Don't start by editing `feldd_cc.config.json` or running
+`feldd_cc.py` by hand , the wizard does both, in the right order. (Prefer to do it manually? See
+[`SETUP.md`](SETUP.md). Already on a real SP-1 and want a hardware punch-list? [`BRINGUP.md`](BRINGUP.md).)
+
+---
+
 Turn the Teenage Engineering SP-1 (running feldd) into a physical control surface for Claude Code:
 **lights show when an agent needs you, buttons drive it.** No custom terminal — Claude Code hooks +
 a small local daemon + feldd's existing USB-CDC JSON channel.
@@ -18,10 +31,9 @@ Claude Code  --hooks (HTTP)-->  feldd_cc daemon  --CDC JSON-->  SP-1 (feldd)
   macOS focused-window backend or lights-only via `input.backend` (see [`USAGE.md`](USAGE.md)). The
   **lights need no tmux at all** , every Claude Code user gets them.
 
-**Setup is itself a Claude Code task.** Point your Claude at this folder and say *"set up my feldd-cc
-console using WIZARD.md."* It runs a short **guided wizard** , conversationally asks about buttons,
-lights, scope, and single-vs-multi session, writes the config, wires the hooks, and self-tests so you
-*see* it work. ([`SETUP.md`](SETUP.md) is the manual runbook if you'd rather do it by hand.)
+The **wizard** above (WIZARD.md) is the path: it conversationally asks about buttons, lights, scope, and
+single / multi / cockpit session model, writes the config, wires the hooks, and self-tests so you *see*
+it work. The pieces below are reference for when you want to understand or customize it.
 
 ## Status
 v3 host daemon: state lights + button input + permission approve/deny + a **cockpit mode** (8 LEDs for

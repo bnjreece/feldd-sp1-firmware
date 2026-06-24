@@ -21,6 +21,15 @@ destructive. Keep it friendly and short. The daemon files live in this folder.
    configure without hardware.
 2. **Dependency:** `pip3 install --break-system-packages pyserial`.
 
+## Beat 0.5 , Clean slate (don't clobber, don't inherit)
+**Before asking anything, check for an existing `feldd_cc.config.json` next to `feldd_cc.py`.**
+If one is there and **you** didn't just write it this session, it's a leftover (a previous run, or
+someone else's checkout). Do NOT silently build on it or assume setup is done , say: *"I see an
+existing config; want to **start fresh** (I'll back it up to `feldd_cc.config.json.bak`) or
+**tweak the existing one**?"* and wait. Default to **start fresh** for a first-time setup. Also note:
+`feldd_cc.config.example.json` is a **schema reference, not a starter** , never copy it into place;
+you compose the real config in Beat 4 from only what the user changed.
+
 ## Beat 1 , Basics (a few quick questions)
 - **Hooks scope:** "Should the console react to **all** your Claude Code sessions,
   or just **one project**?" `[all]`
