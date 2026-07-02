@@ -52,6 +52,7 @@
 #include "wdt.h"
 #include "chord_engine.h"
 #include "led_override.h"
+#include "led.h"
 
 /* TEMPORARY shift-layer test trigger (set to 0 to restore stock behaviour).
  * When 1: double-tapping PLAY (button index 0) latches the shift bank on/off,
@@ -203,20 +204,20 @@ static void enter_bootloader(void)
      * RESETREAS, then SYSTEMOFF. We never touch P0.27's config after arming it. */
 
     /* Park output pins low / disable the TRS ring. LEDs off (clear = off). */
-    nrf_gpio_pin_clear(SP1_LED1);
-    nrf_gpio_pin_clear(SP1_TRACK_LED1);
-    nrf_gpio_pin_clear(SP1_TRACK_LED2);
-    nrf_gpio_pin_clear(SP1_TRACK_LED3);
-    nrf_gpio_pin_clear(SP1_TRACK_LED4);
-    /* Park the 3 spare side (play) LEDs too (P0.01/P1.12/P0.00). Without this the
+    led_pin(SP1_LED1, false);
+    led_pin(SP1_TRACK_LED1, false);
+    led_pin(SP1_TRACK_LED2, false);
+    led_pin(SP1_TRACK_LED3, false);
+    led_pin(SP1_TRACK_LED4, false);
+    /* Park the other 3 side (play) LEDs too (P0.01/P1.12/P0.00). Without this the
      * lit LAYER / mode-flash pattern (0.9.1) stays driven and is RETAINED through
      * SYSTEM_OFF, draining the cell (the 0.7.0-beta "LEDs never turn off" report).
      * SP1_PLAY_LED4 == SP1_LED1 is already cleared above. Skipped under
      * -DFELDD_MODE_LED_SINGLE where these 3 pins are never driven. */
 #ifndef FELDD_MODE_LED_SINGLE
-    nrf_gpio_pin_clear(SP1_PLAY_LED1);
-    nrf_gpio_pin_clear(SP1_PLAY_LED2);
-    nrf_gpio_pin_clear(SP1_PLAY_LED3);
+    led_pin(SP1_PLAY_LED1, false);
+    led_pin(SP1_PLAY_LED2, false);
+    led_pin(SP1_PLAY_LED3, false);
 #endif
     /* BTN_COM ladder/fader supply: drive low to stop powering the resistor
      * ladders in the off state. */
@@ -256,14 +257,10 @@ static void enter_bootloader(void)
  * enter_dfu(). */
 static void enter_dfu(void)
 {
-    nrf_gpio_cfg_output(SP1_TRACK_LED1);
-    nrf_gpio_cfg_output(SP1_TRACK_LED2);
-    nrf_gpio_cfg_output(SP1_TRACK_LED3);
-    nrf_gpio_cfg_output(SP1_TRACK_LED4);
-    nrf_gpio_pin_set(SP1_TRACK_LED1);
-    nrf_gpio_pin_set(SP1_TRACK_LED2);
-    nrf_gpio_pin_set(SP1_TRACK_LED3);
-    nrf_gpio_pin_set(SP1_TRACK_LED4);
+    led_pin(SP1_TRACK_LED1, true);
+    led_pin(SP1_TRACK_LED2, true);
+    led_pin(SP1_TRACK_LED3, true);
+    led_pin(SP1_TRACK_LED4, true);
     NRF_POWER->GPREGRET = 0x57u;
     __DSB();
     NVIC_SystemReset();
@@ -289,9 +286,9 @@ static void profile_track_render(unsigned char count, unsigned char tick)
     dial_track_pattern(count, tick, out);
     for (int i = 0; i < 4; i++) {
         if (out[i]) {
-            nrf_gpio_pin_set(leds[i]);
+            led_pin(leds[i], true);
         } else {
-            nrf_gpio_pin_clear(leds[i]);
+            led_pin(leds[i], false);
         }
     }
 }
@@ -308,6 +305,48 @@ static void profile_track_render(unsigned char count, unsigned char tick)
 static int usb_present(void) { return nrf_gpio_pin_read(SP1_CHG_NPGOOD) == 0; }
 static int charging(void)    { return nrf_gpio_pin_read(SP1_CHG_NCHG)   == 0; }
 
+/* Battery gauge (charge-standby "filling bar", mirrors stock). controls_read_raw(6)
+ * = battery on AIN4/P0.28, gain 1/6, ref 0.6 V internal, behind the on-board divider.
+ * The divider ratio is undocumented, so BATT_RAW_EMPTY/FULL are CALIBRATED from the
+ * "BATT raw=" RTT print against the stock curve (empty ~3.45 V / full ~4.18 V).
+ * PROVISIONAL (divider assumed ~1/2) until the on-rig RTT read confirms. */
+#define BATT_RAW_EMPTY 1962
+#define BATT_RAW_FULL  2378
+static int battery_pct(int raw)
+{
+    if (raw < 0) {
+        return -1;
+    }
+    int pct = (raw - BATT_RAW_EMPTY) * 100 / (BATT_RAW_FULL - BATT_RAW_EMPTY);
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
+/* Render the 4-bar charge gauge on the SIDE/play row. Bar 1 = idx 4 (SP1_PLAY_LED1 =
+ * the layer-0/default-profile LED = the physical "first" LED, USER-confirmed), filling
+ * up to idx 7. While CHARGING: N quarters solid + the next one blinks ("filling"), rest
+ * off. Charge COMPLETE (nCHG released): all 4 solid. */
+static void charge_gauge(int pct, int chg, uint32_t blink)
+{
+    if (!chg) {                                  /* full / charge complete -> all solid */
+        for (int i = 0; i < 4; i++) {
+            led_idx(4 + i, true);
+        }
+        return;
+    }
+    int n_full = (pct < 0) ? 0 : pct / 25;       /* 0..4 solid quarters */
+    if (n_full > 4) n_full = 4;
+    int blink_on = ((blink / 12u) & 1u);         /* ~0.5 s period at 40 ms/tick */
+    for (int i = 0; i < 4; i++) {
+        int on;
+        if (i < n_full)                     on = 1;         /* filled  */
+        else if (i == n_full && n_full < 4) on = blink_on;  /* filling (blinks) */
+        else                                on = 0;         /* empty   */
+        led_idx(4 + i, on);
+    }
+}
+
 /* CHARGE-STANDBY GATE (mirrors the chattock sp1-tape-looper). The SP-1
  * bootloader hands control to the app on ANY power event: a deliberate ••
  * power-on, but ALSO a bare USB-charge plug-in, a battery insert, OR the
@@ -316,9 +355,9 @@ static int charging(void)    { return nrf_gpio_pin_read(SP1_CHG_NCHG)   == 0; }
  * spin up the full app (USB, SAADC, TRS) on what may be a nearly-flat cell -
  * that is exactly what brown-out-thrashes a low battery and can wedge the
  * device out of reach of the bootloader (the bug that bricked Unit A on the
- * bench). So park here: blink LED1 as a charge cue, wait for a ~0.6 s •• hold
- * to actually switch on, and on battery with nothing held drop to a clean
- * SYSTEM_OFF (a •• press wakes it). */
+ * bench). So park here: show the battery gauge (a stock-style filling bar on the
+ * side row) while charging, wait for a ~0.6 s •• hold to actually switch on, and on
+ * battery with nothing held drop to a clean SYSTEM_OFF (a •• press wakes it). */
 static void charge_standby_gate(uint32_t wake_reas)
 {
     /* Real power-on (•• press) or watchdog recovery -> straight to full boot. */
@@ -327,7 +366,9 @@ static void charge_standby_gate(uint32_t wake_reas)
     }
 
     int64_t hold_t = -1;
-    uint32_t blink = 0;
+    uint32_t tick = 0;
+    int adc_up = 0;
+    int last_raw = -1;
     for (;;) {
         feed_wdt();
         if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {   /* •• pressed */
@@ -336,24 +377,41 @@ static void charge_standby_gate(uint32_t wake_reas)
             } else if (k_uptime_get() - hold_t >= 600) {
                 break;                                /* held ~0.6 s -> power on */
             }
-            nrf_gpio_pin_set(SP1_LED1);               /* press feedback */
+            led_idx(0, true);                         /* press feedback on track LED1 (clear of the side gauge) */
         } else {                                      /* •• released */
             hold_t = -1;
             if (!usb_present()) {
                 enter_bootloader();                   /* on battery + idle -> SYSTEM_OFF */
             }
-            /* Charge cue: blink LED1 while charging, solid when full / done. */
-            if (charging()) {
-                ((++blink / 12u) & 1u) ? nrf_gpio_pin_set(SP1_LED1)
-                                       : nrf_gpio_pin_clear(SP1_LED1);
-            } else {
-                nrf_gpio_pin_set(SP1_LED1);
+            led_idx(0, false);                        /* clear press feedback */
+            /* Charging: full-brightness battery gauge on the side row (a charge
+             * indicator must be glanceable; 50% is too dim on these small LEDs). The
+             * SAADC + BTN_COM rail only spin up on USB (charging) — a battery-idle
+             * standby drops to SYSTEM_OFF above, so this never touches them on a flat
+             * cell. The cell charges slowly, so re-sample only ~every 2 s; the blink
+             * is LED-only. NOTE: the charge-standby park is reset to full boot by the
+             * TE bootloader after ~60-120 s (a bootloader-level app-confirm timeout,
+             * NOT this loop — a bare blink-only gate does the same), so the gauge shows
+             * for that window per plug-in until that is addressed at the bootloader level. */
+            if (!adc_up) {
+                controls_init();
+                led_set_brightness(LED_BRIGHTNESS_FULL);
+                last_raw = controls_read_raw(6);
+                adc_up = 1;
+            } else if ((tick % 50u) == 0u) {
+                last_raw = controls_read_raw(6);
             }
+            charge_gauge(battery_pct(last_raw), charging(), tick);
         }
         k_msleep(40);
+        tick++;
     }
 
-    nrf_gpio_pin_clear(SP1_LED1);
+    led_set_brightness(LED_BRIGHTNESS_DEFAULT);       /* restore ambient dim for normal operation */
+    for (int i = 0; i < 4; i++) {                     /* clear the side gauge on exit */
+        led_idx(4 + i, false);
+    }
+    led_idx(0, false);
     /* Wait for the •• release so the power-on hold doesn't bleed into the run
      * loop's •• tap/hold gesture handling. */
     while (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) { feed_wdt(); k_msleep(20); }
@@ -372,21 +430,22 @@ static void charge_standby_gate(uint32_t wake_reas)
 #define FELDD_BOOT_SIG_SWEEPS 2   /* feldd v0.6.2-beta: 2 sweeps */
 static void boot_signature(void)
 {
+    led_set_brightness(LED_BRIGHTNESS_FULL);
     const uint32_t leds[4] = {
         SP1_TRACK_LED1, SP1_TRACK_LED2, SP1_TRACK_LED3, SP1_TRACK_LED4
     };
     for (int i = 0; i < 4; i++) {
-        nrf_gpio_cfg_output(leds[i]);
-        nrf_gpio_pin_clear(leds[i]);
+        led_pin(leds[i], false);
     }
     for (int pass = 0; pass < FELDD_BOOT_SIG_SWEEPS; pass++) {
         for (int i = 0; i < 4; i++) {
             feed_wdt();
-            nrf_gpio_pin_set(leds[i]);
+            led_pin(leds[i], true);
             k_msleep(80);
-            nrf_gpio_pin_clear(leds[i]);
+            led_pin(leds[i], false);
         }
     }
+    led_set_brightness(LED_BRIGHTNESS_DEFAULT);
 }
 
 /* Emit a Note-Off for every latched chord note on every button, then zero the
@@ -530,18 +589,13 @@ int main(void)
                                           * (our enter_dfu writes 0x57) left set could make
                                           * the bootloader misfire after a watchdog reset; a
                                           * clean GPREGRET lets the WDT be the real safety net. */
+
     ensure_wdt_started();   /* guarantee a hang backstop instead of trusting the bootloader's WDT */
-    nrf_gpio_cfg_output(SP1_LED1);
-    /* The 3 spare side (play) LEDs drive the LAYER indicator + mode-flash (0.9.1).
-     * Configure them as outputs alongside SP1_LED1 (=P1.13, play LED 4). All four
-     * are SYNTH-clock pins (NOT the LF crystal), already driven always-on by 0.9.0;
-     * GPIO-only and Track1+4-DFU-recoverable. Skipped under -DFELDD_MODE_LED_SINGLE
-     * (validated P1.13 only). */
-#ifndef FELDD_MODE_LED_SINGLE
-    nrf_gpio_cfg_output(SP1_PLAY_LED1);   /* P0.01 */
-    nrf_gpio_cfg_output(SP1_PLAY_LED2);   /* P1.12 */
-    nrf_gpio_cfg_output(SP1_PLAY_LED3);   /* P0.00 */
-#endif
+    /* Bring up the unified PWM LED layer (all 8 channels) ONCE, before any led_*
+     * drive and before the charge-standby gate below. PWM (via pinctrl) now owns
+     * the LED pins, so we no longer configure SP1_LED1 / the 3 side play LEDs as
+     * raw GPIO outputs here — led_init() replaces the whole LED cfg_output block. */
+    led_init();
     nrf_gpio_cfg_input(SP1_FUNC_BTN, NRF_GPIO_PIN_PULLUP);
 
     charger_init();         /* enable battery charging ASAP so a low cell can't brown us out */
@@ -1116,9 +1170,9 @@ int main(void)
             for (int i = 0; i < 4; i++) {
                 int on = (i == pressed_idx);                 /* plain: only the pressed LED */
                 if (on) {
-                    nrf_gpio_pin_set(track_leds[i]);
+                    led_pin(track_leds[i], true);
                 } else {
-                    nrf_gpio_pin_clear(track_leds[i]);
+                    led_pin(track_leds[i], false);
                 }
             }
         }
@@ -1152,14 +1206,14 @@ int main(void)
 #ifdef FELDD_MODE_LED_SINGLE
             /* Fallback (build with -DFELDD_MODE_LED_SINGLE): collapse the whole side
              * indicator onto the fully-validated P1.13 (SP1_LED1 = SP1_PLAY_LED4)
-             * and NEVER drive the 3 spare side pins. The OR over side_out reproduces
+             * and NEVER drive the other 3 side pins. The OR over side_out reproduces
              * the helper's intent on one pin: LAYER rest -> P1.13 solid (the layer
-             * dot), MODE-FLASH -> P1.13 pulses/blinks with the flash window. Used if
-             * the spare side pins misbehave on the first bench flash (spec §2.1). */
+             * dot), MODE-FLASH -> P1.13 pulses/blinks with the flash window. A single-LED
+             * build-time option (spec §2.1). */
             if (side_out[0] || side_out[1] || side_out[2] || side_out[3]) {
-                nrf_gpio_pin_set(SP1_LED1);
+                led_pin(SP1_LED1, true);
             } else {
-                nrf_gpio_pin_clear(SP1_LED1);
+                led_pin(SP1_LED1, false);
             }
 #else
             const uint32_t play_leds[4] = {
@@ -1167,9 +1221,9 @@ int main(void)
             };
             for (int i = 0; i < 4; i++) {
                 if (side_out[i]) {
-                    nrf_gpio_pin_set(play_leds[i]);
+                    led_pin(play_leds[i], true);
                 } else {
-                    nrf_gpio_pin_clear(play_leds[i]);
+                    led_pin(play_leds[i], false);
                 }
             }
 #endif
@@ -1267,20 +1321,18 @@ int main(void)
                 SP1_TRACK_LED1, SP1_TRACK_LED2, SP1_TRACK_LED3, SP1_TRACK_LED4
             };
             for (int i = 0; i < 4; i++)
-                ((hm >> i) & 1u) ? nrf_gpio_pin_set(hl_track[i])
-                                 : nrf_gpio_pin_clear(hl_track[i]);
+                led_pin(hl_track[i], ((hm >> i) & 1u) != 0u);
 #ifdef FELDD_MODE_LED_SINGLE
-            /* the 3 spare side pins are never driven in this build: fold the 4 side
+            /* the other 3 side pins are never driven in this build: fold the 4 side
              * bits onto the one validated side LED (P1.13). */
-            if (hm & 0xF0u) nrf_gpio_pin_set(SP1_LED1);
-            else            nrf_gpio_pin_clear(SP1_LED1);
+            if (hm & 0xF0u) led_pin(SP1_LED1, true);
+            else            led_pin(SP1_LED1, false);
 #else
             const uint32_t hl_play[4] = {
                 SP1_PLAY_LED1, SP1_PLAY_LED2, SP1_PLAY_LED3, SP1_PLAY_LED4
             };
             for (int i = 0; i < 4; i++)
-                ((hm >> (i + 4)) & 1u) ? nrf_gpio_pin_set(hl_play[i])
-                                       : nrf_gpio_pin_clear(hl_play[i]);
+                led_pin(hl_play[i], ((hm >> (i + 4)) & 1u) != 0u);
 #endif
         }
 

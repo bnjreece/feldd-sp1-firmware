@@ -10,10 +10,9 @@
  * The other three pins (P0.01, P1.12, P0.00) are now DRIVEN as the phase-2b mode
  * indicator (spec §7.4, USER-APPROVED): cited as PWM LEDs by the gold sp1-midi BSP
  * on this exact board, which clocks its 32 kHz off the internal RC so these pins
- * are free for LEDs. P0.00/P0.01 are the nRF52840's LF-crystal-CANDIDATE pins, so
- * they are unvalidated on OUR unit — the first flash specifically watches for
- * abnormal resets / timing weirdness (the signal those pins really are the crystal
- * on this device). It is GPIO-only and Track1+4-DFU-recoverable (bootloader-level,
+ * are free for LEDs. P0.00/P0.01 are confirmed SYNTH-clock GPIOs (NOT the
+ * nRF52840 LF crystal) per Tim Knapen's stemplayer_pins.h — safe to drive as
+ * LEDs on this unit. It is GPIO-only and Track1+4-DFU-recoverable (bootloader-level,
  * independent of the app's clock config) — NOT a brick. If the first bench flash
  * misbehaves, DFU-recover and rebuild with -DFELDD_MODE_LED_SINGLE (drives only the
  * validated P1.13 as the mode dot). The full caution lives in mode.h's HARDWARE

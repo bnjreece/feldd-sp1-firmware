@@ -2,6 +2,7 @@
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
 #include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
 
 / {
     zephyr,user {
@@ -30,6 +31,61 @@
 &pinctrl {
     uart1_default: uart1_default { group1 { psels = <NRF_PSEL(UART_TX, 0, 20)>; }; };
     uart1_sleep:   uart1_sleep   { group1 { psels = <NRF_PSEL(UART_TX, 0, 20)>; low-power-enable; }; };
+
+    /* LED PWM (mirrors the gold sp1-midi BSP stem_player-pinctrl.dtsi).
+     * PWM2 = track row, PWM3 = side/play row. Channel->pin per the CANONICAL LED map. */
+    pwm2_default: pwm2_default { group1 {
+        psels = <NRF_PSEL(PWM_OUT0, 0, 29)>,   /* T1 P0.29 */
+                <NRF_PSEL(PWM_OUT1, 0, 26)>,   /* T2 P0.26 */
+                <NRF_PSEL(PWM_OUT2, 1, 15)>,   /* T3 P1.15 */
+                <NRF_PSEL(PWM_OUT3, 1, 14)>;   /* T4 P1.14 */
+    }; };
+    pwm2_sleep: pwm2_sleep { group1 {
+        psels = <NRF_PSEL(PWM_OUT0, 0, 29)>, <NRF_PSEL(PWM_OUT1, 0, 26)>,
+                <NRF_PSEL(PWM_OUT2, 1, 15)>, <NRF_PSEL(PWM_OUT3, 1, 14)>;
+        low-power-enable;
+    }; };
+    pwm3_default: pwm3_default { group1 {
+        psels = <NRF_PSEL(PWM_OUT0, 0, 1)>,    /* PLAY1 P0.01 */
+                <NRF_PSEL(PWM_OUT1, 1, 12)>,   /* PLAY2 P1.12 */
+                <NRF_PSEL(PWM_OUT2, 0, 0)>,    /* PLAY3 P0.00 */
+                <NRF_PSEL(PWM_OUT3, 1, 13)>;   /* PLAY4 P1.13 (== SP1_LED1) */
+    }; };
+    pwm3_sleep: pwm3_sleep { group1 {
+        psels = <NRF_PSEL(PWM_OUT0, 0, 1)>, <NRF_PSEL(PWM_OUT1, 1, 12)>,
+                <NRF_PSEL(PWM_OUT2, 0, 0)>, <NRF_PSEL(PWM_OUT3, 1, 13)>;
+        low-power-enable;
+    }; };
+};
+
+/* Enable the two PWM peripherals that drive the 8 LEDs (raw GPIO drive is replaced
+ * by led.c). ~1 kHz, active-high normal polarity, so duty% == LED brightness. */
+&pwm2 {
+    status = "okay";
+    pinctrl-0 = <&pwm2_default>; pinctrl-1 = <&pwm2_sleep>; pinctrl-names = "default","sleep";
+};
+&pwm3 {
+    status = "okay";
+    pinctrl-0 = <&pwm3_default>; pinctrl-1 = <&pwm3_sleep>; pinctrl-names = "default","sleep";
+};
+
+/ {
+    /* pwm-leds container (gold-BSP pattern). led.c references these child labels in
+     * FIXED order: idx 0..3 = track T1..T4, idx 4..7 = side/play LED1..4 (feldd
+     * numbering; see the CANONICAL LED map in sp1_board.h). compatible="pwm-leds"
+     * gives each child's `pwms` a binding (needed for PWM_DT_SPEC_GET); we drive
+     * the channels directly, so CONFIG_LED_PWM is intentionally NOT enabled. */
+    feldd_leds: feldd-leds {
+        compatible = "pwm-leds";
+        fled_t1: fled_t1 { pwms = <&pwm2 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* T1 P0.29 */
+        fled_t2: fled_t2 { pwms = <&pwm2 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* T2 P0.26 */
+        fled_t3: fled_t3 { pwms = <&pwm2 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* T3 P1.15 */
+        fled_t4: fled_t4 { pwms = <&pwm2 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* T4 P1.14 */
+        fled_p1: fled_p1 { pwms = <&pwm3 0 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* PLAY1 P0.01 */
+        fled_p2: fled_p2 { pwms = <&pwm3 1 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* PLAY2 P1.12 */
+        fled_p3: fled_p3 { pwms = <&pwm3 2 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* PLAY3 P0.00 */
+        fled_p4: fled_p4 { pwms = <&pwm3 3 PWM_USEC(1024) PWM_POLARITY_NORMAL>; };  /* PLAY4 P1.13 */
+    };
 };
 &uart1 {
     compatible = "nordic,nrf-uarte"; status = "okay";

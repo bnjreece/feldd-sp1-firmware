@@ -32,8 +32,8 @@ enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1 };
  * With these positions: MIDI = LEDs 1+4, KEYBOARD = LEDs 2+3 (spec §7.1).
  *
  * The -DFELDD_MODE_LED_SINGLE build-time fallback collapses the whole side
- * indicator (layer LED + mode-flash) onto the single fully-validated side LED
- * (SP1_LED1 = P1.13) and never drives the 3 spare side pins. The TRACK row
+ * indicator (layer LED + mode-flash) onto a single side LED (SP1_LED1 = P1.13)
+ * and does not drive the other three side pins. The TRACK row
  * (SP1_TRACK_LED1..4) is reserved for interaction (plain button-press feedback +
  * profile dial/peek + boot sweep + DFU), NOT the mode pattern. */
 #define MODE_LED1 0x01u
