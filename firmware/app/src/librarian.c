@@ -157,6 +157,89 @@ static uint8_t default_btn_value(int within, int L, int i)
     return 0;                                                              /* PLAY */
 }
 
+/* 0.19: three Teenage Engineering starter profiles seeded on MIDI-bank slots 2/3/4
+ * (OP-XY, TX-6, OP-1 field). Same maps feldd.com ships as browser templates, verified
+ * against each device's official MIDI reference. A fresh flash / factory reset seeds
+ * them; existing users keep their profiles (flashing never reseeds). Slot 0 (Default)
+ * + slot 1 stay the generic non-conflicting layout; the Keyboard bank is untouched. */
+struct te_seed {
+    uint8_t channel;
+    uint8_t fcc[NUM_FADERS];     /* L1 fader CCs */
+    uint8_t fchan[NUM_FADERS];   /* per-fader channel */
+    uint8_t scc[NUM_FADERS];     /* L2 (shift) fader CCs, 0 = unbound */
+    uint8_t btype[NUM_BUTTONS];  /* button types (enum btn_type) */
+    uint8_t bval[NUM_BUTTONS];   /* button values */
+    uint8_t bchan[NUM_BUTTONS];  /* per-button channel */
+};
+
+static void apply_te_seed(struct profile *p, const struct te_seed *s)
+{
+    p->channel = s->channel;
+    for (int i = 0; i < NUM_FADERS; i++) {
+        p->fader[i].cc = s->fcc[i];
+        p->fader[i].min = 0;
+        p->fader[i].max = 127;
+        p->fader[i].curve = CURVE_LINEAR;
+        p->fader[i].invert = 0;
+        p->fader_channel[i]     = s->fchan[i];
+        p->shift.fader_cc[i]    = s->scc[i];
+        p->layer[0].fader_cc[i] = 0;   /* L3 unbound */
+        p->layer[1].fader_cc[i] = 0;   /* L4 unbound */
+    }
+    for (int i = 0; i < NUM_BUTTONS; i++) {
+        p->button[i].type  = s->btype[i];
+        p->button[i].value = s->bval[i];
+        p->button_channel[i]        = s->bchan[i];
+        p->shift.button_value[i]    = 0;
+        p->layer[0].button_value[i] = 0;
+        p->layer[1].button_value[i] = 0;
+    }
+}
+
+/* OP-XY (ch1): faders cutoff/res/engine-vol/FX-I (CC32/33/31/38); shift amp-atk/rel/
+ * pan/EQ (CC20/23/10/90); T1 mute (CC9), T2/T3 next/prev scene (CC84/83), T4 scene
+ * (CC85), Vol+/- play/stop (CC104/105), FWD/RWD switch feldd profile. */
+static const struct te_seed SEED_OPXY = {
+    .channel = 0,
+    .fcc   = { 32, 33, 31, 38 },
+    .fchan = { 0, 0, 0, 0 },
+    .scc   = { 20, 23, 10, 90 },
+    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
+               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
+               BTN_PROFILE_SWITCH, BTN_PROFILE_SWITCH },
+    .bval  = { 0, 9, 84, 83, 85, 104, 105, 0, 1 },
+    .bchan = { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+};
+
+/* TX-6 (per-track ch1-6): faders track 1-4 volume (CC7); T1-Vol- mute tracks 1-6
+ * (CC120 ch1-6); FWD start/stop (CC46 ch7); RWD switch feldd profile. No shift. */
+static const struct te_seed SEED_TX6 = {
+    .channel = 0,
+    .fcc   = { 7, 7, 7, 7 },
+    .fchan = { 0, 1, 2, 3 },
+    .scc   = { 0, 0, 0, 0 },
+    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_TOGGLE, BTN_CC_TOGGLE,
+               BTN_CC_TOGGLE, BTN_CC_TOGGLE, BTN_CC_TOGGLE,
+               BTN_CC_MOMENTARY, BTN_PROFILE_SWITCH },
+    .bval  = { 0, 120, 120, 120, 120, 120, 120, 46, 1 },
+    .bchan = { 0, 0, 1, 2, 3, 4, 5, 6, 0 },
+};
+
+/* OP-1 field (ch1, fw 1.7.0+): faders synth params 1-4 (CC46-49); shift env ADSR
+ * (CC50-53); T1-T4 notes C4/E4/G4/C5, Vol+/- tape play/stop (CC105/104), FWD synth/
+ * drum mode (CC93), RWD switch feldd profile. */
+static const struct te_seed SEED_OP1 = {
+    .channel = 0,
+    .fcc   = { 46, 47, 48, 49 },
+    .fchan = { 0, 0, 0, 0 },
+    .scc   = { 50, 51, 52, 53 },
+    .btype = { BTN_NONE, BTN_NOTE, BTN_NOTE, BTN_NOTE, BTN_NOTE,
+               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY, BTN_CC_TOGGLE,
+               BTN_PROFILE_SWITCH },
+    .bval  = { 0, 60, 64, 67, 72, 105, 104, 93, 1 },
+    .bchan = { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+};
+
 static void make_default(int slot, struct profile *p)
 {
     memset(p, 0, sizeof(*p));
@@ -185,6 +268,17 @@ static void make_default(int slot, struct profile *p)
         p->layer[0].button_value[i] = default_btn_value(within, 2, i); /* L3 */
         p->layer[1].button_value[i] = default_btn_value(within, 3, i); /* L4 */
         p->button_channel[i] = default_btn_channel(i); /* faders ch1 / front ch2 / side ch3 */
+    }
+
+    /* 0.19: on MIDI-bank slots 2/3/4, replace the generic map with a TE starter
+     * profile. Applied BEFORE the ext inheritance below so L2/L3/L4 page fields pick
+     * up the seed's per-control channels + ranges. Slot 0/1 + Keyboard bank stay generic. */
+    if (slot == 2) {
+        apply_te_seed(p, &SEED_OPXY);
+    } else if (slot == 3) {
+        apply_te_seed(p, &SEED_TX6);
+    } else if (slot == 4) {
+        apply_te_seed(p, &SEED_OP1);
     }
 
     /* v6: seed each appended ext bank (L2/L3/L4) to INHERIT L1's per-fader
@@ -228,6 +322,12 @@ static void make_default(int slot, struct profile *p)
             p->button_mod[i] = kbd1_mod[i];
         }
         nm = "Editor pad";
+    } else if (slot == 2) {
+        nm = "OP-XY";
+    } else if (slot == 3) {
+        nm = "TX-6";
+    } else if (slot == 4) {
+        nm = "OP-1 field";
     }
 
     /* name[16], NUL-padded by the memset above. */
