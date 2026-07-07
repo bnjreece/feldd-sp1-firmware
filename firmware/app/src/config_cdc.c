@@ -47,7 +47,7 @@ static const struct proto_store g_store = {
     .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.17.0-beta",
+    .fw         = "0.18.0-beta",
     .uid        = g_uid,
 };
 

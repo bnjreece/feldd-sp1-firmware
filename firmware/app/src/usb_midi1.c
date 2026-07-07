@@ -9,13 +9,16 @@
  * port with NO mode toggle. VID/PID are unchanged (0x1915/0x5211).
  *
  * The surface is OUTPUT-ONLY (device->host): buttons/faders -> CC/note. In
- * USB-MIDI 1.0 terms that is ONE bulk IN endpoint carrying 4-byte event packets
- * sourced from ONE Embedded MIDI IN jack (jackID 1), wired to ONE External MIDI
- * OUT jack (jackID 2) — the canonical output topology from the USB Device Class
- * Definition for MIDI Devices 1.0 (descriptor layout cross-checked against the
- * stuffmatic/zephyr-usb-midi reference). We do NOT expose an OUT endpoint: feldd
- * never consumes host MIDI, so a sink would be dead weight (and an EP off the
- * 7-IN/7-OUT budget). The class is modeled on usbd_midi2.c's device_next shape
+ * USB-MIDI 1.0 terms (section 6.2.2) that is ONE bulk IN endpoint carrying 4-byte
+ * event packets sourced from ONE Embedded MIDI OUT jack (jackID 2), itself fed by
+ * ONE External MIDI IN jack (jackID 1). A device->host bulk IN endpoint MUST
+ * associate an Embedded MIDI OUT jack (matches Linux f_midi + TinyUSB); an earlier
+ * revision wired it to an Embedded MIDI IN jack, which is spec-illegal and hard-
+ * faulted the TE OP-XY host (v1.1.18) mid-enumeration. We ALSO expose a bulk OUT
+ * endpoint (host->device) even though feldd consumes nothing: the OP-XY sends
+ * clock/notes/CC to every connected device and its v1.1.18 firmware faults on a
+ * device with no input to receive them, so we present a full two-way port and simply
+ * discard whatever the host sends. The class is modeled on usbd_midi2.c's device_next shape
  * (USBD_DEFINE_CLASS, the descriptor blob + fs/hs pointer arrays, the
  * usbd_class_api callbacks, the ring_buf -> usbd_ep_enqueue TX path) but stripped
  * to the static, single-instance, send-only minimum — no devicetree node.
@@ -56,14 +59,28 @@ LOG_MODULE_REGISTER(usb_midi1, LOG_LEVEL_INF);
 #define AUDIOCONTROL		0x01	/* bInterfaceSubClass: AUDIOCONTROL */
 #define MIDISTREAMING		0x03	/* bInterfaceSubClass: MIDISTREAMING */
 
-/* Jack IDs (bID), per the topology above. */
-#define EMB_IN_JACK_ID		0x01	/* Embedded IN jack: the source feeding the host */
-#define EXT_OUT_JACK_ID		0x02	/* External OUT jack: where the host's port "plugs in" */
+/* Jack IDs (bID). BIDIRECTIONAL topology per USB-MIDI 1.0 section 6.2.2. feldd only
+ * SOURCES MIDI (controls -> host), but the TE OP-XY host SENDS clock/notes/CC TO every
+ * connected device (its Devices screen exposes per-device "sent" toggles) and its
+ * v1.1.18 firmware hard-faults post-configuration on a device that has NO input (OUT)
+ * endpoint to receive that stream. So we present a full two-way MIDI port and simply
+ * discard anything the host sends us.
+ *   device->host path: External MIDI IN jack (1) -> Embedded MIDI OUT jack (2) -> bulk IN EP
+ *   host->device path: bulk OUT EP -> Embedded MIDI IN jack (3) -> External MIDI OUT jack (4)
+ * (A device->host bulk IN EP MUST associate an Embedded MIDI OUT jack; a host->device
+ * bulk OUT EP an Embedded MIDI IN jack. Source jacks are listed before the jacks that
+ * reference them.) */
+#define EXT_IN_JACK_ID		0x01	/* External MIDI IN jack: source of the device->host stream */
+#define EMB_OUT_JACK_ID		0x02	/* Embedded MIDI OUT jack: feeds the host, assoc'd w/ the bulk IN EP */
+#define EMB_IN_JACK_ID		0x03	/* Embedded MIDI IN jack: receives from host, assoc'd w/ the bulk OUT EP */
+#define EXT_OUT_JACK_ID		0x04	/* External MIDI OUT jack: sink of the host->device stream */
 
 /* Initial endpoint-address hints; the stack re-assigns the real address during
  * usbd_init (see usbd_init.c:assign_ep_addr), then we read it back at send time.
  * 0x81 = the first IN endpoint direction bit + a placeholder index. */
 #define EP_IN_ADDR		0x81
+/* First OUT endpoint direction bit + placeholder index; re-assigned at usbd_init. */
+#define EP_OUT_ADDR		0x01
 
 /* One USB packet of 4-byte events. nRF52840 bulk MPS = 64. */
 #define MIDI1_MPS		64U
@@ -71,8 +88,8 @@ LOG_MODULE_REGISTER(usb_midi1, LOG_LEVEL_INF);
  * outruns host polling drops cleanly rather than blocking. */
 #define MIDI1_TX_QUEUE_SIZE	64
 
-/* One net_buf at a time in flight on the IN endpoint. */
-UDC_BUF_POOL_DEFINE(usb_midi1_buf_pool, 2, MIDI1_MPS,
+/* net_bufs in flight: IN transfers + one persistent OUT read (host->device). */
+UDC_BUF_POOL_DEFINE(usb_midi1_buf_pool, 4, MIDI1_MPS,
 		    sizeof(struct udc_buf_info), NULL);
 
 /* B.4.1 Class-Specific MS Interface Header Descriptor (USB-MIDI 1.0 6.1.2.1). */
@@ -159,10 +176,17 @@ struct usb_midi1_descriptors {
 	/* MIDIStreaming interface (no alt-settings). */
 	struct usb_if_descriptor if1_std;
 	struct usb_midi1_cs_if_header if1_cs_header;
-	struct usb_midi1_in_jack emb_in_jack;	/* Embedded source -> host */
-	struct usb_midi1_out_jack ext_out_jack;	/* External "port" the host sees */
+	/* device->host jacks */
+	struct usb_midi1_in_jack ext_in_jack;	/* External MIDI IN jack (source), listed first */
+	struct usb_midi1_out_jack emb_out_jack;	/* Embedded MIDI OUT jack -> the bulk IN endpoint */
+	/* host->device jacks (so the host has a sink to send to; feldd discards it) */
+	struct usb_midi1_in_jack emb_in_jack;	/* Embedded MIDI IN jack <- the bulk OUT endpoint */
+	struct usb_midi1_out_jack ext_out_jack;	/* External MIDI OUT jack, sunk from the embedded IN jack */
+	/* endpoints + their class-specific descriptors */
 	struct usb_midi1_ms_ep_descriptor in_ep_fs;	/* bulk IN, device->host */
-	struct usb_midi1_cs_ep cs_in_ep;	/* associates the embedded IN jack */
+	struct usb_midi1_cs_ep cs_in_ep;	/* associates the embedded OUT jack */
+	struct usb_midi1_ms_ep_descriptor out_ep_fs;	/* bulk OUT, host->device */
+	struct usb_midi1_cs_ep cs_out_ep;	/* associates the embedded IN jack */
 };
 
 struct usb_midi1_config {
@@ -185,6 +209,8 @@ struct usb_midi1_data {
  * header + jacks.) Including it overruns a spec-strict host's CS-interface parse. */
 #define MIDI1_MS_TOTAL_LEN						\
 	(sizeof(struct usb_midi1_cs_if_header) +			\
+	 sizeof(struct usb_midi1_in_jack) +				\
+	 sizeof(struct usb_midi1_out_jack) +				\
 	 sizeof(struct usb_midi1_in_jack) +				\
 	 sizeof(struct usb_midi1_out_jack))
 
@@ -224,7 +250,7 @@ static struct usb_midi1_descriptors usb_midi1_desc = {
 		.bDescriptorType = USB_DESC_INTERFACE,
 		.bInterfaceNumber = 1,		/* stamped at init */
 		.bAlternateSetting = 0,
-		.bNumEndpoints = 1,		/* the bulk IN endpoint */
+		.bNumEndpoints = 2,		/* bulk IN (device->host) + bulk OUT (host->device) */
 		.bInterfaceClass = AUDIO,
 		.bInterfaceSubClass = MIDISTREAMING,
 		.bInterfaceProtocol = 0,
@@ -237,22 +263,22 @@ static struct usb_midi1_descriptors usb_midi1_desc = {
 		.bcdMSC = sys_cpu_to_le16(0x0100),
 		.wTotalLength = sys_cpu_to_le16(MIDI1_MS_TOTAL_LEN),
 	},
-	.emb_in_jack = {
+	.ext_in_jack = {
 		.bLength = sizeof(struct usb_midi1_in_jack),
 		.bDescriptorType = USB_DESC_CS_INTERFACE,
 		.bDescriptorSubtype = MIDI_IN_JACK,
-		.bJackType = JACK_EMBEDDED,
-		.bJackID = EMB_IN_JACK_ID,
+		.bJackType = JACK_EXTERNAL,
+		.bJackID = EXT_IN_JACK_ID,
 		.iJack = 0,
 	},
-	.ext_out_jack = {
+	.emb_out_jack = {
 		.bLength = sizeof(struct usb_midi1_out_jack),
 		.bDescriptorType = USB_DESC_CS_INTERFACE,
 		.bDescriptorSubtype = MIDI_OUT_JACK,
-		.bJackType = JACK_EXTERNAL,
-		.bJackID = EXT_OUT_JACK_ID,
+		.bJackType = JACK_EMBEDDED,
+		.bJackID = EMB_OUT_JACK_ID,
 		.bNrInputPins = 1,
-		.baSourceID1 = EMB_IN_JACK_ID,	/* fed by the embedded IN jack */
+		.baSourceID1 = EXT_IN_JACK_ID,	/* sourced from the external IN jack */
 		.baSourcePin1 = 1,
 		.iJack = 0,
 	},
@@ -271,20 +297,68 @@ static struct usb_midi1_descriptors usb_midi1_desc = {
 		.bDescriptorType = USB_DESC_CS_ENDPOINT,
 		.bDescriptorSubtype = MS_GENERAL,
 		.bNumEmbMIDIJack = 1,
-		.baAssocJackID1 = EMB_IN_JACK_ID,
+		.baAssocJackID1 = EMB_OUT_JACK_ID,	/* bulk IN EP carries the Embedded OUT jack */
+	},
+	.emb_in_jack = {
+		.bLength = sizeof(struct usb_midi1_in_jack),
+		.bDescriptorType = USB_DESC_CS_INTERFACE,
+		.bDescriptorSubtype = MIDI_IN_JACK,
+		.bJackType = JACK_EMBEDDED,
+		.bJackID = EMB_IN_JACK_ID,
+		.iJack = 0,
+	},
+	.ext_out_jack = {
+		.bLength = sizeof(struct usb_midi1_out_jack),
+		.bDescriptorType = USB_DESC_CS_INTERFACE,
+		.bDescriptorSubtype = MIDI_OUT_JACK,
+		.bJackType = JACK_EXTERNAL,
+		.bJackID = EXT_OUT_JACK_ID,
+		.bNrInputPins = 1,
+		.baSourceID1 = EMB_IN_JACK_ID,	/* sunk from the embedded IN jack */
+		.baSourcePin1 = 1,
+		.iJack = 0,
+	},
+	.out_ep_fs = {
+		.bLength = sizeof(struct usb_midi1_ms_ep_descriptor),
+		.bDescriptorType = USB_DESC_ENDPOINT,
+		.bEndpointAddress = EP_OUT_ADDR,	/* re-assigned at init */
+		.bmAttributes = USB_EP_TYPE_BULK,
+		.wMaxPacketSize = sys_cpu_to_le16(MIDI1_MPS),
+		.bInterval = 0,
+		.bRefresh = 0,
+		.bSynchAddress = 0,
+	},
+	.cs_out_ep = {
+		.bLength = sizeof(struct usb_midi1_cs_ep),
+		.bDescriptorType = USB_DESC_CS_ENDPOINT,
+		.bDescriptorSubtype = MS_GENERAL,
+		.bNumEmbMIDIJack = 1,
+		.baAssocJackID1 = EMB_IN_JACK_ID,	/* bulk OUT EP carries the Embedded IN jack */
 	},
 };
 
 static const struct usb_desc_header *usb_midi1_fs_descs[] = {
-	(struct usb_desc_header *)&usb_midi1_desc.iad,
+	/* NO Interface Association Descriptor. A class-compliant USB-MIDI (Audio 1.0)
+	 * function groups its AudioControl + MIDIStreaming interfaces via the AC
+	 * header's collection (if0_cs.bInCollection / baInterfaceNr1), NOT an IAD.
+	 * IADs are for CDC / true multi-function devices. The Teenage Engineering
+	 * OP-XY (fw v1.1.18) USB host HARD-FAULTS (Blackfin data-CPLB miss, PC
+	 * 0x8c06c29c) the instant it parses an IAD in front of an Audio function:
+	 * the crash regs R1=8 / R2=2 are the IAD's bLength / bInterfaceCount. Dropping
+	 * the IAD makes feldd a textbook MIDI device that strict hosts accept.
+	 * (usb_midi1_desc.iad stays defined but is intentionally NOT emitted.) */
 	(struct usb_desc_header *)&usb_midi1_desc.if0_std,
 	(struct usb_desc_header *)&usb_midi1_desc.if0_cs,
 	(struct usb_desc_header *)&usb_midi1_desc.if1_std,
 	(struct usb_desc_header *)&usb_midi1_desc.if1_cs_header,
+	(struct usb_desc_header *)&usb_midi1_desc.ext_in_jack,
+	(struct usb_desc_header *)&usb_midi1_desc.emb_out_jack,
 	(struct usb_desc_header *)&usb_midi1_desc.emb_in_jack,
 	(struct usb_desc_header *)&usb_midi1_desc.ext_out_jack,
 	(struct usb_desc_header *)&usb_midi1_desc.in_ep_fs,
 	(struct usb_desc_header *)&usb_midi1_desc.cs_in_ep,
+	(struct usb_desc_header *)&usb_midi1_desc.out_ep_fs,
+	(struct usb_desc_header *)&usb_midi1_desc.cs_out_ep,
 	NULL,
 };
 
@@ -341,19 +415,47 @@ static void usb_midi1_tx_work(struct k_work *work)
 	}
 }
 
+/* Arm one bulk-OUT read to receive host->device MIDI. feldd sources only; the OUT
+ * endpoint exists purely so a host that insists on a two-way MIDI port (the OP-XY)
+ * has a sink to send its clock/notes/CC to. We drop whatever arrives. */
+static void usb_midi1_out_prep(struct usb_midi1_data *data)
+{
+	struct net_buf *buf;
+
+	buf = usb_midi1_buf_alloc(usb_midi1_cfg.desc->out_ep_fs.bEndpointAddress);
+	if (buf == NULL) {
+		return;
+	}
+
+	if (usbd_ep_enqueue(data->class_data, buf)) {
+		net_buf_unref(buf);
+	}
+}
+
 /* ---- usbd_class_api callbacks ---- */
 
-/* IN-transfer completion: free the buffer and, if the ring refilled while it was
- * in flight, kick another transfer. (Output-only: there is no OUT endpoint, so
- * every completion here is an IN/Tx completion.) */
+/* Transfer completion. IN (device->host): free + kick another Tx if the ring
+ * refilled. OUT (host->device): discard the received MIDI, free, and re-arm the read
+ * so the host always has an open sink. The endpoint direction bit selects the path. */
 static int usb_midi1_request(struct usbd_class_data *const class_data,
 			     struct net_buf *const buf, const int err)
 {
 	struct usbd_context *uds_ctx = usbd_class_get_ctx(class_data);
 	struct usb_midi1_data *data = usbd_class_get_private(class_data);
+	struct udc_buf_info *bi = udc_get_buf_info(buf);
 
 	if (err && err != -ECONNABORTED) {
-		LOG_DBG("Tx transfer error %d", err);
+		LOG_DBG("transfer error %d on ep 0x%02x", err, bi->ep);
+	}
+
+	if (USB_EP_DIR_IS_OUT(bi->ep)) {
+		/* Host->device MIDI: discard it, then re-arm the read (unless the
+		 * transfer was aborted on disable/suspend). */
+		(void)usbd_ep_buf_free(uds_ctx, buf);
+		if (err != -ECONNABORTED && data->enabled) {
+			usb_midi1_out_prep(data);
+		}
+		return 0;
 	}
 
 	if (!ring_buf_is_empty(&data->tx_queue)) {
@@ -369,6 +471,9 @@ static void usb_midi1_enable(struct usbd_class_data *const class_data)
 
 	data->enabled = true;
 	LOG_DBG("USB-MIDI 1.0 enabled");
+
+	/* Open the host->device read sink so the host has somewhere to send. */
+	usb_midi1_out_prep(data);
 
 	/* Flush anything that queued before the host enabled the interface. */
 	if (!ring_buf_is_empty(&data->tx_queue)) {
