@@ -197,22 +197,24 @@ static void apply_te_seed(struct profile *p, const struct te_seed *s)
 }
 
 /* OP-XY (ch1): faders cutoff/res/engine-vol/FX-I (CC32/33/31/38); shift amp-atk/rel/
- * pan/EQ (CC20/23/10/90); T1 mute (CC9), T2/T3 next/prev scene (CC84/83), T4 scene
- * (CC85), Vol+/- play/stop (CC104/105), FWD/RWD switch feldd profile. */
+ * pan/EQ (CC20/23/10/90); T1 mute (CC9), T2 scene retrigger (CC85), T3/T4 open,
+ * Vol+/- prev/next scene (CC83/84), rocker FWD/RWD play/stop (CC104/105). The •• dial
+ * switches feldd profiles, so the rocker is free for transport. */
 static const struct te_seed SEED_OPXY = {
     .channel = 0,
     .fcc   = { 32, 33, 31, 38 },
     .fchan = { 0, 0, 0, 0 },
     .scc   = { 20, 23, 10, 90 },
-    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
-               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
-               BTN_PROFILE_SWITCH, BTN_PROFILE_SWITCH },
-    .bval  = { 0, 9, 84, 83, 85, 104, 105, 0, 1 },
+    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_NONE,
+               BTN_NONE, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
+               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY },
+    .bval  = { 0, 9, 85, 0, 0, 83, 84, 104, 105 },
     .bchan = { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
 /* TX-6 (per-track ch1-6): faders track 1-4 volume (CC7); T1-Vol- mute tracks 1-6
- * (CC120 ch1-6); FWD start/stop (CC46 ch7); RWD switch feldd profile. No shift. */
+ * (CC120 ch1-6); FWD start/stop (CC46 ch7); RWD open. The •• dial switches feldd
+ * profiles. No shift. */
 static const struct te_seed SEED_TX6 = {
     .channel = 0,
     .fcc   = { 7, 7, 7, 7 },
@@ -220,23 +222,24 @@ static const struct te_seed SEED_TX6 = {
     .scc   = { 0, 0, 0, 0 },
     .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_TOGGLE, BTN_CC_TOGGLE,
                BTN_CC_TOGGLE, BTN_CC_TOGGLE, BTN_CC_TOGGLE,
-               BTN_CC_MOMENTARY, BTN_PROFILE_SWITCH },
-    .bval  = { 0, 120, 120, 120, 120, 120, 120, 46, 1 },
+               BTN_CC_MOMENTARY, BTN_NONE },
+    .bval  = { 0, 120, 120, 120, 120, 120, 120, 46, 0 },
     .bchan = { 0, 0, 1, 2, 3, 4, 5, 6, 0 },
 };
 
 /* OP-1 field (ch1, fw 1.7.0+): faders synth params 1-4 (CC46-49); shift env ADSR
- * (CC50-53); T1-T4 notes C4/E4/G4/C5, Vol+/- tape play/stop (CC105/104), FWD synth/
- * drum mode (CC93), RWD switch feldd profile. */
+ * (CC50-53); T1-T4 notes C4/E4/G4/C5, Vol+ synth/drum mode (CC93), Vol- sustain
+ * (CC64), rocker FWD/RWD tape play/stop (CC105/104). The •• dial switches feldd
+ * profiles, so the rocker is free for transport. */
 static const struct te_seed SEED_OP1 = {
     .channel = 0,
     .fcc   = { 46, 47, 48, 49 },
     .fchan = { 0, 0, 0, 0 },
     .scc   = { 50, 51, 52, 53 },
     .btype = { BTN_NONE, BTN_NOTE, BTN_NOTE, BTN_NOTE, BTN_NOTE,
-               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY, BTN_CC_TOGGLE,
-               BTN_PROFILE_SWITCH },
-    .bval  = { 0, 60, 64, 67, 72, 105, 104, 93, 1 },
+               BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
+               BTN_CC_MOMENTARY },
+    .bval  = { 0, 60, 64, 67, 72, 93, 64, 105, 104 },
     .bchan = { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
@@ -270,14 +273,16 @@ static void make_default(int slot, struct profile *p)
         p->button_channel[i] = default_btn_channel(i); /* faders ch1 / front ch2 / side ch3 */
     }
 
-    /* 0.19: on MIDI-bank slots 2/3/4, replace the generic map with a TE starter
-     * profile. Applied BEFORE the ext inheritance below so L2/L3/L4 page fields pick
-     * up the seed's per-control channels + ranges. Slot 0/1 + Keyboard bank stay generic. */
-    if (slot == 2) {
+    /* 0.19: on MIDI-bank slots 1/2/3 (profiles 2/3/4), replace the generic map with a
+     * TE starter profile, so they sit right after profile 1 (the Default) with no gap.
+     * Applied BEFORE the ext inheritance below so L2/L3/L4 page fields pick up the
+     * seed's per-control channels + ranges. Slot 0 + slots 4..7 + Keyboard bank stay
+     * generic. */
+    if (slot == 1) {
         apply_te_seed(p, &SEED_OPXY);
-    } else if (slot == 3) {
+    } else if (slot == 2) {
         apply_te_seed(p, &SEED_TX6);
-    } else if (slot == 4) {
+    } else if (slot == 3) {
         apply_te_seed(p, &SEED_OP1);
     }
 
@@ -322,11 +327,11 @@ static void make_default(int slot, struct profile *p)
             p->button_mod[i] = kbd1_mod[i];
         }
         nm = "Editor pad";
-    } else if (slot == 2) {
+    } else if (slot == 1) {
         nm = "OP-XY";
-    } else if (slot == 3) {
+    } else if (slot == 2) {
         nm = "TX-6";
-    } else if (slot == 4) {
+    } else if (slot == 3) {
         nm = "OP-1 field";
     }
 
