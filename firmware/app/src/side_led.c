@@ -27,9 +27,14 @@ void side_led_pattern(unsigned char layer, unsigned int flash_ticks,
         return;
     }
 
-    /* LAYER rest (permanent): exactly ONE side LED lit at the layer position,
-     * natural layer-to-pin ordering (layer 0 -> SP1_PLAY_LED1). NEVER a bar. */
+    /* LAYER rest (permanent): exactly ONE side LED lit at position (layer & 3).
+     * SOLID for layers 0..3; layers 4..7 BLINK that same dot on the (tick/12)&1
+     * half-period (the existing dial 5-8 / charge / mode-flash BLINK phase), so
+     * layer 1 vs 5 (etc.) differ only by solid-vs-blink at the same LED. NEVER a
+     * bar. (spec 2026-07-07-feldd-8layer-v9 §5.2) */
+    int pos = layer & 3;
+    int lit = (layer >= 4) ? ((tick / 12) & 1) : 1;
     for (i = 0; i < 4; i++) {
-        out[i] = (i == layer) ? 1 : 0;
+        out[i] = (i == pos) ? (unsigned char)lit : 0;
     }
 }

@@ -5,19 +5,19 @@
 struct midi_msg { uint8_t status, d1, d2; uint8_t len; };  /* len 2 or 3 */
 typedef void (*midi_sink_fn)(const struct midi_msg *m, void *ctx);
 
-/* v5: select the active per-layer bank by LAYER index (0..3). 0 = inline L1,
- * 1 = shift.* (L2), 2 = layer[0] (L3), 3 = layer[1] (L4). Out-of-range falls to
- * layer 0 (defensive; gesture_layer() is always 0..NUM_LAYERS-1). MIDI reads
+/* v9: select the active per-layer bank by LAYER index (0..NUM_LAYERS-1).
+ * 0 = inline L1, 1 = shift.* (L2), 2..NUM_LAYERS-1 = layer[layer-2] (L3..L8).
+ * Callers pass gesture_layer() (always 0..NUM_LAYERS-1). MIDI reads
  * fader_cc + button_value; Keyboard reads button_key + button_mod. */
 uint8_t profile_layer_fader_cc(const struct profile *p, int idx, int layer);
 uint8_t profile_layer_button_value(const struct profile *p, int idx, int layer);
 uint8_t profile_layer_button_key(const struct profile *p, int idx, int layer);
 uint8_t profile_layer_button_mod(const struct profile *p, int idx, int layer);
 
-/* v6: the fields that, in v5, were SHARED from L1 are now read from the ACTIVE
+/* v9: the fields that, in v5, were SHARED from L1 are now read from the ACTIVE
  * layer's own bank. Layer 0 = L1 inline (fader_map[idx], button[idx].type,
- * fader_channel[idx], button_channel[idx]); layers 1..3 = ext[layer-1] (L2/L3/L4).
- * Out-of-range layer falls to L1 (defensive, like the v5 accessors). */
+ * fader_channel[idx], button_channel[idx]); layers 1..NUM_LAYERS-1 = ext[layer-1]
+ * (L2..L8). Out-of-range layer falls to L1 (defensive, like the v5 accessors). */
 uint8_t profile_layer_fader_min(const struct profile *p, int idx, int layer);
 uint8_t profile_layer_fader_max(const struct profile *p, int idx, int layer);
 uint8_t profile_layer_fader_curve(const struct profile *p, int idx, int layer);

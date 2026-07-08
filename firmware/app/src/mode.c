@@ -1,11 +1,11 @@
 #include "mode.h"
 
-struct mode_decision mode_decide(int modifier_held, int idx, int pressed)
+struct mode_decision mode_decide(int modifier_hold_ticks, int idx, int pressed)
 {
     struct mode_decision d = { 0, MODE_MIDI, 0 };
 
-    if (!modifier_held) {
-        return d;                 /* modifier not held -> normal FWD/RWD behavior */
+    if (modifier_hold_ticks < MODE_FLIP_ARM_SCANS) {
+        return d;                 /* held too briefly (or not held) -> transport */
     }
     if (idx != MODE_BTN_FWD && idx != MODE_BTN_RWD) {
         return d;                 /* some other button under the modifier -> passthrough */

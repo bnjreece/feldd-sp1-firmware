@@ -2,7 +2,7 @@
  * librarian.c — NVS-backed profile librarian (M5.2)
  *
  * Persists NUM_PROFILES profiles + an active index in the storage_partition
- * (app.overlay, flash 0xFB000, 16 KB — top of usable flash, just under the
+ * (app.overlay, flash 0xF7000, 32 KB — top of usable flash, just under the
  * bootloader's reserved last page). One in-RAM hot copy of the active
  * profile is kept so the ~8 ms control loop never touches flash: it reads
  * librarian_active() every tick, which returns the cached struct. Flash is
@@ -34,6 +34,7 @@
 #include "lib_header.h"
 #include "lib_bank.h"
 #include "seed_cadence.h"
+#include "nvs_erase.h"
 #include "wdt.h"
 
 /* F1 non-overlap guard: the NVS storage_partition MUST sit above the app region
@@ -58,18 +59,22 @@ BUILD_ASSERT(FIXED_PARTITION_OFFSET(storage_partition) +
                  FIXED_PARTITION_SIZE(storage_partition) <= SP1_RESERVED_PAGE,
              "NVS storage_partition must end at/below the reserved page (0xFF000)");
 
-/* v8 NVS BUDGET GUARD (spec §3). The storage_partition is 0x4000 (16 KB) = 4 pages
- * of 4 KB. NVS reserves ONE page for garbage collection, so usable = 3 pages =
- * 12,288 B. Each persisted profile costs sizeof(struct profile) + an 8-byte NVS
+/* v9 NVS BUDGET GUARD (spec §3). The storage_partition is 0x8000 (32 KB) = 8 pages
+ * of 4 KB. NVS reserves ONE page for garbage collection, so usable = 7 pages =
+ * 28,672 B. Each persisted profile costs sizeof(struct profile) + an 8-byte NVS
  * Allocation Table Entry (ATE); the header costs sizeof(struct lib_header) + ATE. The
  * whole working set must fit with comfortable GC headroom (the naive full-12B-chord-
  * per-button design was ~8% free and was REJECTED; chord6 lands at ~30% free).
  *
- * usable      = (4 pages - 1 GC) * 4096                         = 12288
+ * usable      = (8 pages - 1 GC) * 4096                         = 28672
  * occupancy   = NUM_PROFILES * (sizeof(profile) + 8 ATE)
  *             + (sizeof(lib_header) + 8 ATE)
- *             = 16 * (528 + 8) + (4 + 8) = 8588
- * headroom    = 12288 - 8588 = 3700 (~30.1% free). SAFE.
+ *             = 16 * (1038 + 8) + (4 + 8) = 16748
+ * byte-sum headroom = 28672 - 16748 = 11924, but that is NOT the safety proof
+ * (NVS cannot straddle a sector). At 3 profiles/sector * 7 usable sectors = 21
+ * slots there are ~5 spare entry-slots (~24%) and ~1 fully-free sector, so an
+ * edit forces near-immediate GC (no ENOSPC at v9). Storability is PROVEN by the
+ * sector-packing assert below.
  *
  * Derived from FIXED_PARTITION_SIZE + the real page size, NOT hardcoded, so a flash-
  * map change re-checks this. NVS_ATE = 8 is the nRF52 NVS entry footer size. */
@@ -82,13 +87,30 @@ BUILD_ASSERT(FIXED_PARTITION_OFFSET(storage_partition) +
 #define SP1_NVS_OCCUPANCY \
     ((unsigned)NUM_PROFILES * (sizeof(struct profile) + SP1_NVS_ATE) \
      + (sizeof(struct lib_header) + SP1_NVS_ATE))
-BUILD_ASSERT(SP1_NVS_USABLE == 12288u,
-             "NVS usable budget must be 12288 B (16 KB partition, 4 pages, 1 GC reserve)");
+BUILD_ASSERT(SP1_NVS_USABLE == 28672u,
+             "NVS usable budget must be 28672 B (32 KB partition, 8 pages, 1 GC reserve)");
 BUILD_ASSERT(SP1_NVS_OCCUPANCY <= SP1_NVS_USABLE,
-             "16 v8 profiles + header must fit the usable NVS budget");
+             "16 v9 profiles + header must fit the usable NVS budget");
 /* headroom >= ~25% of usable: keep a real GC margin (chord6 lands at ~30%). */
 BUILD_ASSERT((SP1_NVS_USABLE - SP1_NVS_OCCUPANCY) * 4u >= SP1_NVS_USABLE,
-             "v8 NVS headroom must stay >= 25% of usable (GC safety)");
+             "v9 NVS headroom must stay >= 25% of usable (GC safety)");
+
+/* Sector-packing storability proof (spec §3.4). The byte-sum OCCUPANCY <= USABLE
+ * above is NECESSARY BUT NOT SUFFICIENT: Zephyr NVS cannot straddle a sector, so
+ * each 4096-B sector (minus 2 close/GC ATEs = 4080 usable) packs only
+ * floor(4080 / (sizeof(profile) + ATE)) WHOLE entries and wastes the remainder.
+ * At v9: (4096-16)/(1038+8) = 3 profiles/sector, so 16 profiles need
+ * ceil(16/3) = 6 sectors; with 1 of 8 reserved for GC, 7 are usable (6 <= 7).
+ * This is also the future-bump tripwire: a field bump past ~1360 B/profile
+ * (2/sector) keeps the byte-sum green while real capacity drops to 9 > 8, which
+ * would ENOSPC at the seed_defaults() nvs_write on a debuggerless unit. */
+#define SP1_NVS_SECTOR_COUNT \
+    (FIXED_PARTITION_SIZE(storage_partition) / SP1_NVS_PAGE_SIZE)
+#define SP1_NVS_ENTRIES_PER_SECTOR \
+    ((SP1_NVS_PAGE_SIZE - 2u * SP1_NVS_ATE) / (sizeof(struct profile) + SP1_NVS_ATE))
+BUILD_ASSERT(DIV_ROUND_UP(NUM_PROFILES, SP1_NVS_ENTRIES_PER_SECTOR)
+                 + SP1_NVS_GC_PAGES <= SP1_NVS_SECTOR_COUNT,
+             "NVS must physically store NUM_PROFILES entries plus a GC sector");
 
 /* NVS entry ids. Header is a low fixed id; profiles live in a 0x100+n block so
  * they never collide with the header or any future small bookkeeping ids. */
@@ -152,9 +174,10 @@ static uint8_t default_btn_channel(int i)
  * (idx 0) emits nothing -> value 0. */
 static uint8_t default_btn_value(int within, int L, int i)
 {
-    if (i >= 1 && i <= 4) return (uint8_t)(within * 16 + L * 4 + (i - 1)); /* front slot 0..3 */
-    if (i >= 5 && i <= 8) return (uint8_t)(within * 16 + L * 4 + (i - 5)); /* side  slot 0..3 */
-    return 0;                                                              /* PLAY */
+    int base = within * (NUM_LAYERS * NUM_FADERS);   /* was literal 16; now 32 at 8 layers */
+    if (i >= 1 && i <= 4) return (uint8_t)((base + L * NUM_FADERS + (i - 1)) & 0x7F); /* front slot 0..3 */
+    if (i >= 5 && i <= 8) return (uint8_t)((base + L * NUM_FADERS + (i - 5)) & 0x7F); /* side  slot 0..3 */
+    return 0;                                                                          /* PLAY */
 }
 
 /* 0.19: three Teenage Engineering starter profiles seeded on MIDI-bank slots 2/3/4
@@ -196,21 +219,63 @@ static void apply_te_seed(struct profile *p, const struct te_seed *s)
     }
 }
 
-/* OP-XY (ch1): faders cutoff/res/engine-vol/FX-I (CC32/33/31/38); shift amp-atk/rel/
- * pan/EQ (CC20/23/10/90); T1 mute (CC9), T2 scene retrigger (CC85), T3/T4 open,
- * Vol+/- prev/next scene (CC83/84), rocker FWD/RWD play/stop (CC104/105). The •• dial
- * switches feldd profiles, so the rocker is free for transport. */
-static const struct te_seed SEED_OPXY = {
-    .channel = 0,
-    .fcc   = { 32, 33, 31, 38 },
-    .fchan = { 0, 0, 0, 0 },
-    .scc   = { 20, 23, 10, 90 },
-    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_NONE,
-               BTN_NONE, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
-               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY },
-    .bval  = { 0, 9, 85, 0, 0, 83, 84, 104, 105 },
-    .bchan = { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+/* v9: OP-XY 8-track. L1..L8 = tracks 1..8 on MIDI ch 0..7. Same sound-design set on
+ * every layer; only the channel (= track = layer) changes. Faders CC32/33/31/38;
+ * T1 mute CC9 / T2 send-to-tape CC37 / T3 porta CC29 / T4 FX-II CC39 are PER-TRACK
+ * (ride the layer channel); Vol+/- CC83/84 and rocker CC104/105 are any-channel
+ * globals (ride the layer channel harmlessly). Verified vs
+ * feldd-sp-1/docs/te-midi-cc/opxy.md (CC37 send-to-tape ch1-8 confirmed :54). */
+struct te_seed8 {
+    uint8_t nlayers;                /* = 8 */
+    uint8_t fcc[NUM_FADERS];        /* fader CCs, same on every layer */
+    uint8_t btype[NUM_BUTTONS];     /* button types, same on every layer */
+    uint8_t bval[NUM_BUTTONS];      /* button values, same on every layer */
 };
+
+static const struct te_seed8 SEED_OPXY8 = {
+    .nlayers = 8,
+    .fcc   = { 32, 33, 31, 38 },
+    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_CC_TOGGLE,
+               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
+               BTN_CC_MOMENTARY, BTN_CC_MOMENTARY },
+    .bval  = { 0, 9, 37, 29, 39, 83, 84, 104, 105 },
+};
+
+/* Write layer L (0..NUM_LAYERS-1) with fader CCs / button types+values, ALL on MIDI
+ * channel `chan`, faders linear 0..127. Routes the heterogeneous per-layer storage
+ * (L0 inline, L1 shift+ext[0], L2..L7 layer[L-2]+ext[L-1]) behind one call. Same
+ * inline/shift/layer[L-2] routing the generic make_default seed loop uses. */
+static void set_layer(struct profile *p, int L, uint8_t chan,
+                      const uint8_t fcc[NUM_FADERS],
+                      const uint8_t btype[NUM_BUTTONS],
+                      const uint8_t bval[NUM_BUTTONS])
+{
+    for (int i = 0; i < NUM_FADERS; i++) {
+        if (L == 0) { p->fader[i].cc=fcc[i]; p->fader[i].min=0; p->fader[i].max=127;
+            p->fader[i].curve=CURVE_LINEAR; p->fader[i].invert=0; p->fader_channel[i]=chan; }
+        else if (L == 1) { p->shift.fader_cc[i]=fcc[i]; p->ext[0].fader_min[i]=0;
+            p->ext[0].fader_max[i]=127; p->ext[0].fader_curve[i]=CURVE_LINEAR;
+            p->ext[0].fader_invert[i]=0; p->ext[0].fader_channel[i]=chan; }
+        else { p->layer[L-2].fader_cc[i]=fcc[i]; p->ext[L-1].fader_min[i]=0;
+            p->ext[L-1].fader_max[i]=127; p->ext[L-1].fader_curve[i]=CURVE_LINEAR;
+            p->ext[L-1].fader_invert[i]=0; p->ext[L-1].fader_channel[i]=chan; }
+    }
+    for (int i = 0; i < NUM_BUTTONS; i++) {
+        if (L == 0) { p->button[i].type=btype[i]; p->button[i].value=bval[i];
+            p->button_channel[i]=chan; }
+        else if (L == 1) { p->shift.button_value[i]=bval[i]; p->ext[0].button_type[i]=btype[i];
+            p->ext[0].button_channel[i]=chan; }
+        else { p->layer[L-2].button_value[i]=bval[i]; p->ext[L-1].button_type[i]=btype[i];
+            p->ext[L-1].button_channel[i]=chan; }
+    }
+}
+
+static void apply_te_seed8(struct profile *p, const struct te_seed8 *s)
+{
+    p->channel = 0;                                   /* profile default = track 1 */
+    for (int L = 0; L < s->nlayers && L < NUM_LAYERS; L++)
+        set_layer(p, L, (uint8_t)L, s->fcc, s->btype, s->bval);   /* channel = L = track L+1 */
+}
 
 /* TX-6 (per-track ch1-6): faders track 1-4 volume (CC7); T1-Vol- mute tracks 1-6
  * (CC120 ch1-6); FWD start/stop (CC46 ch7); RWD open. The •• dial switches feldd
@@ -252,25 +317,40 @@ static void make_default(int slot, struct profile *p)
     /* Within-bank index 0..7 (the •• cycle). Both banks reuse the same 0..127
      * counter slice; only one profile is active at a time, so reuse is harmless. */
     int within = slot % NUM_BANK_PROFILES;
-    int fbase = within * (NUM_LAYERS * NUM_FADERS);   /* P*16: within 0 -> 0, within 7 -> 112 */
-    for (int i = 0; i < NUM_FADERS; i++) {
-        p->fader[i].cc     = (uint8_t)(fbase + 0 * NUM_FADERS + i);  /* L1: P*16 + 0..3   */
-        p->fader[i].min    = 0;
-        p->fader[i].max    = 127;
-        p->fader[i].curve  = CURVE_LINEAR;
-        p->fader[i].invert = 0;
-        p->shift.fader_cc[i]    = (uint8_t)(fbase + 1 * NUM_FADERS + i); /* L2: P*16 + 4..7  */
-        p->layer[0].fader_cc[i] = (uint8_t)(fbase + 2 * NUM_FADERS + i); /* L3: P*16 + 8..11 */
-        p->layer[1].fader_cc[i] = (uint8_t)(fbase + 3 * NUM_FADERS + i); /* L4: P*16 + 12..15 */
-        p->fader_channel[i]  = p->channel;    /* v2: default to the profile channel */
+    int fbase  = within * (NUM_LAYERS * NUM_FADERS);   /* within*32 (0,32,...,224) */
+    /* v9: loop every layer 0..NUM_LAYERS-1 (was unrolled to L0..L3). Mask to 7 bits so
+     * no default CC exceeds 127 (which would fail profile_validate and loop the reseed).
+     * The counter wraps 0..255 across 256 slots, so each CC 0..127 lands exactly twice. */
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        for (int i = 0; i < NUM_FADERS; i++) {
+            uint8_t cc = (uint8_t)((fbase + L * NUM_FADERS + i) & 0x7F);
+            if (L == 0) {
+                p->fader[i].cc     = cc;
+                p->fader[i].min    = 0;
+                p->fader[i].max    = 127;
+                p->fader[i].curve  = CURVE_LINEAR;
+                p->fader[i].invert = 0;
+                p->fader_channel[i] = p->channel;   /* v2: default to the profile channel */
+            } else if (L == 1) {
+                p->shift.fader_cc[i] = cc;
+            } else {
+                p->layer[L - 2].fader_cc[i] = cc;
+            }
+        }
     }
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-        p->button[i].type    = BTN_CC_MOMENTARY;
-        p->button[i].value          = default_btn_value(within, 0, i); /* L1 */
-        p->shift.button_value[i]    = default_btn_value(within, 1, i); /* L2 */
-        p->layer[0].button_value[i] = default_btn_value(within, 2, i); /* L3 */
-        p->layer[1].button_value[i] = default_btn_value(within, 3, i); /* L4 */
-        p->button_channel[i] = default_btn_channel(i); /* faders ch1 / front ch2 / side ch3 */
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        for (int i = 0; i < NUM_BUTTONS; i++) {
+            uint8_t bv = default_btn_value(within, L, i);
+            if (L == 0) {
+                p->button[i].type    = BTN_CC_MOMENTARY;
+                p->button[i].value   = bv;
+                p->button_channel[i] = default_btn_channel(i); /* faders ch1 / front ch2 / side ch3 */
+            } else if (L == 1) {
+                p->shift.button_value[i] = bv;
+            } else {
+                p->layer[L - 2].button_value[i] = bv;
+            }
+        }
     }
 
     /* 0.19: on MIDI-bank slots 1/2/3 (profiles 2/3/4), replace the generic map with a
@@ -278,9 +358,7 @@ static void make_default(int slot, struct profile *p)
      * Applied BEFORE the ext inheritance below so L2/L3/L4 page fields pick up the
      * seed's per-control channels + ranges. Slot 0 + slots 4..7 + Keyboard bank stay
      * generic. */
-    if (slot == 1) {
-        apply_te_seed(p, &SEED_OPXY);
-    } else if (slot == 2) {
+    if (slot == 2) {
         apply_te_seed(p, &SEED_TX6);
     } else if (slot == 3) {
         apply_te_seed(p, &SEED_OP1);
@@ -304,6 +382,14 @@ static void make_default(int slot, struct profile *p)
             p->ext[L].button_type[i]    = p->button[i].type;
             p->ext[L].button_channel[i] = p->button_channel[i];
         }
+    }
+
+    /* v9 OP-XY 8-track: apply LAST so its per-layer ext[] channels 0..7 survive the
+     * inheritance loop above (which would otherwise copy L1's ch0 over ext[1..7] and
+     * collapse the mixer to a single track). This inverts the old apply-before-inherit
+     * order the single-track seeds still use. */
+    if (slot == 1) {
+        apply_te_seed8(p, &SEED_OPXY8);
     }
 
     /* v8: no chords seeded by default (every chord6 slot all-zero, every fader_role =
@@ -339,6 +425,21 @@ static void make_default(int slot, struct profile *p)
     memcpy(p->name, nm, strlen(nm));
 }
 
+/* Adapters so fs_bring_up's mixed-geometry erase drives the pure, host-tested
+ * nvs_erase_sweep() cadence (nvs_erase.h): feed the WDT before every sector
+ * erase. ctx is the opened flash_area; `sector` is 0..sector_count-1. */
+static void erase_feed_cb(void *ctx)
+{
+    (void)ctx;
+    feed_wdt();
+}
+static int erase_sector_cb(void *ctx, int sector)
+{
+    const struct flash_area *fa = ctx;
+    return flash_area_erase(fa, (uint32_t)sector * (uint32_t)fs.sector_size,
+                            (uint32_t)fs.sector_size);
+}
+
 /* Bind the NVS fs to the storage_partition and mount. Derives sector_size from
  * the flash page geometry at the partition offset; sector_count tiles the whole
  * partition. Returns 0 on success. */
@@ -362,7 +463,23 @@ static int fs_bring_up(void)
 
     rc = nvs_mount(&fs);
     if (rc) {
-        return rc;
+        /* Mount failed over a possibly-mixed geometry (the v9 0xFB000 -> 0xF7000
+         * move; lower 4 sectors are stale app-region flash). A stock DFU rewrites
+         * only the app image and never this partition, so a bad-mount state is
+         * deterministic and survives every re-flash; the only clear is a full
+         * erase (spec §3.7, MANDATORY). Erase every sector, feeding the WDT before
+         * each via the host-tested nvs_erase_sweep() cadence so the 32 KB erase
+         * can't trip the ~8 s watchdog, then retry the mount ONCE. */
+        const struct flash_area *fa;
+        if (flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa) == 0) {
+            (void)nvs_erase_sweep((int)fs.sector_count, erase_feed_cb,
+                                  erase_sector_cb, (void *)fa);
+            flash_area_close(fa);
+        }
+        rc = nvs_mount(&fs);
+        if (rc) {
+            return rc;
+        }
     }
     fs_ready = true;
     return 0;

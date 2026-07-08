@@ -158,21 +158,21 @@ zephyr_udc0: &usbd {
  * last page 0xFF000..0xFFFFF is reserved. The nRF52840 flash is 1 MB
  * (0x100000). We place NVS at the TOP of usable flash (conventional NVS
  * placement: maximally far from a growing app image, just under the reserved
- * page) — a 16 KB (0x4000) region spanning 0xFB000..0xFF000, ending exactly
+ * page) — a 32 KB (0x8000) region spanning 0xF7000..0xFF000, ending exactly
  * at the reserved page. It is safe because it sits above the linker-capped app
  * region (ends 0xDF000) and just below the only reserved page (0xFF000).
  *
  * Referencing the &flash0 { partitions { ... }; } path MERGES this child into
  * the marisko-declared `partitions` node (which has no label, so it is reached
  * by node path); the bootloader + app partitions survive and all three appear
- * in the merged zephyr.dts. The node is named partition@fb000 so its
+ * in the merged zephyr.dts. The node is named partition@f7000 so its
  * unit-address matches its reg offset, and labelled storage_partition so
  * FIXED_PARTITION_*(storage_partition) resolves in librarian.c. */
 &flash0 {
     partitions {
-        storage_partition: partition@fb000 {
+        storage_partition: partition@f7000 {
             label = "storage";
-            reg = <0x000FB000 0x00004000>;
+            reg = <0x000F7000 0x00008000>;
         };
     };
 };

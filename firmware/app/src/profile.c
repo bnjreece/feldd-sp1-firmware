@@ -18,11 +18,12 @@ PROFILE_STATIC_ASSERT(offsetof(struct profile, fader_channel)    == 69,  v1_end)
 PROFILE_STATIC_ASSERT(offsetof(struct profile, button_key)       == 82,  v2_end);
 PROFILE_STATIC_ASSERT(offsetof(struct profile, button_key_shift) == 100, v3_end);
 PROFILE_STATIC_ASSERT(offsetof(struct profile, layer)            == 118, v4_end);
-PROFILE_STATIC_ASSERT(offsetof(struct profile, ext)              == 180, v5_end);
-PROFILE_STATIC_ASSERT(offsetof(struct profile, chord6)           == 294, v6_end);
-PROFILE_STATIC_ASSERT(offsetof(struct profile, fader_role)       == 510, v8_role);
-PROFILE_STATIC_ASSERT(offsetof(struct profile, chord_flags)      == 526, v8_flags);
-PROFILE_STATIC_ASSERT(sizeof(struct profile)                     == 528, v8_end);
+PROFILE_STATIC_ASSERT(offsetof(struct profile, layer)            == 118,  v9_layer_off);
+PROFILE_STATIC_ASSERT(offsetof(struct profile, ext)              == 304,  v9_ext_off);
+PROFILE_STATIC_ASSERT(offsetof(struct profile, chord6)           == 570,  v9_chord6_off);
+PROFILE_STATIC_ASSERT(offsetof(struct profile, fader_role)       == 1002, v9_fader_role_off);
+PROFILE_STATIC_ASSERT(offsetof(struct profile, chord_flags)      == 1034, v9_chord_flags_off);
+PROFILE_STATIC_ASSERT(sizeof(struct profile)                     == 1038, v9_sizeof);
 
 /* ---- base64 alphabet ---- */
 static const char b64_enc_tbl[] =
@@ -52,8 +53,9 @@ int profile_wire_len(uint8_t version)
     case 5:  return 180;
     case 6:  return 294;
     case 7:  return 294;   /* a v7 blob no longer round-trips full; its prefix is the v6 image (read-only path; firmware rejects v7 at validate) */
-    case 8:
-    default: return (int)sizeof(struct profile);   /* 528 */
+    case 8:  return 528;   /* pinned literal: v8 wire length is no longer == sizeof */
+    case 9:
+    default: return (int)sizeof(struct profile);   /* 1038 (v9, padded to a multiple of 3) */
     }
 }
 
@@ -122,35 +124,7 @@ int profile_to_b64(const struct profile *p, char *out, int outcap)
  * `wire` is the decoded prefix length (so we know which version produced it). */
 static void profile_fill_missing(struct profile *out, int wire)
 {
-    /* v1 had no per-control channels: inherit the profile default. */
-    if (wire < 82) {
-        for (int i = 0; i < NUM_FADERS; i++)  out->fader_channel[i]  = out->channel;
-        for (int i = 0; i < NUM_BUTTONS; i++) out->button_channel[i] = out->channel;
-    }
-    /* < v6: the per-layer completion banks (ext) were shared from L1. Inherit so
-     * L2/L3/L4 keep behaving like v5 (which always read these from L1). */
-    if (wire < 294) {
-        for (int L = 0; L < NUM_LAYERS - 1; L++) {
-            for (int i = 0; i < NUM_FADERS; i++) {
-                out->ext[L].fader_min[i]     = out->fader[i].min;
-                out->ext[L].fader_max[i]     = out->fader[i].max;
-                out->ext[L].fader_curve[i]   = out->fader[i].curve;
-                out->ext[L].fader_invert[i]  = out->fader[i].invert;
-                out->ext[L].fader_channel[i] = out->fader_channel[i];
-            }
-            for (int i = 0; i < NUM_BUTTONS; i++) {
-                out->ext[L].button_type[i]    = out->button[i].type;
-                out->ext[L].button_channel[i] = out->button_channel[i];
-            }
-        }
-    }
-    /* < v8: no chord tail. Default to "no chords anywhere" (every chord6 zero, every
-     * fader_role = cc) + chord velocity 100, so a v6/older blob upgrades to a benign
-     * v8 profile. The caller already zeroed the struct, so only chord_flags[0] needs
-     * an explicit non-zero seed. */
-    if (wire < 528) {
-        out->chord_flags[0] = 100;   /* default chord velocity */
-    }
+    (void)out; (void)wire;   /* strict v9: a full 1038-byte blob carries every field */
 }
 
 /* ---- profile_from_b64 ----
@@ -178,9 +152,11 @@ int profile_from_b64(const char *b64, int len, struct profile *out)
     if (len <= 0 || (len % 4) != 0)
         return -1;
     int src_len = (len / 4) * 3;
-    /* Must be exactly one of the historical version prefixes. */
-    if (src_len != 69 && src_len != 82 && src_len != 100 &&
-        src_len != 118 && src_len != 180 && src_len != 294 && src_len != 528)
+    /* strict v9 (spec 2.5): firmware stamps and reads ONLY the full 1038-byte v9
+     * image. Legacy lengths (180/294/528) are dropped here so a stored v8 blob is
+     * rejected and the librarian reseeds. The buf[0] version cross-check below still
+     * holds: profile_wire_len(9) == sizeof == src_len. */
+    if (src_len != (int)sizeof(struct profile))
         return -1;
 
     /* All valid wire lengths are multiples of 3 -> zero padding chars. */
@@ -247,10 +223,22 @@ int profile_validate(const struct profile *p)
         if (p->fader[i].curve > CURVE_EXP)         return -1;
         if (p->fader[i].invert > 1)                return -1;
         if (p->fader_channel[i] > 15)              return -1;  /* v2 per-fader ch */
+        if (p->shift.fader_cc[i]     > 127)        return -1;  /* L2 fader CC (d1) */
     }
     for (int i = 0; i < NUM_BUTTONS; i++) {
         if (p->button[i].type > BTN_CHORD)          return -1; /* v7: BTN_CHORD allowed */
         if (p->button_channel[i] > 15)              return -1; /* v2 per-button ch */
+        if (p->button[i].value        > 127)        return -1; /* L1 button d1 (CC/value) */
+        if (p->shift.button_value[i]  > 127)        return -1; /* L2 button d1           */
+    }
+    /* The appended layer banks (layer[] = L3..L8) carry fader CCs + button d1 values
+     * that validate did not previously range-check; a seed-formula overflow (spec 3.6)
+     * would otherwise ship a >127 MIDI d1 with no error. */
+    for (int L = 0; L < NUM_LAYERS - 2; L++) {
+        for (int i = 0; i < NUM_FADERS; i++)
+            if (p->layer[L].fader_cc[i]     > 127) return -1;
+        for (int i = 0; i < NUM_BUTTONS; i++)
+            if (p->layer[L].button_value[i] > 127) return -1;
     }
     /* v3 button_key[i] / button_mod[i] AND v4 button_key_shift[i] /
      * button_mod_shift[i]: every u8 is a legal HID usage / modifier bitmask

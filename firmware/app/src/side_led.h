@@ -26,8 +26,9 @@
 
 /* Render the side row for this tick into out[0..3] (each 0/1 for SP1_PLAY_LED i).
  *
- *   layer       : the current GLOBAL layer index (0..3). One LED lit at this
- *                 position at rest. Natural layer-to-pin ordering: 0 -> LED1.
+ *   layer       : the current GLOBAL layer index (0..7). One LED lit at
+ *                 position (layer & 3) at rest: SOLID for layers 0..3, BLINK
+ *                 on (tick/12)&1 for layers 4..7. Natural ordering: 0 -> LED1.
  *   flash_ticks : the mode-flash deadline countdown. > 0 -> MODE-FLASH owns the
  *                 row this tick; 0 -> LAYER rest. The caller decrements it, NOT
  *                 this helper (pure, no state), mirroring dial_confirm_ticks.
@@ -36,7 +37,8 @@
  *   flash_blink : MODE_FLASH_STYLE — 0 = PULSE (solid pattern the whole window;
  *                 the calm default), non-0 = BLINK (toggle the pattern on/off on
  *                 the (tick/12)&1 phase). Ignored when flash_ticks == 0.
- *   tick        : the current scan tick, used ONLY for the BLINK phase.
+ *   tick        : the current scan tick, used for the mode-flash BLINK phase AND
+ *                 the layer 4..7 blink.
  *
  * Always writes out[0..3] only. Output is strictly 0/1. */
 void side_led_pattern(unsigned char layer, unsigned int flash_ticks,

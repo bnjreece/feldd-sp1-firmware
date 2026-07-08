@@ -12,70 +12,68 @@ static uint8_t scale(int cc_val, const struct fader_map *f) {
     if (v < 0) v = 0; if (v > 127) v = 127;
     return (uint8_t)v;
 }
-/* v5: per-layer bank select (0=inline L1, 1=shift L2, 2=layer[0] L3, 3=layer[1]
- * L4). map_fader/map_button + main.c's Keyboard path route through these so the
- * gesture_layer() (0..3) drives one consistent select. default = layer 0. */
+/* v9: per-layer bank select. layer 0->inline (L1), 1->shift (L2),
+ * 2..NUM_LAYERS-1->layer[layer-2] (L3..L8). map_fader/map_button + main.c's
+ * Keyboard path route through these so the gesture_layer() (0..NUM_LAYERS-1)
+ * drives one consistent select. Callers pass the in-range gesture_layer(). */
 uint8_t profile_layer_fader_cc(const struct profile *p, int idx, int layer) {
     switch (layer) {
-    case 1:  return p->shift.fader_cc[idx];
-    case 2:  return p->layer[0].fader_cc[idx];
-    case 3:  return p->layer[1].fader_cc[idx];
-    default: return p->fader[idx].cc;          /* layer 0 = inline */
+    case 0:  return p->fader[idx].cc;                    /* L1 inline */
+    case 1:  return p->shift.fader_cc[idx];              /* L2 shift  */
+    default: return p->layer[layer - 2].fader_cc[idx];   /* L3..L8    */
     }
 }
 uint8_t profile_layer_button_value(const struct profile *p, int idx, int layer) {
     switch (layer) {
+    case 0:  return p->button[idx].value;
     case 1:  return p->shift.button_value[idx];
-    case 2:  return p->layer[0].button_value[idx];
-    case 3:  return p->layer[1].button_value[idx];
-    default: return p->button[idx].value;
+    default: return p->layer[layer - 2].button_value[idx];
     }
 }
 uint8_t profile_layer_button_key(const struct profile *p, int idx, int layer) {
     switch (layer) {
+    case 0:  return p->button_key[idx];
     case 1:  return p->button_key_shift[idx];
-    case 2:  return p->layer[0].button_key[idx];
-    case 3:  return p->layer[1].button_key[idx];
-    default: return p->button_key[idx];
+    default: return p->layer[layer - 2].button_key[idx];
     }
 }
 uint8_t profile_layer_button_mod(const struct profile *p, int idx, int layer) {
     switch (layer) {
+    case 0:  return p->button_mod[idx];
     case 1:  return p->button_mod_shift[idx];
-    case 2:  return p->layer[0].button_mod[idx];
-    case 3:  return p->layer[1].button_mod[idx];
-    default: return p->button_mod[idx];
+    default: return p->layer[layer - 2].button_mod[idx];
     }
 }
-/* v6: the fader scale fields + per-control channels + button type are now read
- * from the ACTIVE layer's own bank. Layer 0 = L1 inline; layers 1..3 = ext[L-1]
- * (L2/L3/L4). The ext index is (layer-1); any out-of-range layer falls to L1. */
+/* v9: the fader scale fields + per-control channels + button type are read from
+ * the ACTIVE layer's own bank. Layer 0 = L1 inline; layers 1..NUM_LAYERS-1 =
+ * ext[layer-1] (L2..L8). The ext index is (layer-1); any out-of-range layer
+ * falls to L1 (defensive). */
 uint8_t profile_layer_fader_min(const struct profile *p, int idx, int layer) {
-    if (layer >= 1 && layer <= 3) return p->ext[layer - 1].fader_min[idx];
+    if (layer >= 1 && layer < NUM_LAYERS) return p->ext[layer - 1].fader_min[idx];
     return p->fader[idx].min;
 }
 uint8_t profile_layer_fader_max(const struct profile *p, int idx, int layer) {
-    if (layer >= 1 && layer <= 3) return p->ext[layer - 1].fader_max[idx];
+    if (layer >= 1 && layer < NUM_LAYERS) return p->ext[layer - 1].fader_max[idx];
     return p->fader[idx].max;
 }
 uint8_t profile_layer_fader_curve(const struct profile *p, int idx, int layer) {
-    if (layer >= 1 && layer <= 3) return p->ext[layer - 1].fader_curve[idx];
+    if (layer >= 1 && layer < NUM_LAYERS) return p->ext[layer - 1].fader_curve[idx];
     return p->fader[idx].curve;
 }
 uint8_t profile_layer_fader_invert(const struct profile *p, int idx, int layer) {
-    if (layer >= 1 && layer <= 3) return p->ext[layer - 1].fader_invert[idx];
+    if (layer >= 1 && layer < NUM_LAYERS) return p->ext[layer - 1].fader_invert[idx];
     return p->fader[idx].invert;
 }
 uint8_t profile_layer_fader_channel(const struct profile *p, int idx, int layer) {
-    if (layer >= 1 && layer <= 3) return p->ext[layer - 1].fader_channel[idx];
+    if (layer >= 1 && layer < NUM_LAYERS) return p->ext[layer - 1].fader_channel[idx];
     return p->fader_channel[idx];
 }
 uint8_t profile_layer_button_type(const struct profile *p, int idx, int layer) {
-    if (layer >= 1 && layer <= 3) return p->ext[layer - 1].button_type[idx];
+    if (layer >= 1 && layer < NUM_LAYERS) return p->ext[layer - 1].button_type[idx];
     return p->button[idx].type;
 }
 uint8_t profile_layer_button_channel(const struct profile *p, int idx, int layer) {
-    if (layer >= 1 && layer <= 3) return p->ext[layer - 1].button_channel[idx];
+    if (layer >= 1 && layer < NUM_LAYERS) return p->ext[layer - 1].button_channel[idx];
     return p->button_channel[idx];
 }
 /* v8: unpack a button's chord for `layer` (DIRECT 0..3) into *out. NULL if the slot

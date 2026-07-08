@@ -42,11 +42,12 @@
  * ••=GPIO, DFU=Track1+4). Bench-tunable. */
 #define PEEK_HOLD_SCANS 75
 
-/* Number of layers (`layer` is 0..GESTURE_LAYER_COUNT-1). v5 raised this 2 -> 4
- * so the side LEDs map 1->2->3->4 for layers 0->1->2->3. The layer is now SET by
- * main.c's layer count-dial (gesture_set_layer); the relative +1 wrap and the
- * 2/3/4-tap absolute clamp both honor this ceiling. */
-#define GESTURE_LAYER_COUNT 4
+/* Number of layers (`layer` is 0..GESTURE_LAYER_COUNT-1). v5 raised this 2 -> 4;
+ * v9 raised it 4 -> 8 so one profile drives all 8 OP-XY tracks (layers = tracks).
+ * Layers 0..7 map to the side row's SOLID 1-4 / BLINK 5-8 dot. The layer is now
+ * SET by main.c's layer count-dial (gesture_set_layer); the relative +1 wrap and
+ * the 2..8-tap absolute select both honor this ceiling. */
+#define GESTURE_LAYER_COUNT 8
 
 /* gesture_step() return codes. */
 #define GESTURE_NONE          0
@@ -79,9 +80,10 @@ int gesture_layer(const gesture_t *g);
 
 /* Set the engaged layer (0..GESTURE_LAYER_COUNT-1). Called by main.c's layer
  * count-dial on a RELATIVE_NEXT (+1, caller wraps) or ABSOLUTE (clamped) commit;
- * out-of-range values are clamped to the top layer so a stray over-tap can never
- * index past the side LED row. Side-row layer LED snaps to the new value on the
- * next render tick (commit-only, no live mid-burst count — spec §2). */
+ * out-of-range values are clamped to the top layer (index 7 at 8 layers) so a
+ * stray over-tap can never index past the side LED row. Side-row layer LED snaps
+ * to the new value on the next render tick (commit-only, no live mid-burst
+ * count — spec §2). */
 void gesture_set_layer(gesture_t *g, int layer);
 
 /* Back-compat shift accessor: the layer's low bit (0/1). Feed as the `shift` arg

@@ -47,7 +47,7 @@ static const struct proto_store g_store = {
     .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.19.1-beta",
+    .fw         = "0.20.0-beta",
     .uid        = g_uid,
 };
 
@@ -62,13 +62,16 @@ static int     g_depth;    /* JSON brace nesting depth of the current frame */
 static bool    g_instr;    /* currently inside a "..." string literal */
 static bool    g_escape;   /* previous char was a backslash inside a string */
 
-/* Response scratch. The largest response is the 16-entry banked list_r. Its
- * WORST case is 1184 bytes: each name[16] can be all '"'/'\\', which the
- * sanitizer escapes to 32 wire bytes (NOT 16), so 16 entries reach 1120, plus a
- * <=61-byte header and "]}" footer (see the budget comment on the `list` verb in
- * protocol.c). 1280 (>= 1184) holds it; the prior 768 OVERFLOWED on legal input
- * (proto_handle returned -1, blocking enumeration). */
-static char    g_resp[1280];
+/* Response scratch. Pre-v9 the worst case was the 16-entry banked list_r (1184
+ * bytes: each name[16] can be all '"'/'\\', escaped to 32 wire bytes, so 16
+ * entries reach 1120 + a <=61-byte header + "]}" footer; see the `list` verb
+ * budget in protocol.c). v9 makes read_r the binding case: a 1038-byte profile
+ * encodes to 1384-char base64, and {"t":"read_r",...,"data":"<b64>"} adds a
+ * 56-char wrapper (max u32 id + 2-digit n) = 1440, + '\0' = 1441. That exceeds
+ * both list_r (1184) and the old 1280 cap, so a v9 read would emit() -> -1 and
+ * the host would get OVERFLOW instead of the profile. CONFIG_CDC_RESP_CAP (1536)
+ * holds it with headroom. */
+static char    g_resp[CONFIG_CDC_RESP_CAP];
 
 static bool    g_mon;
 
@@ -84,11 +87,21 @@ static bool dtr_asserted(void)
 int config_cdc_dtr(void){ return dtr_asserted() ? 1 : 0; }
 
 /* Send a NUL-terminated string to the host. poll_out stores each byte and the
- * CDC workqueue does the USB send; discards (never blocks) if the fifo is full. */
+ * CDC workqueue does the USB send; it DISCARDS (never blocks) when the tx fifo is
+ * full (flow_ctrl off). A v9 read_r frame is ~1440 bytes, far larger than the CDC
+ * ACM tx ring, and spinning poll_out fills the ring faster than the K_MSEC(1)-
+ * scheduled tx work can drain it, so the tail is silently dropped (a v8 read_r was
+ * ~740 bytes and fit, which is why this only bit at v9). Yield every 64 bytes so
+ * the tx_fifo work item runs and frees ring space. HARDWARE-ONLY bug: the host uart
+ * mock never drops, so no host test catches it; validated on the SWD burner. */
 static void cdc_tx(const char *s)
 {
+    int i = 0;
     for (const char *p = s; *p; p++) {
         uart_poll_out(cdc, (unsigned char)*p);
+        if ((++i & 0x3F) == 0) {
+            k_msleep(1);   /* let the CDC tx work drain a USB transfer */
+        }
     }
 }
 

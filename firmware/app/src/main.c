@@ -36,6 +36,7 @@
 #include "control_logic.h"
 #include "profile.h"
 #include "mapping.h"
+#include "btn_toggle.h"
 #include "transport.h"
 #include "midi_out.h"
 #include "usbdev.h"
@@ -48,6 +49,19 @@
 #include "layer_takeover.h"
 #include "dial.h"
 #include "mode.h"
+
+/* Coupling guards (spec §2.4 / §4.2): the layer count-dial ceiling, the gesture
+ * layer ceiling, and the profile's per-layer storage MUST agree, and the mode-flip
+ * arm plateau MUST equal the peek plateau, or a divergence silently strands the top
+ * layers or flips mode on a quick tap. These are two independent literals in two
+ * headers today with no cross-check. */
+BUILD_ASSERT(GESTURE_LAYER_COUNT == NUM_LAYERS,
+             "layer count must equal NUM_LAYERS");
+BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
+             "layer count-dial ceiling must reach the top layer");
+BUILD_ASSERT(MODE_FLIP_ARM_SCANS == PEEK_HOLD_SCANS,
+             "mode-flip arm plateau must match the peek plateau");
+
 #include "side_led.h"
 #include "wdt.h"
 #include "chord_engine.h"
@@ -76,12 +90,14 @@ static fader_t g_fader[NUM_FADERS];
 /* STATEFUL button state (the on/off + run state the pure mapping engine
  * intentionally does NOT own — see profile.h / mapping.c). map_button() handles
  * the stateless BTN_NOTE / BTN_CC_MOMENTARY; the control loop owns these:
- *   - g_btn_toggle[i]: latched on/off for a BTN_CC_TOGGLE (mute), flipped on each
- *     PRESS edge. Reset to 0 on a profile change (a new profile's buttons differ,
- *     so a carried-over latch would emit a wrong CC value against the new map).
+ *   - g_btn_toggle: per-LAYER, per-button latched on/off for a BTN_CC_TOGGLE
+ *     (mute), flipped on the PRESS edge of the ACTIVE layer so each track-layer
+ *     keeps its own bit. Reset across ALL layers on a profile change (a new
+ *     profile's buttons differ, so a carried-over latch would emit a wrong CC
+ *     value against the new map); NOT reset on a layer hop (independent tracks).
  *   - g_transport_playing: shared MIDI run state for BTN_TRANSPORT, threaded
  *     through transport.c's pure transport_rt() (a play/stop toggle keys off it). */
-static uint8_t g_btn_toggle[NUM_BUTTONS];
+static struct btn_toggle g_btn_toggle;   /* per-LAYER, per-button latched toggles (BSS zero-init) */
 static int     g_transport_playing;
 
 /* v7 chord latch state. Per-button (NUM_BUTTONS) so the two-ladder case (a chord
@@ -495,7 +511,7 @@ static void chord_tx_enqueue(uint8_t status, uint8_t d1, uint8_t d2)
  *
  * The CC NUMBER for a toggle is the button's `value` field (same convention as
  * map_button's BTN_CC_MOMENTARY) and we honor the per-button channel + the active
- * LAYER (0..3) bank exactly like map_button. */
+ * LAYER (0..NUM_LAYERS-1) bank exactly like map_button. */
 static int route_midi_button(int idx, int pressed, int layer_now)
 {
     const struct profile *p = librarian_active();
@@ -505,11 +521,11 @@ static int route_midi_button(int idx, int pressed, int layer_now)
     switch (profile_layer_button_type(p, idx, layer_now)) {
     case BTN_CC_TOGGLE:
         if (pressed) {
-            g_btn_toggle[idx] ^= 1u;
+            uint8_t on = btn_toggle_flip(&g_btn_toggle, layer_now, idx);
             struct midi_msg m = {
                 .status = (uint8_t)(0xB0 | (profile_layer_button_channel(p, idx, layer_now) & 0x0F)),
                 .d1     = profile_layer_button_value(p, idx, layer_now),
-                .d2     = g_btn_toggle[idx] ? 127 : 0,
+                .d2     = on ? 127 : 0,
                 .len    = 3,
             };
             midi_out_send(&m, NULL);
@@ -540,9 +556,7 @@ static int route_midi_button(int idx, int pressed, int layer_now)
                 : lib_bank_cycle(cur);
             if (librarian_set_active(next) == 0) {
                 chord_flush_all();   /* v7: release held chords before the new map */
-                for (int i = 0; i < NUM_BUTTONS; i++) {
-                    g_btn_toggle[i] = 0;
-                }
+                btn_toggle_reset_all(&g_btn_toggle);
                 return 1;
             }
         }
@@ -677,10 +691,12 @@ int main(void)
      * instance, reusing the exact burst-timing FSM the •• profile dial uses.
      * Stepped EVERY tick from the PLAY-scan block below, fed tap_edge=1 only on a
      * classified short PLAY tap RELEASE (held 1..40 ticks). On commit:
-     *   1 tap (RELATIVE_NEXT) -> layer = (layer+1) % GESTURE_LAYER_COUNT
-     *   2/3/4 taps (ABSOLUTE) -> jump to layer count-1, CLAMPED to 4 (index 3) in
-     *                            main.c (spec Q1 Option b: dial.c stays literal-8,
-     *                            a 5..8-tap PLAY burst silently lands on layer 4).
+     *   1 tap (RELATIVE_NEXT) -> layer = (layer+1) % GESTURE_LAYER_COUNT (single
+     *                            tap = +1, wrapping at layer 8)
+     *   2..8 taps (ABSOLUTE)  -> jump to layer count-1 for all 1..8 with no
+     *                            artificial pin (dial.c stays literal-8; the clamp
+     *                            ceiling is GESTURE_LAYER_COUNT-1 = 7, so >=9 taps
+     *                            pin to the top layer).
      * play_held_ticks is the PLAY tap CLASSIFIER's own hold counter (mirrors the
      * •• `held` counter): a PLAY press released in 1..40 ticks is a layer-dial
      * tap; a longer hold is the peek/mode gesture (gesture.c) and the bands are
@@ -918,7 +934,11 @@ int main(void)
              * VOIDS any pending profile peek and clears a half-formed shift double-tap
              * — the inline gesture_disarm() is now folded into gesture_step under that
              * signal (spec §3). The •• power/profile gestures are untouched by a flip. */
-            struct mode_decision md = mode_decide(play_held, idx, pressed);
+            /* Feed the PLAY hold-tick count so mode_decide gates the flip behind
+             * MODE_FLIP_ARM_SCANS: a short track-select tap (hold < plateau) with a
+             * coincident rocker edge passes through to transport, never a flip
+             * (spec §4.3). play_held_ticks is 0 on release, grows while held. */
+            struct mode_decision md = mode_decide((int)play_held_ticks, idx, pressed);
             if (md.consumed) {
                 rocker_consumed_this_hold = 1;
                 if (md.set && librarian_set_mode(md.which) == 0) {
@@ -1011,10 +1031,10 @@ int main(void)
                 g_takeover_arm[i] = 1;
             }
         } else if (ldres.kind == DIAL_ABSOLUTE) {
-            /* 2/3/4 taps = absolute jump to layer count-1 (1-indexed like the
-             * profile dial). CLAMP to GESTURE_LAYER_COUNT-1 here (spec Q1 Option b:
-             * dial.c stays literal-8, so a 5..8-tap PLAY burst silently pins to the
-             * top layer — acceptable, there are only 4 layers). */
+            /* 2..8 taps = absolute jump to layer count-1 (1-indexed like the
+             * profile dial), selecting layer count for all 1..8 with no artificial
+             * pin. CLAMP to GESTURE_LAYER_COUNT-1 = 7 here (spec §4.2: dial.c stays
+             * literal-8, so only a >=9-tap PLAY burst pins to the top layer). */
             int target = ldres.count - 1;
             if (target > GESTURE_LAYER_COUNT - 1) {
                 target = GESTURE_LAYER_COUNT - 1;
@@ -1052,7 +1072,11 @@ int main(void)
              * (0.9.1), push to the host. (No shift detector in this build, so no
              * gesture_disarm needed — PLAY maps normally here, not the shift
              * trigger.) */
-            struct mode_decision md = mode_decide(play_held, idx, pressed);
+            /* Stock build: PLAY is not the layer-dial trigger here, so there is no
+             * track-select tap to collide with. Arm the flip whenever PLAY is held
+             * (feed the plateau) to keep the pre-gate behavior. */
+            struct mode_decision md = mode_decide(play_held ? MODE_FLIP_ARM_SCANS : 0,
+                                                  idx, pressed);
             if (md.consumed) {
                 if (md.set && librarian_set_mode(md.which) == 0) {
                     mode_now = md.which;
@@ -1184,10 +1208,12 @@ int main(void)
          * exactly like the proven front-row dial_confirm_ticks countdown:
          *   1. MODE-FLASH (transient) — while mode_flash_ticks > 0, flash the
          *      captured NEW mode's pattern (PULSE solid / BLINK per MODE_FLASH_STYLE).
-         *   2. LAYER rest (permanent) — one side LED lit at the GLOBAL layer
+         *   2. LAYER rest (permanent) — one side LED lit at position (layer & 3):
+         *      SOLID for layers 0..3, BLINK on (tick/12)&1 for layers 4..7
          *      (gesture_layer(), natural ordering: layer 0 -> SP1_PLAY_LED1). The
          *      layer is unchanged across a mode switch, so the flash yields back to
-         *      the same layer LED. Never all-dark in normal operation.
+         *      the same layer LED. Never all-dark for layers 0..3; layers 4..7 are
+         *      dark on the blink off-phase (~96 ms).
          * The pure side_led_pattern() helper (side_led.c, host-tested) owns the
          * render math; main.c is the GPIO arbiter + the deadline countdown. Under
          * FELDD_SHIFT_TRIGGER_PLAY=0 there is no PLAY gesture FSM, so the layer pins

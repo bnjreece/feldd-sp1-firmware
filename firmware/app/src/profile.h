@@ -1,10 +1,10 @@
 #ifndef PROFILE_H
 #define PROFILE_H
 #include <stdint.h>
-#define PROFILE_VERSION 8
+#define PROFILE_VERSION 9
 #define NUM_FADERS 4
 #define NUM_BUTTONS 9
-#define NUM_LAYERS 4                /* base + 3 cycled layers (double-tap PLAY) */
+#define NUM_LAYERS 8                /* 8 selectable layers = 8 tracks (PLAY count-dial, taps 1..8) */
 #define NUM_MODES 2                 /* MIDI bank + Keyboard bank (mode>profile>layer §0) */
 #define NUM_BANK_PROFILES 8         /* profiles per mode (the •• cycle wraps these) */
 #define NUM_PROFILES (NUM_MODES * NUM_BANK_PROFILES)   /* 16 total NVS slots */
@@ -141,28 +141,21 @@ struct profile {
      * "no chords" (every chord6 zero, every fader_role cc, velocity 100). */
     struct chord6 chord6[NUM_LAYERS][NUM_BUTTONS];     /* 4*9*6 = 216 B; packed per button */
     uint8_t  fader_role[NUM_LAYERS][NUM_FADERS];       /* 4*4   = 16 B; 0=cc,1=chord_depth */
-    uint8_t  chord_flags[2];                           /* 2 B: [0]=chord velocity, [1]=reserved */
+    uint8_t  chord_flags[4];                           /* 4 B: [0]=chord velocity, [1..3]=reserved. [2..3] pad struct to 1038 (multiple of 3) so base64 has no '=' padding (spec 2.1). */
 } __attribute__((packed));
 
-/* v6 byte layout (packed, little-endian-agnostic since all fields are u8):
- *   [0..179]   v5 image, byte-identical (the clean prefix; see the field
- *              comments above). Codec slices here for a v5 target / older device.
- *   [180..293] v6 tail = struct layer_ext ext[3], 38 bytes each, in L2/L3/L4 order:
- *     ext[0] (L2 = shift bank):
- *       180..183 fader_min[4]      184..187 fader_max[4]
- *       188..191 fader_curve[4]    192..195 fader_invert[4]
- *       196..204 button_type[9]    205..208 fader_channel[4]
- *       209..217 button_channel[9]
- *     ext[1] (L3 = layer[0]):
- *       218..221 fader_min[4]      222..225 fader_max[4]
- *       226..229 fader_curve[4]    230..233 fader_invert[4]
- *       234..242 button_type[9]    243..246 fader_channel[4]
- *       247..255 button_channel[9]
- *     ext[2] (L4 = layer[1]):
- *       256..259 fader_min[4]      260..263 fader_max[4]
- *       264..267 fader_curve[4]    268..271 fader_invert[4]
- *       272..280 button_type[9]    281..284 fader_channel[4]
- *       285..293 button_channel[9]
+/* v9 byte layout (packed, all u8). v9 is the FIRST version to RESIZE the interior
+ * arrays (NUM_LAYERS 4->8) rather than append a tail, so it is a HARD FORMAT BREAK,
+ * not a prefix-superset of v8. The shared v8/v9 prefix ends at byte 179
+ * (layer[0]/layer[1] sit at 118..179 in BOTH); divergence begins at byte 180
+ * (v8 has ext[0] there, v9 has layer[2]).
+ *   [0..117]     fixed prefix, byte-identical to v8
+ *   [118..303]   layer[6]        (L3..L8 banks; was layer[2] @118..179)
+ *   [304..569]   ext[7]          (L2..L8 completion; was ext[3] @180..293)
+ *   [570..1001]  chord6[8][9]    (packed per (layer,button); was @294..509)
+ *   [1002..1033] fader_role[8][4]
+ *   [1034..1037] chord_flags[4]  ([0]=velocity, [1..3]=reserved pad)
+ *   sizeof = 1038; base64 = ceil(1038/3)*4 = 1384 chars, no '=' padding.
  */
 
 /* codec API */

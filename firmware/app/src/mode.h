@@ -23,7 +23,9 @@ enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1 };
  * HARDWARE CONTRACT — these 4 bits render on the SIDE (PLAY-LED) row. As of the
  * 0.9.1 LED redesign they are the TEMPORARY MODE-FLASH pattern (no longer a static
  * resting indicator): on a mode switch the side row flashes this pattern for
- * ~1.2 s, then returns to the permanent LAYER LED. All four play LEDs
+ * ~1.2 s, then returns to the permanent LAYER LED. That layer indicator now spans
+ * 8 layers: SOLID for layers 1-4 and BLINK for layers 5-8 at the same LED position
+ * (layer & 3), see side_led_pattern. All four play LEDs
  * (SP1_PLAY_LED1..4 in sp1_board.h) are driven; all four are SYNTH-clock pins,
  * already driven always-on by 0.9.0, GPIO-only and Track1+4-DFU-recoverable (NOT a
  * brick). An integrator MUST map these bits onto the side row:
@@ -45,6 +47,13 @@ enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1 };
 #define MODE_BTN_FWD 7   /* •• + FWD -> KEYBOARD */
 #define MODE_BTN_RWD 8   /* •• + RWD -> MIDI     */
 
+/* PLAY must be held at least this many scan ticks before a FWD/RWD edge is taken
+ * as a mode flip (else it passes through to transport). Guards the OP-XY 8-track
+ * collision (spec §4.3): a quick track-select PLAY tap coincident with a rocker
+ * edge must NOT silently flip MIDI<->Keyboard. Value MATCHES the peek plateau
+ * PEEK_HOLD_SCANS (gesture.h); main.c BUILD_ASSERTs the two are equal. */
+#define MODE_FLIP_ARM_SCANS 75
+
 struct mode_decision {
     uint8_t set;       /* 1 -> caller calls librarian_set_mode(which) */
     uint8_t which;     /* MODE_MIDI / MODE_KEYBOARD (valid iff set) */
@@ -54,14 +63,17 @@ struct mode_decision {
 };
 
 /* Decide what a single button edge means given the modifier state THIS tick.
- *   modifier_held : 1 iff the gesture modifier (PLAY-held) is engaged this tick.
- *   idx           : the logical button index of the edge (0..8).
- *   pressed       : 1 press edge, 0 release edge.
- * A FWD/RWD PRESS while the modifier is held sets the mode and consumes the edge.
- * The matching RELEASE while the modifier is held is consumed (so it never
+ *   modifier_hold_ticks : scan ticks the modifier (PLAY) has been continuously
+ *                         held this hold (0 = not held); a FWD/RWD PRESS is a mode
+ *                         flip only once this reaches MODE_FLIP_ARM_SCANS. Below
+ *                         the plateau the edge is passthrough (transport).
+ *   idx                 : the logical button index of the edge (0..8).
+ *   pressed             : 1 press edge, 0 release edge.
+ * A FWD/RWD PRESS while the modifier is held PAST the arm plateau sets the mode
+ * and consumes the edge. The matching RELEASE while armed is consumed (so it never
  * types/maps) but sets nothing. Anything else is passthrough (set=0, consumed=0).
- * This logic is modifier-agnostic: main.c supplies play_held as modifier_held. */
-struct mode_decision mode_decide(int modifier_held, int idx, int pressed);
+ * This logic is modifier-agnostic: main.c supplies the PLAY hold-tick count. */
+struct mode_decision mode_decide(int modifier_hold_ticks, int idx, int pressed);
 
 /* The SIDE-row (PLAY-LED) on/off pattern for `mode` (an OR of MODE_LED* bits, each
  * mapping to SP1_PLAY_LED1..4 — see the HARDWARE CONTRACT above). Used as the

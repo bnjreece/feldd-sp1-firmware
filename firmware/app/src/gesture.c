@@ -60,8 +60,8 @@ int gesture_layer(const gesture_t *g) {
 
 void gesture_set_layer(gesture_t *g, int layer) {
     /* Clamp into 0..GESTURE_LAYER_COUNT-1. main.c's layer count-dial already
-     * clamps an over-tap to 4 (index 3) before calling, but guard here too so a
-     * stray value can never index past the side LED row. */
+     * clamps an over-tap to the top layer (index 7 at 8 layers) before calling,
+     * but guard here too so a stray value can never index past the side LED row. */
     if (layer < 0) {
         layer = 0;
     } else if (layer > GESTURE_LAYER_COUNT - 1) {

@@ -2,13 +2,19 @@
 #ifndef CONFIG_CDC_H
 #define CONFIG_CDC_H
 
-/* Inbound RX line buffer cap (config_cdc.c). Must hold the LONGEST request frame:
- * a v7 `write` = JSON wrapper (~40 chars) + 592-char base64 (444-byte profile) +
- * '\0' ~= 633. v6's 392-char base64 fit in 480; v7's 150-byte tail pushes the
- * frame to ~633, so a v7 write would be silently dropped + resynced at 480. 768
- * covers 592 + wrapper + headroom (and the K=16 720-char variant if K is raised).
- * g_line[LINE_CAP] grows 288 B of static RAM - trivial on the nRF52840's 256 KB. */
-#define CONFIG_CDC_LINE_CAP 768
+/* Inbound RX line buffer cap (config_cdc.c). Must hold the LONGEST request frame.
+ * v9 (PROFILE_VERSION 9) is a 1038-byte profile -> 1384-char base64, so a `write`
+ * frame is 1384 + a 45-char JSON wrapper = 1429, + '\0' = 1430. The old 768 cap
+ * (sized for the v7 592-char frame) silently drops a v9 write and resyncs, so a
+ * bench flash "succeeds" yet stores nothing. 1536 covers 1430 with headroom.
+ * g_line[LINE_CAP] costs 1536 B of static RAM - trivial on the nRF52840's 256 KB. */
+#define CONFIG_CDC_LINE_CAP 1536
+
+/* Outbound response scratch cap (config_cdc.c g_resp[]). Must hold the LONGEST
+ * reply frame. At v9 that is read_r: 1384-char base64 profile + 56-char wrapper =
+ * 1440, + '\0' = 1441, which now exceeds the pre-v9 list_r worst case (1184).
+ * 1536 covers it with headroom. */
+#define CONFIG_CDC_RESP_CAP 1536
 
 int  config_cdc_init(void);                       /* bind the CDC uart, start RX */
 void config_cdc_poll(void);                       /* call from main loop: drain RX, dispatch lines */
