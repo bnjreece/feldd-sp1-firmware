@@ -16,6 +16,9 @@ void combo_latch_init(combo_latch_t *l){ l->latched = 0; }
 
 static uint8_t combo_action_for(int idx){
     switch (idx){
+    case COMBO_BTN_T1:    return COMBO_BATTERY;
+    case COMBO_BTN_T2:    return COMBO_BRIGHTNESS;
+    case COMBO_BTN_T3:    return COMBO_PANIC;
     case COMBO_BTN_T4:    return COMBO_MODE_TOGGLE;
     case COMBO_BTN_VOLUP: return COMBO_PROFILE_NEXT;
     case COMBO_BTN_VOLDN: return COMBO_PROFILE_PREV;
@@ -31,7 +34,7 @@ struct combo_decision combo_dispatch(combo_latch_t *l, int func_down, int idx, i
     struct combo_decision d = { COMBO_NONE, 0, 0 };
     uint16_t bit = (idx >= 0 && idx < 16) ? (uint16_t)(1u << idx) : 0u;
     if (pressed) {
-        if (func_down && bit && idx >= COMBO_BTN_T4 && idx <= COMBO_BTN_RWD) {
+        if (func_down && bit && idx >= COMBO_BTN_T1 && idx <= COMBO_BTN_RWD) {
             l->latched |= bit;
             d.action = combo_action_for(idx);
             d.consumed = 1;

@@ -37,9 +37,9 @@ static void t_combo_press_maps_and_consumes(void){
     /* func not held: plain button, no consume, no reset_hold */
     combo_latch_init(&l);
     d = combo_dispatch(&l, 0, COMBO_BTN_FWD, 1); assert(d.consumed==0 && d.action==COMBO_NONE && d.reset_hold==0);
-    /* func held but a non-combo idx (PLAY / Track1..3): passthrough */
+    /* func held but a non-combo idx (PLAY, idx 0): passthrough. T1..T3 (idx 1..3)
+       are now the 0.23 utility-row combos, covered by t_combo_utility_row. */
     d = combo_dispatch(&l, 1, 0, 1); assert(d.consumed==0);
-    d = combo_dispatch(&l, 1, 1, 1); assert(d.consumed==0);
 }
 /* mode_toggle flips MIDI<->KEYBOARD; combo T4 fires the toggle exactly once
  * (press only), so no double-toggle. */
@@ -86,6 +86,25 @@ static void t_combo_latch_is_per_index(void){
     assert(rv.consumed==1 && l.latched==0);
 }
 
+/* Feature B (0.23): •• + T1/T2/T3 are now consumed combos returning the utility
+   actions. •• + T4 / Vol / rocker are unchanged; PLAY (idx 0) stays out of range. */
+static void t_combo_utility_row(void)
+{
+    combo_latch_t l; combo_latch_init(&l);
+    struct combo_decision d;
+    d = combo_dispatch(&l, /*func_down*/1, COMBO_BTN_T1, /*pressed*/1);
+    assert(d.consumed == 1 && d.action == COMBO_BATTERY);
+    d = combo_dispatch(&l, 1, COMBO_BTN_T2, 1);
+    assert(d.consumed == 1 && d.action == COMBO_BRIGHTNESS);
+    d = combo_dispatch(&l, 1, COMBO_BTN_T3, 1);
+    assert(d.consumed == 1 && d.action == COMBO_PANIC);
+    d = combo_dispatch(&l, 1, COMBO_BTN_T4, 1);
+    assert(d.consumed == 1 && d.action == COMBO_MODE_TOGGLE);   /* unchanged */
+    combo_latch_t l0; combo_latch_init(&l0);
+    d = combo_dispatch(&l0, 1, /*PLAY*/0, 1);
+    assert(d.consumed == 0 && d.action == COMBO_NONE);          /* PLAY out of range */
+}
+
 int main(void)
 {
     t_combo_press_maps_and_consumes();
@@ -93,6 +112,7 @@ int main(void)
     t_combo_forward_release_after_func_lifts();
     t_combo_reverse_plain_press_then_func();
     t_combo_latch_is_per_index();
+    t_combo_utility_row();
     t_led_pattern_table();
     printf("all mode tests passed\n");
     return 0;

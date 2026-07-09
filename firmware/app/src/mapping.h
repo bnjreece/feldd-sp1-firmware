@@ -44,6 +44,10 @@ uint8_t profile_layer_fader_role(const struct profile *p, int idx, int layer);
  * (UI L2, the historical behavior); explicit values 1..7 are honored. Pure. */
 uint8_t profile_shift_target(const struct profile *p);
 
+/* Home layer the PLAY shift flips to when you are ALREADY on the shift target
+ * (so the momentary shift is never a no-op). Index 0 = UI layer L1. */
+#define SHIFT_HOME 0
+
 /* Feature 4: the LAYER a PLAY-shift build routes buttons/faders through. In
  * shift mode (play_mode 0) a held PLAY momentarily shifts to shift_target (the
  * profile's resolved PLAY shift target, see profile_shift_target); otherwise the

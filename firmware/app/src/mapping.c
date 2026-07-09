@@ -161,5 +161,7 @@ uint8_t profile_shift_target(const struct profile *p) {
  * shift_target momentary shift (0.22: the profile's resolved PLAY shift target);
  * else the engaged gesture layer. Assignable mode (play_mode 1) never shifts. */
 int effective_layer(int play_mode, int play_held, int gesture_layer, int shift_target) {
-    return (play_mode == 0 && play_held) ? shift_target : gesture_layer;
+    if (play_mode == 0 && play_held)
+        return (gesture_layer == shift_target) ? SHIFT_HOME : shift_target;
+    return gesture_layer;
 }

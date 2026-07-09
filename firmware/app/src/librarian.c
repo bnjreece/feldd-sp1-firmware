@@ -127,6 +127,7 @@ static struct profile active_profile;
 static uint8_t        active_within[NUM_MODES];  /* per-mode WITHIN-bank active (0..7 each) */
 static uint8_t        active_mode;               /* current device mode (fast path) */
 static uint8_t        play_mode_cache;            /* Feature 4: 0 shift, 1 assignable */
+static uint8_t        brightness_cache;   /* Feature B: 0 dim (default), 1 full; persisted in LIB_ID_SETTINGS[1] */
 
 /* Build slot `slot`'s default profile into *p.
  *
@@ -592,9 +593,10 @@ int librarian_init(void)
      * the 4-byte header. A device that has never toggled it (-ENOENT) defaults to 0
      * (shift); a present-but-invalid byte also falls back to the default. This is a
      * pure ADD, so no existing device is short-read/reseeded. */
-    uint8_t pr = 0;
-    ssize_t rpr = nvs_read(&fs, LIB_ID_SETTINGS, &pr, sizeof(pr));
-    play_mode_cache = lib_playrole_load(rpr == (ssize_t)sizeof(pr), pr);
+    uint8_t st[2] = { 0, 0 };
+    ssize_t rst = nvs_read(&fs, LIB_ID_SETTINGS, st, sizeof(st));
+    play_mode_cache  = lib_playrole_load(rst >= 1, st[0]);
+    brightness_cache = lib_brightness_load(rst >= 2, st[1]);
 
     /* Load the active profile of the CURRENT mode into the RAM hot copy. The NVS
      * slot it addresses is the GLOBAL index lib_bank_global(mode, within) (0..15).
@@ -784,6 +786,16 @@ int librarian_set_mode(uint8_t m)
     return 0;
 }
 
+/* Feature B (0.23): write the whole 2-byte LIB_ID_SETTINGS record from both RAM
+ * caches ({ play_mode, brightness }). The id-2 record grows from 1 to 2 bytes; the
+ * 4-byte lib_header is never touched (so no short-read reseed/wipe). */
+static int settings_write(void)
+{
+    uint8_t st[2] = { play_mode_cache, brightness_cache };
+    ssize_t w = nvs_write(&fs, LIB_ID_SETTINGS, st, sizeof(st));
+    return (w == (ssize_t)sizeof(st)) ? 0 : -1;
+}
+
 uint8_t librarian_play_mode(void)
 {
     return play_mode_cache;   /* RAM copy — never hits flash */
@@ -803,10 +815,19 @@ int librarian_set_play_mode(uint8_t v)
     if (v == play_mode_cache) {
         return 0;             /* no-op: don't burn an NVS write */
     }
-    ssize_t w = nvs_write(&fs, LIB_ID_SETTINGS, &v, sizeof(v));
-    if (w < 0) {
-        return (int)w;
-    }
     play_mode_cache = v;
-    return 0;
+    return settings_write();
+}
+
+uint8_t librarian_brightness(void)
+{
+    return brightness_cache;   /* RAM copy */
+}
+
+int librarian_set_brightness(uint8_t v)
+{
+    if (v > 1u) return -1;
+    if (v == brightness_cache) return 0;
+    brightness_cache = v;
+    return settings_write();
 }

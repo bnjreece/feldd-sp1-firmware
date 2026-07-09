@@ -61,7 +61,11 @@ uint8_t mode_led_pattern(int mode);
  * genuine flip fired once on the press so Keyboard stays reachable and cannot
  * double-fire. */
 enum combo_action { COMBO_NONE=0, COMBO_MODE_TOGGLE=1, COMBO_PROFILE_NEXT=2,
-                    COMBO_PROFILE_PREV=3, COMBO_LAYER_NEXT=4, COMBO_LAYER_PREV=5 };
+                    COMBO_PROFILE_PREV=3, COMBO_LAYER_NEXT=4, COMBO_LAYER_PREV=5,
+                    COMBO_BATTERY=6, COMBO_BRIGHTNESS=7, COMBO_PANIC=8 };
+#define COMBO_BTN_T1 1
+#define COMBO_BTN_T2 2
+#define COMBO_BTN_T3 3
 #define COMBO_BTN_T4 4
 #define COMBO_BTN_VOLUP 5
 #define COMBO_BTN_VOLDN 6

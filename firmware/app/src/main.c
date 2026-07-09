@@ -62,6 +62,7 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
              "layer count-dial ceiling must reach the top layer");
 
 #include "side_led.h"
+#include "panic.h"
 #include "wdt.h"
 #include "chord_engine.h"
 #include "led_override.h"
@@ -630,6 +631,10 @@ int main(void)
     int lib_rc = librarian_init();
     printk("LIB init rc=%d active=%d\n", lib_rc, librarian_active_index());
 
+    /* Feature B (0.23): apply the persisted LED brightness. The charge-standby gate
+     * left us at the ambient default, so honor a user "full" preference here. */
+    led_set_brightness(librarian_brightness() ? LED_BRIGHTNESS_FULL : LED_BRIGHTNESS_DEFAULT);
+
     /* M6.2: bind the CDC console as the JSON-lines config protocol channel and
      * start its line reader. From here on the control loop calls
      * config_cdc_poll() each tick to service host requests and emits monitor
@@ -698,6 +703,11 @@ int main(void)
      * the deleted blocking mode_confirm_chase(). */
     int           mode_flash_ticks  = 0;
     unsigned char mode_flash_mode   = 0;
+    /* Feature B (0.23): ••+T3 MIDI-panic confirm flash. >0 lights ALL track + side
+     * LEDs for a brief window (highest LED priority), counted down per tick like the
+     * mode flash. */
+    int           g_panic_flash_ticks = 0;
+    const int     PANIC_FLASH_TICKS   = 4;   /* brief all-LED panic confirm flash */
     /* "Calm middle" tunables (A/B on hardware without code surgery, per the
      * approved decision). MODE_FLASH_TICKS = flash window length (~150 ticks ~=
      * 1.2 s @ ~8 ms/tick). MODE_FLASH_STYLE = 0 PULSE (solid pattern the whole
@@ -902,6 +912,29 @@ int main(void)
                             g_takeover_arm[fi] = 1;
                         }
                         break;
+                    case COMBO_BRIGHTNESS: {
+                        /* Feature B (0.23): ••+T2 toggles the persisted LED brightness
+                         * (0 dim <-> 1 full) and applies it live. */
+                        uint8_t nb = librarian_brightness() ? 0u : 1u;
+                        librarian_set_brightness(nb);
+                        led_set_brightness(nb ? LED_BRIGHTNESS_FULL : LED_BRIGHTNESS_DEFAULT);
+                        break;
+                    }
+                    case COMBO_PANIC: {
+                        /* Feature B (0.23): ••+T3 sends the MIDI panic set (CC
+                         * 120/121/123 on all 16 channels) and arms the confirm flash. */
+                        struct midi_msg pm[48];
+                        int pn = panic_fill(pm, 48);
+                        for (int i = 0; i < pn; i++) {
+                            midi_out_send(&pm[i], NULL);
+                        }
+                        g_panic_flash_ticks = PANIC_FLASH_TICKS;
+                        break;
+                    }
+                    case COMBO_BATTERY:
+                        /* Feature B (0.23): ••+T1 is a HELD display, rendered in the
+                         * LED block below, not an edge action. */
+                        break;
                     default:
                         break;
                     }
@@ -955,25 +988,48 @@ int main(void)
         }
 
         /* TRACK-row (FRONT) render — strict per-tick priority, re-derived every
-         * tick (0.9.1 LED redesign, spec §4; Feature 4 retargets the peek). The
-         * front row is the func-mode PROFILE PEEK + plain PRESS-FEEDBACK surface;
-         * the LAYER lives on the SIDE row below. Highest priority wins:
-         *   1. DFU all-4-solid  — handled by enter_dfu() above (never returns).
-         *   2. FUNC-mode PROFILE PEEK — while •• is held (func_down), show the
+         * tick (0.9.1 LED redesign, spec §4; Feature 4 retargets the peek; 0.23 adds
+         * the •• utility row on top). The front row is the func-mode PROFILE PEEK +
+         * plain PRESS-FEEDBACK surface; the LAYER lives on the SIDE row below.
+         * Highest priority wins:
+         *   0. PANIC confirm flash (0.23) - while g_panic_flash_ticks > 0, light ALL
+         *      track + side LEDs, a brief transient acknowledging ••+T3.
+         *   1. ••+T1 BATTERY peek (0.23) - while •• is held and Track 1 is committed,
+         *      show the battery gauge on the SIDE row (below) and keep the track row
+         *      dark, so the profile peek does not also draw.
+         *   2. DFU all-4-solid  - handled by enter_dfu() above (never returns).
+         *   3. FUNC-mode PROFILE PEEK - while •• is held (func_down), show the
          *      current within-bank profile LIVE (dial_profile_peek_pattern renders
          *      active_index+1: 1-4 solid, 5-8 solid+blink). The old •• burst dial +
          *      confirm-flash peek path is GONE (both count-dials retired, Feature 4).
-         *   3. PRESS feedback (PLAIN) — when a Track button is committed, light ONLY
+         *   4. PRESS feedback (PLAIN) - when a Track button is committed, light ONLY
          *      that button's own front LED (on = i == pressed_idx). The ladder reads
          *      one button at a time -> at most one Track held (spec §4).
-         *   4. ALL-DARK at rest — the layer lives on the side row now, so the front
+         *   5. ALL-DARK at rest - the layer lives on the side row now, so the front
          *      row is the intended calm idle (all off) when nothing is pressed. */
         const uint32_t track_leds[4] = {
             SP1_TRACK_LED1, SP1_TRACK_LED2, SP1_TRACK_LED3, SP1_TRACK_LED4
         };
+        /* 0.23 •• utility-row peeks, captured once so the side-row render below agrees
+         * with this block within the tick. ••+T1 (Track 1 committed) = battery peek. */
+        int panic_active = (g_panic_flash_ticks > 0);
+        int batt_peek    = (func_down && buttons_track_committed() == 1);
 
-        if (func_down) {
-            /* Priority 2: func-mode profile peek owns the whole track row. Single
+        if (panic_active) {
+            /* Priority 0: MIDI-panic confirm flash - ALL track + side LEDs on. The
+             * side-row render below skips while panic_active so this is not overdrawn. */
+            for (int i = 0; i < 8; i++) {
+                led_idx(i, true);
+            }
+            g_panic_flash_ticks--;
+        } else if (batt_peek) {
+            /* Priority 1: ••+T1 battery peek. The gauge draws on the SIDE row (below);
+             * keep the track row dark so the profile peek does not also draw. */
+            for (int i = 0; i < 4; i++) {
+                led_pin(track_leds[i], false);
+            }
+        } else if (func_down) {
+            /* Priority 3: func-mode profile peek owns the whole track row. Single
              * decode point shared with the host test (dial_profile_peek_pattern);
              * live scan tick drives the 5-8 blink phase. */
             unsigned char out[4];
@@ -1025,7 +1081,15 @@ int main(void)
          * layers (e.g. L2 solid vs L6 blink), so no new cadence is needed.
          * (0.22 Feature 2, spec 2026-07-08-feldd-022.) */
         unsigned char side_layer = (unsigned char)layer_now;
-        {
+        if (panic_active) {
+            /* Side LEDs are already lit by the panic confirm flash above; do not
+             * overdraw them this tick (they stay on for the flash window). */
+        } else if (batt_peek) {
+            /* 0.23 ••+T1 battery peek: draw the stock-style charge gauge on the side
+             * row (the same call the charge-standby gate uses); clears on release when
+             * the normal layer render resumes. */
+            charge_gauge(battery_pct(controls_read_raw(6)), charging(), tick);
+        } else {
             unsigned char side_out[4];
             side_led_pattern(side_layer, (unsigned int)mode_flash_ticks,
                              mode_flash_mode, (MODE_FLASH_STYLE == 1),

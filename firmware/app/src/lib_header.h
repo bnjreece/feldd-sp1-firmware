@@ -72,4 +72,13 @@ static inline uint8_t lib_playrole_load(int present, uint8_t stored){
     return (present && lib_playrole_valid(stored)) ? stored : LIB_PLAYROLE_DEFAULT;
 }
 
+/* Feature B (0.23): persisted LED brightness level. 0 = dim (default), 1 = full.
+ * Stored in LIB_ID_SETTINGS byte [1] (byte [0] is play_mode). A legacy 1-byte
+ * record or a missing record decodes as the default, so no device is reseeded. */
+#define LIB_BRIGHTNESS_DEFAULT 0u
+static inline int     lib_brightness_valid(uint8_t v){ return v <= 1u; }
+static inline uint8_t lib_brightness_load(int present, uint8_t stored){
+    return (present && lib_brightness_valid(stored)) ? stored : LIB_BRIGHTNESS_DEFAULT;
+}
+
 #endif /* LIB_HEADER_H */

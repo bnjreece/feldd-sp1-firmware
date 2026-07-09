@@ -352,6 +352,19 @@ static void t_effective_layer_shift_vs_assignable(void){
     assert(effective_layer(0, 1, 0, profile_shift_target(&p)) == 5);   /* explicit 5 */
 }
 
+/* Feature A (0.23): the PLAY shift is never a no-op. On the target layer, holding
+   PLAY flips to home (L1 = index 0); elsewhere it goes to the target; assignable
+   (play_mode 1) never shifts. */
+static void t_effective_layer_toggle(void)
+{
+    assert(effective_layer(0, 1, 3, 3) == 0);  /* on target -> home L1 */
+    assert(effective_layer(0, 1, 0, 3) == 3);  /* on home -> target */
+    assert(effective_layer(0, 1, 5, 3) == 3);  /* elsewhere -> target */
+    assert(effective_layer(0, 0, 5, 3) == 5);  /* not held -> gesture layer */
+    assert(effective_layer(1, 1, 3, 3) == 3);  /* assignable never shifts */
+    assert(effective_layer(1, 1, 0, 3) == 0);
+}
+
 int main(void){ t_fader_cc();t_fader_invert();t_fader_range();t_fader_shift_bank();
     t_button_note();t_button_cc_momentary();t_button_none_silent();
     t_fader_curve_log();t_fader_curve_exp();t_button_toggle_engine_silent();
@@ -366,4 +379,5 @@ int main(void){ t_fader_cc();t_fader_invert();t_fader_range();t_fader_shift_bank
     t_fader_role_accessor();
     t_profile_shift_target();
     t_effective_layer_shift_vs_assignable();
+    t_effective_layer_toggle();
     printf("all mapping tests passed\n"); return 0; }

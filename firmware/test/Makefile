@@ -1,6 +1,6 @@
 SRC=../app/src
 CFLAGS=-Wall -Wextra -I$(SRC)
-TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override test_nvs_erase test_btn_toggle test_cc_value
+TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override test_nvs_erase test_btn_toggle test_cc_value test_panic
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
 test_control_logic: test_control_logic.c $(SRC)/control_logic.c $(SRC)/control_logic.h
@@ -24,6 +24,8 @@ test_led_dial: test_led_dial.c $(SRC)/dial.c $(SRC)/dial.h
 	$(CC) $(CFLAGS) -o $@ test_led_dial.c $(SRC)/dial.c
 test_mode: test_mode.c $(SRC)/mode.c $(SRC)/mode.h
 	$(CC) $(CFLAGS) -o $@ test_mode.c $(SRC)/mode.c
+test_panic: test_panic.c $(SRC)/panic.c $(SRC)/panic.h $(SRC)/mapping.h
+	$(CC) $(CFLAGS) -o $@ test_panic.c $(SRC)/panic.c
 test_side_led: test_side_led.c $(SRC)/side_led.c $(SRC)/side_led.h $(SRC)/mode.c $(SRC)/mode.h $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/cc_value.c $(SRC)/cc_value.h $(SRC)/profile.h
 	$(CC) $(CFLAGS) -o $@ test_side_led.c $(SRC)/side_led.c $(SRC)/mode.c $(SRC)/mapping.c $(SRC)/chord6.c $(SRC)/cc_value.c
 test_lib_header: test_lib_header.c $(SRC)/lib_header.h $(SRC)/lib_bank.h $(SRC)/seed_cadence.h $(SRC)/mode.h $(SRC)/profile.h

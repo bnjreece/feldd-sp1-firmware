@@ -232,9 +232,21 @@ static void t_playrole_policy_and_header_size(void){
     assert(!lib_playrole_valid(2) && !lib_playrole_valid(255));
 }
 
+/* Feature B (0.23): brightness persistence. Absent (legacy 1-byte record or ENOENT)
+   -> default dim (0); a present valid byte round-trips; a present invalid byte -> default. */
+static void t_brightness_load(void)
+{
+    assert(lib_brightness_load(0, 0) == LIB_BRIGHTNESS_DEFAULT);  /* absent -> default */
+    assert(lib_brightness_load(1, 0) == 0);                        /* present dim */
+    assert(lib_brightness_load(1, 1) == 1);                        /* present full */
+    assert(lib_brightness_load(1, 9) == LIB_BRIGHTNESS_DEFAULT);   /* invalid -> default */
+    assert(LIB_BRIGHTNESS_DEFAULT == 0);                           /* default is dim */
+}
+
 int main(void)
 {
     t_playrole_policy_and_header_size();
+    t_brightness_load();
     t_per_mode_active_is_independent();
     t_mode_field_does_not_clobber_actives();
     t_header_survives_remount();

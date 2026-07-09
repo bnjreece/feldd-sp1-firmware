@@ -30,4 +30,4 @@ include(${ZEPHYR_BASE}/samples/subsys/usb/common/common.cmake)
 # boot-keyboard report builder. main.c now latches press/release edges into it and
 # sends usb_hid_send_report() so a held button holds its key (host OS auto-repeats),
 # so it must be in the image — host-test-only (firmware/test) until this wiring.
-target_sources(app PRIVATE src/main.c src/control_logic.c src/controls.c src/buttons.c src/mapping.c src/cc_value.c src/midi_out.c src/usbdev.c src/usb_midi1.c src/usb_hid.c src/kbd_hid.c src/midi1_codec.c src/transport.c src/librarian.c src/profile.c src/protocol.c src/config_cdc.c src/config_cdc_fmt.c src/gesture.c src/mode.c src/dial.c src/side_led.c src/chord_engine.c src/chord6.c src/led_override.c src/led.c)
+target_sources(app PRIVATE src/main.c src/control_logic.c src/controls.c src/buttons.c src/mapping.c src/cc_value.c src/midi_out.c src/usbdev.c src/usb_midi1.c src/usb_hid.c src/kbd_hid.c src/midi1_codec.c src/transport.c src/librarian.c src/profile.c src/protocol.c src/config_cdc.c src/config_cdc_fmt.c src/gesture.c src/mode.c src/panic.c src/dial.c src/side_led.c src/chord_engine.c src/chord6.c src/led_override.c src/led.c)
