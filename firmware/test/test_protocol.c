@@ -74,6 +74,9 @@ static int mock_set_mode(uint8_t m)
     g_mode = m;
     return 0;
 }
+static uint8_t g_playrole;
+static uint8_t mock_get_playrole(void){ return g_playrole; }
+static int mock_set_playrole(uint8_t v){ if (v > 1) return -1; g_playrole = v; return 0; }
 
 static struct proto_store make_store(void)
 {
@@ -86,6 +89,8 @@ static struct proto_store make_store(void)
     s.reset_all = mock_reset_all;
     s.get_mode = mock_get_mode;
     s.set_mode = mock_set_mode;
+    s.get_playrole = mock_get_playrole;
+    s.set_playrole = mock_set_playrole;
     s.profiles = MOCK_PROFILES;        /* 16 global slots (read/write/reset axis) */
     s.bank_profiles = MOCK_BANK;       /* 8 within-bank slots (setactive axis) */
     s.faders = NUM_FADERS;
@@ -99,6 +104,7 @@ static void reset_store(void)
 {
     memset(g_arr, 0, sizeof g_arr);
     g_mode = 0;
+    g_playrole = 0;
     g_active_within[0] = 0;
     g_active_within[1] = 0;
     g_fail_write = 0;
@@ -193,13 +199,13 @@ static void t_read(void)
     reset_store();
     g_arr[0] = make_full_profile();
     struct proto_store s = make_store();
-    char out[1024];  /* v8 read_r carries a 704-char b64 payload */
+    char out[1500];  /* v9 read_r carries a 1384-char b64 payload */
     int rc = proto_handle(&s, "{\"t\":\"read\",\"i\":2,\"n\":0}", out, (int)sizeof out, NULL);
     assert(rc > 0);
     assert(strstr(out, "\"t\":\"read_r\""));
     assert(strstr(out, "\"n\":0"));
     assert(strstr(out, "\"i\":2"));
-    char b64[800];
+    char b64[1500];   /* v9 profile encodes to a 1384-char b64 payload */
     int n = extract_str_field(out, "data", b64, (int)sizeof b64);
     assert(n > 0);
     struct profile got;
@@ -214,10 +220,10 @@ static void t_write(void)
     reset_store();
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
-    char b64[800];
+    char b64[1500];   /* v9 profile encodes to a 1384-char b64 payload */
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[1024];  /* v8 write carries a 704-char b64 payload */
+    char line[1500];  /* v9 write carries a 1384-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":3,\"n\":2,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
@@ -250,10 +256,10 @@ static void t_write_bad_version(void)
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
     p.version = PROFILE_VERSION + 1;   /* still encodes to the right length */
-    char b64[800];
+    char b64[1500];   /* v9 profile encodes to a 1384-char b64 payload */
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[1024];  /* v8 write carries a 704-char b64 payload */
+    char line[1500];  /* v9 write carries a 1384-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":8,\"n\":1,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
@@ -301,7 +307,7 @@ static void t_setactive_within_vs_global_bounds(void)
     struct proto_store s = make_store();
     s.profiles = 16;          /* two banks of 8 (global slots 0..15) */
     s.bank_profiles = 8;      /* the current mode's bank (within 0..7) */
-    char out[1024];           /* v8 read_r carries a 704-char b64 payload */
+    char out[1500];           /* v9 read_r carries a 1384-char b64 payload */
 
     /* within edge: n=7 is the last valid within index -> OK. */
     int rc = proto_handle(&s, "{\"t\":\"setactive\",\"i\":1,\"n\":7}", out, (int)sizeof out, NULL);
@@ -410,7 +416,7 @@ static void t_monset_result_flag(void)
  * a top-level mode + a within-mode active. The web shows both banks together;
  * bank 0 = MIDI (global 0..7), bank 1 = Keyboard (global 8..15). Names are
  * decoded straight from profile.name[16] (NOT base64). The whole 16-entry
- * response must fit the firmware's g_resp buffer (now 1280; see
+ * response must fit the firmware's g_resp buffer (now 1536; see
  * t_list_worst_case_fits_g_resp for the all-escaped worst case). */
 static void t_list_all_banks(void)
 {
@@ -455,10 +461,10 @@ static void t_read_write_other_bank(void)
     reset_store();
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
-    char b64[800];
+    char b64[1500];   /* v9 profile encodes to a 1384-char b64 payload */
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[1024];  /* v8 write carries a 704-char b64 payload */
+    char line[1500];  /* v9 write carries a 1384-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":3,\"n\":15,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
@@ -519,7 +525,7 @@ static void t_list_hostile_name(void)
  * -1 and the host could not enumerate profiles at all. This pins the response to
  * fit the real firmware g_resp size. Keep this constant in lockstep with
  * config_cdc.c::g_resp. */
-#define G_RESP_SIZE 1280   /* mirror of config_cdc.c g_resp[1280] */
+#define G_RESP_SIZE 1536   /* mirror of config_cdc.c g_resp[CONFIG_CDC_RESP_CAP] */
 static void t_list_worst_case_fits_g_resp(void)
 {
     reset_store();
@@ -588,10 +594,10 @@ static void t_nvs_fail_write(void)
     g_fail_write = 1;
     struct proto_store s = make_store();
     struct profile p = make_full_profile();
-    char b64[800];
+    char b64[1500];   /* v9 profile encodes to a 1384-char b64 payload */
     int bn = profile_to_b64(&p, b64, (int)sizeof b64);
     assert(bn > 0);
-    char line[1024];  /* v8 write carries a 704-char b64 payload */
+    char line[1500];  /* v9 write carries a 1384-char b64 payload */
     snprintf(line, sizeof line, "{\"t\":\"write\",\"i\":11,\"n\":0,\"data\":\"%s\"}", b64);
     char out[512];
     int rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
@@ -772,9 +778,25 @@ static void t_mode_get_set(void)
     assert(strstr(out, "\"t\":\"err\"") && strstr(out, "BAD_VALUE"));
 }
 
+/* 19. playrole get/set/bad-value (Feature 4, mirrors the mode verb). */
+static void t_playrole_verb(void)
+{
+    reset_store();
+    g_playrole = 0;
+    struct proto_store s = make_store();
+    char out[256];
+    proto_handle(&s, "{\"t\":\"playrole\",\"i\":1}", out, sizeof out, NULL);
+    assert(strstr(out, "\"t\":\"playrole_r\"") && strstr(out, "\"v\":0"));
+    proto_handle(&s, "{\"t\":\"playrole\",\"i\":2,\"v\":1}", out, sizeof out, NULL);
+    assert(strstr(out, "\"v\":1") && g_playrole == 1);
+    proto_handle(&s, "{\"t\":\"playrole\",\"i\":3,\"v\":2}", out, sizeof out, NULL);
+    assert(strstr(out, "BAD_VALUE"));   /* v>1 rejected */
+}
+
 int main(void)
 {
     t_hello();
+    t_playrole_verb();
     t_read();
     t_write();
     t_write_bad_len();

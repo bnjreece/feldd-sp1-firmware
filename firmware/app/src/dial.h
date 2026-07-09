@@ -85,4 +85,12 @@ dial_result_t dial_step(dial_t *d, int tap_edge);
 void dial_track_pattern(unsigned char count, unsigned char tick,
                         unsigned char out[4]);
 
+/* Feature 4: render the FUNC-mode profile peek on the TRACK row. The active
+ * profile index (0-based) renders as its 1-based profile number via
+ * dial_track_pattern (index 2 -> profile 3 = 3 solid; index 5 -> profile 6 =
+ * blink). Single decode point shared by main.c's func_down peek and the host
+ * test so they can never drift. */
+void dial_profile_peek_pattern(unsigned char active_index, unsigned char tick,
+                               unsigned char out[4]);
+
 #endif /* DIAL_H */

@@ -37,6 +37,7 @@
 #include "profile.h"
 #include "mapping.h"
 #include "btn_toggle.h"
+#include "cc_value.h"
 #include "transport.h"
 #include "midi_out.h"
 #include "usbdev.h"
@@ -50,17 +51,15 @@
 #include "dial.h"
 #include "mode.h"
 
-/* Coupling guards (spec §2.4 / §4.2): the layer count-dial ceiling, the gesture
- * layer ceiling, and the profile's per-layer storage MUST agree, and the mode-flip
- * arm plateau MUST equal the peek plateau, or a divergence silently strands the top
- * layers or flips mode on a quick tap. These are two independent literals in two
- * headers today with no cross-check. */
+/* Coupling guards (spec §2.4 / §4.2): the gesture layer ceiling and the profile's
+ * per-layer storage MUST agree, or a divergence silently strands the top layers.
+ * Feature 4 retired the mode-flip-arm-plateau == peek-plateau coupling: the
+ * dot-dot+T4 mode flip is now a genuine combo toggle (mode.c combo_dispatch), not a
+ * hold-plateau gesture, so MODE_FLIP_ARM_SCANS / PEEK_HOLD_SCANS no longer exist. */
 BUILD_ASSERT(GESTURE_LAYER_COUNT == NUM_LAYERS,
              "layer count must equal NUM_LAYERS");
 BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
              "layer count-dial ceiling must reach the top layer");
-BUILD_ASSERT(MODE_FLIP_ARM_SCANS == PEEK_HOLD_SCANS,
-             "mode-flip arm plateau must match the peek plateau");
 
 #include "side_led.h"
 #include "wdt.h"
@@ -68,15 +67,11 @@ BUILD_ASSERT(MODE_FLIP_ARM_SCANS == PEEK_HOLD_SCANS,
 #include "led_override.h"
 #include "led.h"
 
-/* TEMPORARY shift-layer test trigger (set to 0 to restore stock behaviour).
- * When 1: double-tapping PLAY (button index 0) latches the shift bank on/off,
- * and PLAY does nothing else (its normal mapping is never emitted). This keeps
- * the shift trigger off the overloaded •• button so it can be validated on the
- * bench without colliding with •• tap(next-profile)/hold(power-off). It is
- * expected to move to its own gesture after testing. See gesture.c. */
-#ifndef FELDD_SHIFT_TRIGGER_PLAY
-#define FELDD_SHIFT_TRIGGER_PLAY 1
-#endif
+/* Feature 4: PLAY is the shift/assignable control and •• is the Fn-modifier; the
+ * behavior is now a RUNTIME branch on play_mode (librarian_play_mode()), not a
+ * build-time trigger. The old FELDD_SHIFT_TRIGGER_PLAY compile switch + its stock
+ * (PLAY-maps-normally) arm are retired; the single arm below always treats PLAY as
+ * shift-by-default (hold = momentary L2) or assignable when play_mode == 1. */
 
 /* M5.2: the active profile that drives the mapping engine now comes from the
  * NVS-backed librarian (librarian.c), not a hardcoded g_default. The librarian
@@ -99,6 +94,15 @@ static fader_t g_fader[NUM_FADERS];
  *     through transport.c's pure transport_rt() (a play/stop toggle keys off it). */
 static struct btn_toggle g_btn_toggle;   /* per-LAYER, per-button latched toggles (BSS zero-init) */
 static int     g_transport_playing;
+
+/* Feature 4: dot-dot (••) Fn-modifier combo latch (per-index consume-both-edges,
+ * mode.c combo_dispatch) + the per-button press-time layer latch (stuck-note-
+ * across-springback fix: a NOTE pressed on shift-L2 releases its Note-Off on L2
+ * even after PLAY springs back) + the previous-tick PLAY-held state (edge-arm the
+ * fader soft-takeover on shift enter/exit so faders never jump). BSS zero-init. */
+static combo_latch_t g_combo;
+static uint8_t       g_btn_press_layer[NUM_BUTTONS];
+static int           g_play_held_prev;
 
 /* v7 chord latch state. Per-button (NUM_BUTTONS) so the two-ladder case (a chord
  * held on EACH ladder) latches independently - do NOT use a single shared latch.
@@ -283,31 +287,6 @@ static void enter_dfu(void)
     for (;;) { }
 }
 
-/* Track-row profile/dial render (spec §8 + §4). The old profile_blink() was a
- * BLOCKING k_msleep chase (up to ~960 ms for an 8-count) that dropped MIDI/fader
- * edges while it slept — fatal once we need to COUNT •• taps (you can't count
- * while sleeping; spec §8 "Mandatory prerequisite"). It is now a per-tick render:
- * the control loop calls this every iteration while a dial burst is active OR a
- * post-commit CONFIRM flash is counting down, passes the live dial count + scan
- * tick, and dial_track_pattern() (the host-tested pure mapping) hands back the
- * 4-LED on/off state for THIS tick. Non-blocking, re-derived every tick, on the
- * FRONT/track row only — the SIDE row (layer + mode-flash, 0.9.1) is a separate
- * writer, so the two rows never collide (spec §8). */
-static void profile_track_render(unsigned char count, unsigned char tick)
-{
-    const uint32_t leds[4] = {
-        SP1_TRACK_LED1, SP1_TRACK_LED2, SP1_TRACK_LED3, SP1_TRACK_LED4
-    };
-    unsigned char out[4];
-    dial_track_pattern(count, tick, out);
-    for (int i = 0; i < 4; i++) {
-        if (out[i]) {
-            led_pin(leds[i], true);
-        } else {
-            led_pin(leds[i], false);
-        }
-    }
-}
 
 /* (0.9.1 LED redesign) The old BLOCKING mode_confirm_chase() directional LED
  * chase is DELETED. A mode flip no longer runs a ~480 ms k_msleep chase on the
@@ -587,6 +566,23 @@ static int route_midi_button(int idx, int pressed, int layer_now)
         }
         return 0;
     }
+    case BTN_CC_VALUE: {
+        /* Feature 1: this button REUSES its chord6 slot for {sub,on,off}; branching
+         * here (before BTN_CHORD) guarantees the CC-value bytes are NEVER fed to the
+         * chord engine. cc_value_decide owns the 3 sub-modes and threads the shared
+         * g_btn_toggle latch for the toggle sub-mode. The CC NUMBER rides `value`. */
+        uint8_t sub, on, off, d2;
+        if (profile_layer_ccval(p, idx, layer_now, &sub, &on, &off) != 0) return 0;
+        if (!cc_value_decide(sub, pressed, on, off, &g_btn_toggle, layer_now, idx, &d2)) return 0;
+        struct midi_msg m = {
+            .status = (uint8_t)(0xB0 | (profile_layer_button_channel(p, idx, layer_now) & 0x0F)),
+            .d1     = profile_layer_button_value(p, idx, layer_now),   /* CC number stays in `value` */
+            .d2     = d2,
+            .len    = 3,
+        };
+        midi_out_send(&m, NULL);
+        return 0;
+    }
     /* Stateless types (and NONE): the pure engine still owns these. map_button
      * emits NOTE on press/release and CC_MOMENTARY 127/0 on press/release. */
     case BTN_NOTE: case BTN_CC_MOMENTARY: case BTN_NONE: default:
@@ -680,49 +676,19 @@ int main(void)
      * site having to remember to do it. Seed from the boot-loaded active index
      * so the first loop iteration doesn't spuriously re-arm. */
     uint8_t last_active = librarian_active_index();
-#if FELDD_SHIFT_TRIGGER_PLAY
-    /* PLAY peek/mode gesture FSM (test trigger). Pure state machine in gesture.c;
-     * stepped once per tick from the button-scan block below. Layer SELECT no
-     * longer lives here (#61 gesture pass) — it moved to layer_dial (a 2nd dial.c
-     * instance) and commits the engaged layer via gesture_set_layer. */
+    /* PLAY engaged-layer holder (Feature 4). gesture_t now carries ONLY the engaged
+     * layer (the peek FSM is retired): the layer is SET by the ••+FWD/RWD combo
+     * (gesture_set_layer(gesture_layer_step(...))) and READ by the side-row LED +
+     * effective_layer(). PLAY itself is the shift/assignable control, dispatched
+     * per-edge in the evt loop below. */
     gesture_t shift_gesture;
     gesture_init(&shift_gesture);
-    /* PLAY layer count-dial (#61 gesture pass, spec §2) — a SECOND dial.c
-     * instance, reusing the exact burst-timing FSM the •• profile dial uses.
-     * Stepped EVERY tick from the PLAY-scan block below, fed tap_edge=1 only on a
-     * classified short PLAY tap RELEASE (held 1..40 ticks). On commit:
-     *   1 tap (RELATIVE_NEXT) -> layer = (layer+1) % GESTURE_LAYER_COUNT (single
-     *                            tap = +1, wrapping at layer 8)
-     *   2..8 taps (ABSOLUTE)  -> jump to layer count-1 for all 1..8 with no
-     *                            artificial pin (dial.c stays literal-8; the clamp
-     *                            ceiling is GESTURE_LAYER_COUNT-1 = 7, so >=9 taps
-     *                            pin to the top layer).
-     * play_held_ticks is the PLAY tap CLASSIFIER's own hold counter (mirrors the
-     * •• `held` counter): a PLAY press released in 1..40 ticks is a layer-dial
-     * tap; a longer hold is the peek/mode gesture (gesture.c) and the bands are
-     * disjoint (tap <= 40, peek arms at 75). */
-    dial_t   layer_dial;
-    dial_init(&layer_dial);
-    uint32_t play_held_ticks = 0;
-#endif
+    /* dot-dot (••) Fn-modifier combo latch (per-index consume-both-edges). */
+    combo_latch_init(&g_combo);
     /* v5: per-fader, per-LAYER soft-takeover pickup memory. Statics already zero
      * (valid=0), but init explicitly so the intent is local to the soft-takeover
      * state and survives any future move off file scope. */
     layer_takeover_init(&g_layer_takeover);
-    /* •• count-dial (spec §8). Pure burst FSM in dial.c; stepped EVERY tick from
-     * the •• handler below with tap_edge=1 only on a classified short-tap release.
-     * It owns the relative-vs-absolute decision + the 8-clamp; main.c owns only
-     * the tap CLASSIFIER and the commit-side librarian write. */
-    dial_t dial;
-    dial_init(&dial);
-    /* Track-row dial/CONFIRM display state. While a burst is in flight the loop
-     * renders dial.count live; after a commit it renders the committed index+1
-     * for a short non-blocking CONFIRM flash. dial_disp_count = the count to draw
-     * this tick (0 = nothing, fall back to layer rest); dial_confirm_ticks counts
-     * a post-commit flash down to 0. CONFIRM ~120 ms (spec §8) ~= 15 ticks @ 8 ms. */
-    unsigned char dial_disp_count   = 0;
-    int           dial_confirm_ticks = 0;
-    const int     DIAL_CONFIRM_TICKS = 15;   /* ~120 ms non-blocking CONFIRM flash */
     /* (0.9.1 LED redesign) SIDE-row MODE-FLASH state. The side row permanently
      * shows the LAYER (one LED at gesture_layer()); a successful mode switch arms
      * a brief, NON-BLOCKING flash of the NEW mode's pattern (captured in
@@ -770,12 +736,12 @@ int main(void)
             g_last_dtr = dtr;
         }
 
-        /* •• function button: long hold powers off; short taps feed the count-
-         * dial (spec §8). tap_edge fires for exactly one tick on a classified
-         * short-tap RELEASE; the dial FSM is stepped EVERY tick (below) whether
-         * or not a tap landed, so its inter-tap / commit timers advance. */
+        /* •• function button (Feature 4): it is now the Fn-MODIFIER level, not a
+         * profile count-dial. A BARE hold past 625 ticks (~5 s) powers off; a hold
+         * with ANY consumed combo press does NOT — combo_dispatch resets `held` to
+         * 0 on each consumed press (the clean-hold power-off gate, spec (b)4).
+         * func_down exposes the modifier level to the evt loop + LED peek below. */
         int func_low = (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0);
-        int tap_edge = 0;
         if (!func_armed) {
             /* Not armed yet: ignore •• entirely until it reads released once. */
             if (!func_low) {
@@ -783,59 +749,16 @@ int main(void)
             }
             held = 0;
         } else if (func_low) {
+            /* Accumulate the hold. Only a BARE hold reaches 625: a consumed combo
+             * press resets `held` to 0 in the evt loop below, so ••+combo never
+             * crosses the power-off threshold. */
             if (++held >= 625) {
                 enter_bootloader();   /* never returns (SYSTEM_OFF) */
             }
         } else {
-            /* Release edge. A SHORT tap (held 1..40 ticks, <= ~320 ms) is one
-             * dial tap: classify it and raise tap_edge for this single tick. The
-             * dead band (41..624) does nothing — neither a dial tap nor a
-             * power-off (raised to 625 ticks / ~5 s by the #61 gesture pass, spec
-             * §4; the 75..624 sub-band is RESERVED for a future short-hold
-             * gesture, no action yet). held==0 means the button was never down
-             * this iteration (not a release) so we skip. The TIGHTER <=40 bound
-             * (was <62, spec §8) widens the margin to the power-off hold so rapid
-             * dialing can't bleed into it. */
-            if (held >= 1 && held <= 40) {
-                tap_edge = 1;
-            }
             held = 0;
         }
-
-        /* Step the count-dial FSM once per tick (dial.c, host-tested). It counts
-         * taps, decides relative-vs-absolute, and clamps the count to 8 — main.c
-         * only commits the result to the librarian. */
-        dial_result_t dres = dial_step(&dial, tap_edge);
-        if (dres.kind == DIAL_RELATIVE_NEXT) {
-            /* Lone tap = today's within-bank round-robin (+1). librarian_active_
-             * index() is the WITHIN-bank index (0..7) and librarian_set_active()
-             * takes a WITHIN-bank index, so the cycle wraps inside the bank of 8
-             * (7->0) via lib_bank_cycle() — NOT % NUM_PROFILES (=16), which would
-             * feed 8 into set_active and get -EINVAL, stranding the last profile
-             * of every bank (host-tested test_lib_bank.c::t_cycle_wraps_within_bank). */
-            uint8_t next = lib_bank_cycle(librarian_active_index());
-            if (librarian_set_active(next) == 0) {
-                /* Phase-0 item 4: push the new active profile to any connected
-                 * host immediately, independent of the fader/button monitor flag,
-                 * so the web tool never shows a stale active marker after an
-                 * on-device •• dial. (No printk here: this fires mid-session and
-                 * would inject a non-JSON line into the CDC protocol stream.) */
-                config_cdc_monitor_active(librarian_active_index());
-                /* Arm the non-blocking CONFIRM flash on the track row (the cue
-                 * the old blocking profile_blink used to chase). */
-                dial_confirm_ticks = DIAL_CONFIRM_TICKS;
-            }
-        } else if (dres.kind == DIAL_ABSOLUTE) {
-            /* Burst of 2..8 taps = absolute jump to within-bank profile N. The
-             * dial FSM already clamped count to 8, so count-1 is 0..7 — feed it
-             * DIRECTLY to librarian_set_active(). Spec §8 gotchas: NEVER feed the
-             * raw count (8 -> -EINVAL) and NEVER route through lib_bank_clamp()
-             * (it resets >=8 to 0, silently jumping a stray 8 to profile 1). */
-            if (librarian_set_active((uint8_t)(dres.count - 1)) == 0) {
-                config_cdc_monitor_active(librarian_active_index());
-                dial_confirm_ticks = DIAL_CONFIRM_TICKS;
-            }
-        }
+        int func_down = (func_low && func_armed && held < 625);
 
         /* If the active profile changed this tick (via the •• tap above OR a
          * host setactive/write/reset serviced by config_cdc_poll()), re-arm
@@ -857,18 +780,6 @@ int main(void)
             }
             last_active = now_active;
         }
-
-        /* Layer bank selector for this tick (v5): the 0..3 engaged layer index
-         * from the PLAY double-tap cycle (FELDD_SHIFT_TRIGGER_PLAY), was the
-         * binary gesture_latched (0/1). Read once here — state as of the previous
-         * tick's gesture step — so the faders and the non-PLAY buttons below all
-         * use one consistent value; the layer itself is advanced at the end of the
-         * button-scan block (and arms the faders' soft-takeover on a step). */
-#if FELDD_SHIFT_TRIGGER_PLAY
-        int layer_now = gesture_layer(&shift_gesture);   /* 0..3 */
-#else
-        const int layer_now = 0;
-#endif
 
         /* Scan both ladders FIRST (buttons before faders, like the verified
          * looper). Each edge -> the mapping engine -> TRS MIDI; one scan can emit
@@ -894,232 +805,129 @@ int main(void)
          * RAM hot copy once; a flip in this scan updates it locally so the same-tick
          * render + any later edge already see the new mode. */
         int mode_now = librarian_mode();
-#if FELDD_SHIFT_TRIGGER_PLAY
-        /* PLAY layer-dial tap CLASSIFIER (#61 gesture pass, spec §5; mirrors the
-         * •• classifier). Track how long PLAY has been continuously held using the
-         * SAME debounced source the peek FSM reads (play_held), and on the RELEASE
-         * edge classify a press held 1..40 ticks as one layer-dial tap (play_tap).
-         * A hold past 40 ticks is NOT a tap — it flows to the peek/mode machinery
-         * untouched (peek arms at 75), so the tap and peek/hold bands are disjoint. */
-        int play_tap = 0;
-        if (play_held) {
-            if (play_held_ticks < 0xFFFFFFFFu) {
-                play_held_ticks++;
-            }
-        } else {
-            if (play_held_ticks >= 1 && play_held_ticks <= 40) {
-                play_tap = 1;   /* short PLAY tap release -> feed the layer dial */
-            }
-            play_held_ticks = 0;
-        }
-        /* "A rocker arrived during this PLAY hold" — set on the tick mode_decide
-         * consumes a FWD/RWD (md.consumed). Fed to gesture_step below so the
-         * gesture FSM latches rocker_seen and VOIDS any pending profile peek (a
-         * mode switch is not a peek). This folds in the old explicit
-         * gesture_disarm(&shift_gesture) call (spec §3). */
-        int rocker_consumed_this_hold = 0;
-        for (int i = 0; i < ne; i++) {
-            uint8_t idx = evt[i].idx;
-            int pressed = evt[i].pressed;
-            if (idx == 0) {                  /* PLAY: reserved as the layer-dial/peek trigger */
-                config_cdc_monitor_button(0, pressed);  /* show PLAY pressed */
-                continue;
-            }
-            /* PLAY-held + FWD/RWD = the global mode toggle (spec §5). mode_decide()
-             * owns the pure, modifier-agnostic logic (host-tested in test_mode.c);
-             * here PLAY-held is the modifier. On a consumed edge main.c persists the
-             * new mode, arms the NON-BLOCKING side-row MODE-FLASH (0.9.1), pushes a
-             * mon{k:"mode",v} frame to any host, and flags
-             * rocker_consumed_this_hold so the gesture FSM (stepped after this loop)
-             * VOIDS any pending profile peek and clears a half-formed shift double-tap
-             * — the inline gesture_disarm() is now folded into gesture_step under that
-             * signal (spec §3). The •• power/profile gestures are untouched by a flip. */
-            /* Feed the PLAY hold-tick count so mode_decide gates the flip behind
-             * MODE_FLIP_ARM_SCANS: a short track-select tap (hold < plateau) with a
-             * coincident rocker edge passes through to transport, never a flip
-             * (spec §4.3). play_held_ticks is 0 on release, grows while held. */
-            struct mode_decision md = mode_decide((int)play_held_ticks, idx, pressed);
-            if (md.consumed) {
-                rocker_consumed_this_hold = 1;
-                if (md.set && librarian_set_mode(md.which) == 0) {
-                    mode_now = md.which;
-                    /* A mode flip ends the current Keyboard session: drop any keys
-                     * held at the moment of the flip and send the all-zero key-up so
-                     * nothing sticks on the host (entering Keyboard also starts from
-                     * this clean state). The PLAY+FWD/RWD gesture that triggers the
-                     * flip is consumed above and never enters the held set. */
-                    kbd_state_reset(&g_kbd);
-                    kbd_send_held();
-                    chord_flush_all();   /* v7: a mode flip changes the map; release held chords */
-                    /* (0.9.1) Arm the NON-BLOCKING side-row MODE-FLASH for the NEW
-                     * mode instead of the deleted blocking chase. The per-tick
-                     * side render shows the captured pattern for MODE_FLASH_TICKS,
-                     * then yields back to the permanent layer LED. */
-                    mode_flash_mode  = md.which;
-                    mode_flash_ticks = MODE_FLASH_TICKS;
-                    config_cdc_monitor_mode(md.which);
-                    /* A mode flip switches profile BANK, so the active *profile*
-                     * changed even when the within index did not (e.g. both banks
-                     * resting at within 0). The per-tick now_active!=last_active
-                     * re-arm above keys off the WITHIN index and would miss that,
-                     * so re-arm the faders HERE for the new bank's CCs, clear the
-                     * soft-takeover memory (different profile = different values),
-                     * push the bank's active so the web re-scopes, and reset
-                     * last_active so the next tick doesn't double-rearm. */
-                    config_cdc_monitor_active(librarian_active_index());  /* bank's active */
-                    faders_rearm();                                       /* new bank = new CCs */
-                    for (int fi = 0; fi < NUM_FADERS; fi++) {
-                        g_takeover[fi].pending = 0;
-                        g_takeover_arm[fi] = 0;
-                        layer_takeover_clear_fader(&g_layer_takeover, fi);
-                    }
-                    last_active = librarian_active_index();   /* don't double-rearm next tick */
-                }
-                config_cdc_monitor_button(idx, pressed);  /* still report the edge */
-                continue;
-            }
-            /* Normal routing: KEYBOARD HOLDS the per-button HID key for as long as
-             * the button is physically held (Peter auto-repeat). A press latches
-             * (mod,key) from the keymap into the held set; a release clears it;
-             * after either edge we rebuild + send the full boot-keyboard report, so
-             * the key stays asserted while held and the host OS does the native
-             * typematic repeat (NOT a firmware timer — a real keyboard just holds
-             * the key). An unbound key (0x00) contributes no keycode; an all-zero
-             * report on the last release is the clean key-up. PLAY (idx 0) is the
-             * layer/peek shift trigger and is consumed above (it never reaches here
-             * in this build), so a held PLAY never becomes a typed key.
-             * LAYERS (v5): the same double-tap-PLAY cycle the MIDI path uses
-             * (layer_now, 0..3) selects the per-layer keymap via the mapping
-             * accessors (profile_layer_button_key/mod) — so Keyboard mode gets all
-             * 4 layers exactly like MIDI. The (mod,key) is latched at the PRESS edge
-             * so a layer change mid-hold can't swap or strand a held key. MIDI maps
-             * the button as before. Faders are ALWAYS MIDI (handled below). */
-            if (mode_now == MODE_KEYBOARD) {
-                if (pressed) {
-                    const struct profile *p = librarian_active();
-                    kbd_state_press(&g_kbd, idx,
-                        profile_layer_button_mod(p, idx, layer_now),
-                        profile_layer_button_key(p, idx, layer_now));
-                } else {
-                    kbd_state_release(&g_kbd, idx);
-                }
-                kbd_send_held();
-            } else {
-                /* MIDI: route through the stateful dispatcher (it delegates the
-                 * stateless NOTE/CC_MOMENTARY to map_button and owns the
-                 * TOGGLE/TRANSPORT/PROFILE_SWITCH state). A profile-switch button
-                 * returns 1; the now_active!=last_active block above re-arms the
-                 * faders next tick, so no extra work here. */
-                (void)route_midi_button(idx, pressed, layer_now);
-            }
-            config_cdc_monitor_button(idx, pressed);  /* mon frame */
-        }
-        /* Step the PLAY layer count-dial once per tick (#61 gesture pass, spec §2).
-         * It owns the burst timing (relative-vs-absolute + the inter-tap/commit
-         * windows); main.c owns the tap CLASSIFIER (play_tap, above) and the
-         * commit-side layer write. */
-        dial_result_t ldres = dial_step(&layer_dial, play_tap);
-        if (ldres.kind == DIAL_RELATIVE_NEXT) {
-            /* 1 tap = next layer (relative +1, wrapping at GESTURE_LAYER_COUNT). */
-            int next = (gesture_layer(&shift_gesture) + 1) % GESTURE_LAYER_COUNT;
-            gesture_set_layer(&shift_gesture, next);
-            chord_flush_all();   /* v7: a layer change changes the map; release held chords */
-            /* Layer changed: ARM soft-takeover on every fader (same as the old
-             * GESTURE_LAYER_STEP path) so each fader holds the new bank's last
-             * value until the physical fader CROSSES it — no jump. */
-            for (int i = 0; i < NUM_FADERS; i++) {
-                g_takeover_arm[i] = 1;
-            }
-        } else if (ldres.kind == DIAL_ABSOLUTE) {
-            /* 2..8 taps = absolute jump to layer count-1 (1-indexed like the
-             * profile dial), selecting layer count for all 1..8 with no artificial
-             * pin. CLAMP to GESTURE_LAYER_COUNT-1 = 7 here (spec §4.2: dial.c stays
-             * literal-8, so only a >=9-tap PLAY burst pins to the top layer). */
-            int target = ldres.count - 1;
-            if (target > GESTURE_LAYER_COUNT - 1) {
-                target = GESTURE_LAYER_COUNT - 1;
-            }
-            gesture_set_layer(&shift_gesture, target);
-            chord_flush_all();   /* v7: a layer change changes the map; release held chords */
+        /* Feature 4: PLAY role + the effective routing layer for THIS tick. In
+         * shift mode (play_mode 0) a held PLAY momentarily shifts routing to L2
+         * (effective_layer); assignable mode (play_mode 1) never shifts. The
+         * side-row LED keeps reading the RAW engaged layer (gesture_layer), never
+         * eff_layer (spec (d)). */
+        int play_mode = librarian_play_mode();
+        int layer_now = effective_layer(play_mode, play_held,
+                                        gesture_layer(&shift_gesture));
+        /* Edge-arm fader soft-takeover on shift enter/exit so faders never jump as
+         * PLAY momentarily shifts to/from L2 (shift mode only). */
+        if (play_mode == 0 && play_held != g_play_held_prev) {
             for (int i = 0; i < NUM_FADERS; i++) {
                 g_takeover_arm[i] = 1;
             }
         }
+        g_play_held_prev = play_held;
 
-        /* Advance the PLAY peek/mode gesture FSM once per tick (spec §3): the
-         * DEBOUNCED hold (buttons_track_committed()==0, already in play_held) and
-         * whether a rocker was consumed this hold (which voids a would-be peek).
-         * Layer select moved to layer_dial above; this FSM returns only:
-         *   GESTURE_PEEK_PROFILE - a hold-PLAY-alone released past the peek plateau */
-        int gres = gesture_step(&shift_gesture, play_held,
-                                rocker_consumed_this_hold);
-        if (gres == GESTURE_PEEK_PROFILE) {
-            /* Hold-PLAY-alone peek: flash the CURRENT within-bank profile on the
-             * track row, non-blocking, via the same CONFIRM render the dial uses
-             * (spec §2/§4/§8 — peek and dial share the track row, drawn by
-             * profile_track_render below). We do NOT depend on any unbuilt peek
-             * FSM here; we just re-show the current profile = active index + 1.
-             * dial_disp_count is set below from this; arm the same flash timer. */
-            dial_confirm_ticks = DIAL_CONFIRM_TICKS;
-        }
-#else
         for (int i = 0; i < ne; i++) {
             uint8_t idx = evt[i].idx;
             int pressed = evt[i].pressed;
-            /* PLAY-held + FWD/RWD = the global mode toggle — see the
-             * FELDD_SHIFT_TRIGGER_PLAY arm above for the full rationale. Consume the
-             * edge, persist the mode, arm the NON-BLOCKING side-row MODE-FLASH
-             * (0.9.1), push to the host. (No shift detector in this build, so no
-             * gesture_disarm needed — PLAY maps normally here, not the shift
-             * trigger.) */
-            /* Stock build: PLAY is not the layer-dial trigger here, so there is no
-             * track-select tap to collide with. Arm the flip whenever PLAY is held
-             * (feed the plateau) to keep the pre-gate behavior. */
-            struct mode_decision md = mode_decide(play_held ? MODE_FLIP_ARM_SCANS : 0,
-                                                  idx, pressed);
-            if (md.consumed) {
-                if (md.set && librarian_set_mode(md.which) == 0) {
-                    mode_now = md.which;
-                    /* End the Keyboard session on a mode flip: clear held keys +
-                     * send the all-zero key-up so nothing sticks on the host (same
-                     * as the FELDD_SHIFT_TRIGGER_PLAY arm above). */
-                    kbd_state_reset(&g_kbd);
-                    kbd_send_held();
-                    chord_flush_all();   /* v7: a mode flip changes the map; release held chords */
-                    /* (0.9.1) Arm the NON-BLOCKING side-row MODE-FLASH (same as the
-                     * FELDD_SHIFT_TRIGGER_PLAY arm above) — the deleted blocking
-                     * chase is replaced by the per-tick side render. */
-                    mode_flash_mode  = md.which;
-                    mode_flash_ticks = MODE_FLASH_TICKS;
-                    config_cdc_monitor_mode(md.which);
-                    /* Mode flip switches profile BANK -> active profile changed
-                     * even if the within index didn't; re-arm faders for the new
-                     * bank's CCs, clear soft-takeover memory, push the bank's
-                     * active, and reset last_active so the next tick can't
-                     * double-rearm. (No shift detector in this build -> no
-                     * gesture_disarm, unlike the FELDD_SHIFT_TRIGGER_PLAY arm.) */
-                    config_cdc_monitor_active(librarian_active_index());  /* bank's active */
-                    faders_rearm();                                       /* new bank = new CCs */
-                    for (int fi = 0; fi < NUM_FADERS; fi++) {
-                        g_takeover[fi].pending = 0;
-                        g_takeover_arm[fi] = 0;
-                        layer_takeover_clear_fader(&g_layer_takeover, fi);
+
+            /* dot-dot (••) Fn-modifier combo (spec (a),(b)2): while •• is held, T4
+             * flips MODE, Vol+/- cycle the profile, FWD/RWD step the layer. The
+             * press is latched per index and the matching RELEASE swallowed off the
+             * latch (mode.c combo_dispatch, host-tested test_mode.c), regardless of
+             * the instantaneous •• level at the release edge (spec (h)1). Any
+             * consumed press resets `held` so the •• power-off hold is voided
+             * (clean-hold gate, spec (b)4). The mode flip is a genuine single-fire
+             * toggle (mode_toggle) so Keyboard stays reachable and cannot double-fire
+             * (spec (b)5). This retires mode_decide + the mode.c gesture template. */
+            struct combo_decision cd = combo_dispatch(&g_combo, func_down, idx, pressed);
+            if (cd.reset_hold) {
+                held = 0;
+            }
+            if (cd.consumed) {
+                if (pressed) {
+                    switch (cd.action) {
+                    case COMBO_MODE_TOGGLE: {
+                        uint8_t next = mode_toggle(librarian_mode());
+                        if (librarian_set_mode(next) == 0) {
+                            mode_now = next;
+                            /* End the Keyboard session on a flip: drop held keys +
+                             * send the all-zero key-up so nothing sticks; release
+                             * held chords; arm the NON-BLOCKING side-row MODE-FLASH;
+                             * push the new mode + the bank's active; re-arm faders for
+                             * the new bank's CCs + clear the soft-takeover memory. */
+                            kbd_state_reset(&g_kbd);
+                            kbd_send_held();
+                            chord_flush_all();
+                            mode_flash_mode  = next;
+                            mode_flash_ticks = MODE_FLASH_TICKS;
+                            config_cdc_monitor_mode(next);
+                            config_cdc_monitor_active(librarian_active_index());
+                            faders_rearm();
+                            for (int fi = 0; fi < NUM_FADERS; fi++) {
+                                g_takeover[fi].pending = 0;
+                                g_takeover_arm[fi] = 0;
+                                layer_takeover_clear_fader(&g_layer_takeover, fi);
+                            }
+                            last_active = librarian_active_index();
+                        }
+                        break;
                     }
-                    last_active = librarian_active_index();   /* don't double-rearm next tick */
+                    case COMBO_PROFILE_NEXT:
+                        /* ••+Vol+ : next profile WITHIN the bank (wraps 7->0). The
+                         * now_active!=last_active block above re-arms the faders on
+                         * the next tick. */
+                        if (librarian_set_active(lib_bank_cycle(librarian_active_index())) == 0) {
+                            config_cdc_monitor_active(librarian_active_index());
+                        }
+                        break;
+                    case COMBO_PROFILE_PREV:
+                        /* ••+Vol- : previous profile within the bank (wraps 0->7). */
+                        if (librarian_set_active(lib_bank_cycle_prev(librarian_active_index())) == 0) {
+                            config_cdc_monitor_active(librarian_active_index());
+                        }
+                        break;
+                    case COMBO_LAYER_NEXT:
+                        /* ••+FWD : next layer (relative +1, wrap at 8). */
+                        gesture_set_layer(&shift_gesture,
+                            gesture_layer_step(gesture_layer(&shift_gesture), +1));
+                        chord_flush_all();
+                        for (int fi = 0; fi < NUM_FADERS; fi++) {
+                            g_takeover_arm[fi] = 1;
+                        }
+                        break;
+                    case COMBO_LAYER_PREV:
+                        /* ••+RWD : previous layer (relative -1, wrap at 8). */
+                        gesture_set_layer(&shift_gesture,
+                            gesture_layer_step(gesture_layer(&shift_gesture), -1));
+                        chord_flush_all();
+                        for (int fi = 0; fi < NUM_FADERS; fi++) {
+                            g_takeover_arm[fi] = 1;
+                        }
+                        break;
+                    default:
+                        break;
+                    }
                 }
-                config_cdc_monitor_button(idx, pressed);
+                config_cdc_monitor_button(idx, pressed);   /* still report the swallowed edge */
                 continue;
             }
-            /* Normal routing: KEYBOARD HOLDS the per-button HID key while the button
-             * is held (Peter auto-repeat) — press latches (mod,key), release clears
-             * it, rebuild + send the full report after either edge; the host OS does
-             * the typematic repeat. (Here PLAY maps normally — no shift trigger in
-             * this build, so layer_now is a constant 0 = the inline L1 bank, and
-             * PLAY is just another held key.) See the FELDD_SHIFT_TRIGGER_PLAY arm
-             * above for the full held-key rationale. */
+
+            /* PLAY (idx 0): the shift trigger by DEFAULT (play_mode 0) — a momentary
+             * L2 shift, no MIDI/keyboard emit. An ASSIGNABLE button when play_mode 1:
+             * fall through to normal routing (make_default seeds button[0] BTN_NONE =
+             * silent until the user maps it, so no CC#0/fader0 collision, spec (c)). */
+            if (idx == 0 && play_mode == 0) {
+                config_cdc_monitor_button(0, pressed);   /* momentary shift; no emit */
+                continue;
+            }
+
+            /* Normal routing on the EFFECTIVE layer. KEYBOARD holds the per-button
+             * HID key while pressed (kbd_state latches (mod,key) at the press edge,
+             * so a springback can't strand it). MIDI routes through the stateful
+             * dispatcher; the emit layer is LATCHED at PRESS and reused on RELEASE
+             * (stuck-note-across-springback, spec (h)2) so a NOTE pressed on shift-L2
+             * releases its Note-Off on L2 even after PLAY springs back. Faders are
+             * ALWAYS MIDI (handled below on layer_now). */
             if (mode_now == MODE_KEYBOARD) {
                 if (pressed) {
                     const struct profile *p = librarian_active();
+                    g_btn_press_layer[idx] = (uint8_t)layer_now;
                     kbd_state_press(&g_kbd, idx,
                         profile_layer_button_mod(p, idx, layer_now),
                         profile_layer_button_key(p, idx, layer_now));
@@ -1128,15 +936,16 @@ int main(void)
                 }
                 kbd_send_held();
             } else {
-                /* MIDI: stateful dispatcher (see the FELDD_SHIFT_TRIGGER_PLAY arm
-                 * above) — delegates NOTE/CC_MOMENTARY to map_button, owns
-                 * TOGGLE/TRANSPORT/PROFILE_SWITCH; profile-switch re-arm is handled
-                 * by the now_active!=last_active block. */
-                (void)route_midi_button(idx, pressed, layer_now);
+                int emit_layer = layer_now;
+                if (pressed) {
+                    g_btn_press_layer[idx] = (uint8_t)layer_now;
+                } else {
+                    emit_layer = g_btn_press_layer[idx];
+                }
+                (void)route_midi_button(idx, pressed, emit_layer);
             }
-            config_cdc_monitor_button(idx, pressed);  /* mon frame */
+            config_cdc_monitor_button(idx, pressed);   /* mon frame */
         }
-#endif
 
         /* Track1+4 held the full ~1.2 s -> reset into the bootloader for DFU. */
         if (buttons_dfu_held()) {
@@ -1144,51 +953,39 @@ int main(void)
         }
 
         /* TRACK-row (FRONT) render — strict per-tick priority, re-derived every
-         * tick (0.9.1 LED redesign, spec §4). The front row is now the DIAL/PEEK +
-         * plain PRESS-FEEDBACK surface; the LAYER moved to the SIDE row below and
-         * the press-INVERSION is removed. Highest priority wins:
-         *   1. DFU all-4-solid  — handled by enter_dfu() above (never returns), so
-         *      it is not a per-tick case here; the boot sweep also transiently owns
-         *      these pins before the loop starts.
-         *   2. DIAL / PEEK flash — while a •• burst is in flight OR a post-commit /
-         *      peek CONFIRM flash is counting down, dial_track_pattern() owns the
-         *      row (counts 1-4 solid, 5-8 solid+blink). UNCHANGED.
-         *   3. PRESS feedback (PLAIN) — when a Track button is committed, light
-         *      ONLY that button's own front LED (on = i == pressed_idx); no
-         *      inversion, no layer, no home concept. The ladder reads one button at
-         *      a time -> at most one Track held, no two-button case (spec §4).
+         * tick (0.9.1 LED redesign, spec §4; Feature 4 retargets the peek). The
+         * front row is the func-mode PROFILE PEEK + plain PRESS-FEEDBACK surface;
+         * the LAYER lives on the SIDE row below. Highest priority wins:
+         *   1. DFU all-4-solid  — handled by enter_dfu() above (never returns).
+         *   2. FUNC-mode PROFILE PEEK — while •• is held (func_down), show the
+         *      current within-bank profile LIVE (dial_profile_peek_pattern renders
+         *      active_index+1: 1-4 solid, 5-8 solid+blink). The old •• burst dial +
+         *      confirm-flash peek path is GONE (both count-dials retired, Feature 4).
+         *   3. PRESS feedback (PLAIN) — when a Track button is committed, light ONLY
+         *      that button's own front LED (on = i == pressed_idx). The ladder reads
+         *      one button at a time -> at most one Track held (spec §4).
          *   4. ALL-DARK at rest — the layer lives on the side row now, so the front
          *      row is the intended calm idle (all off) when nothing is pressed. */
         const uint32_t track_leds[4] = {
             SP1_TRACK_LED1, SP1_TRACK_LED2, SP1_TRACK_LED3, SP1_TRACK_LED4
         };
 
-        /* Decide what (if anything) the dial/peek flash should draw this tick.
-         * A live burst draws its running count; otherwise a CONFIRM/peek timer
-         * draws the committed/current within-bank profile (index+1). 0 = nothing,
-         * fall through to press/layer. */
-        if (dial.active && dial.count > 0) {
-            dial_disp_count = dial.count;           /* live burst -> running count */
-        } else if (dial_confirm_ticks > 0) {
-            dial_disp_count = (unsigned char)(librarian_active_index() + 1);
-            dial_confirm_ticks--;                   /* non-blocking countdown */
+        if (func_down) {
+            /* Priority 2: func-mode profile peek owns the whole track row. Single
+             * decode point shared with the host test (dial_profile_peek_pattern);
+             * live scan tick drives the 5-8 blink phase. */
+            unsigned char out[4];
+            dial_profile_peek_pattern((unsigned char)librarian_active_index(),
+                                      (unsigned char)tick, out);
+            for (int i = 0; i < 4; i++) {
+                led_pin(track_leds[i], out[i] ? true : false);
+            }
         } else {
-            dial_disp_count = 0;                     /* idle -> press/layer below */
-        }
-
-        if (dial_disp_count > 0) {
-            /* Priority 2: dial / peek flash owns the whole track row. Use the live
-             * scan tick for the 5-8 blink phase (dial_track_pattern). */
-            profile_track_render(dial_disp_count, (unsigned char)tick);
-        } else {
-            /* Priority 3 (PLAIN press feedback) + priority 4 (all-dark rest).
-             * (0.9.1 LED redesign, spec §4) The LAYER + the press-INVERSION are
-             * GONE from the front row: when a Track button is committed, light ONLY
-             * its own front LED (on = i == pressed_idx); when nothing is held the
-             * row is all-dark (the layer LED lives on the side row now). The ladder
-             * reads one button at a time, so there is never a two-button case. This
-             * branch is identical in BOTH build arms (no gesture/layer read), so
-             * FELDD_SHIFT_TRIGGER_PLAY no longer guards anything here. */
+            /* Priority 3 (PLAIN press feedback) + priority 4 (all-dark rest). When a
+             * Track button is committed, light ONLY its own front LED; when nothing
+             * is held the row is all-dark (the layer LED lives on the side row now).
+             * The ladder reads one button at a time, so there is never a two-button
+             * case. */
             int trk_held = buttons_track_committed();        /* 1..4 = a Track, else none */
             int pressed_idx = (trk_held >= 1 && trk_held <= 4) ? (trk_held - 1) : -1;
             for (int i = 0; i < 4; i++) {
@@ -1219,11 +1016,10 @@ int main(void)
          * FELDD_SHIFT_TRIGGER_PLAY=0 there is no PLAY gesture FSM, so the layer pins
          * to 0 (SP1_PLAY_LED1 = the single resting layer), mirroring the old
          * front-row guard. */
-#if FELDD_SHIFT_TRIGGER_PLAY
+        /* Side row always shows the RAW engaged layer (gesture_layer), never the
+         * PLAY-shifted eff_layer (spec (d)): a momentary PLAY shift must not move the
+         * layer LED. */
         unsigned char side_layer = (unsigned char)gesture_layer(&shift_gesture);
-#else
-        const unsigned char side_layer = 0;   /* single layer -> SP1_PLAY_LED1 rest */
-#endif
         {
             unsigned char side_out[4];
             side_led_pattern(side_layer, (unsigned int)mode_flash_ticks,

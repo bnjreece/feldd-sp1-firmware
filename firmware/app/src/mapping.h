@@ -30,8 +30,19 @@ uint8_t profile_layer_button_channel(const struct profile *p, int idx, int layer
  * configured chord) or NULL (empty slot / out-of-range). chord6 -> struct chord_def. */
 const struct chord_def *profile_layer_chord(const struct profile *p, int idx, int layer,
                                             struct chord_def *out);
+/* Feature 1: read a BTN_CC_VALUE button's {sub_mode,on,off} for `layer` (DIRECT
+ * 0..NUM_LAYERS-1, same indexing as profile_layer_chord). Returns 0 and fills the
+ * out-params, or -1 for a NULL profile / out-of-range idx or layer. */
+int profile_layer_ccval(const struct profile *p, int idx, int layer,
+                        uint8_t *sub, uint8_t *on, uint8_t *off);
 /* v7: a fader's role for `layer` (DIRECT 0..3). 0=cc, 1=chord_depth. */
 uint8_t profile_layer_fader_role(const struct profile *p, int idx, int layer);
+
+/* Feature 4: the LAYER a PLAY-shift build routes buttons/faders through. In
+ * shift mode (play_mode 0) a held PLAY momentarily shifts to L2 (index 1);
+ * otherwise the engaged gesture layer is used. Assignable mode (play_mode 1)
+ * never shifts, so PLAY is a plain assignable button. Pure/host-tested. */
+int effective_layer(int play_mode, int play_held, int gesture_layer);
 
 /* fader idx 0..3, cc value 0..127 (already from fader_update); layer 0..3 */
 void map_fader(const struct profile *p, int idx, int cc_val, int layer,

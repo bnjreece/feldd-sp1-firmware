@@ -11,6 +11,8 @@ struct proto_store {
     uint8_t (*get_active)(void);                       /* WITHIN-bank index (0..bank_profiles-1) of the current mode */
     uint8_t (*get_mode)(void);                         /* device mode: 0 MIDI, 1 KEYBOARD */
     int     (*set_mode)(uint8_t m);                    /* 0 ok; nonzero NVS_FAIL */
+    uint8_t (*get_playrole)(void);                     /* PLAY role: 0 shift, 1 assignable */
+    int     (*set_playrole)(uint8_t v);                /* 0 ok; nonzero NVS_FAIL */
     /* Two distinct index axes (§0 mode-scoped banks). read/write/reset address a
      * GLOBAL slot 0..profiles-1 (both banks); setactive/get_active address a
      * WITHIN-bank index 0..bank_profiles-1 (the current mode's bank). Validating

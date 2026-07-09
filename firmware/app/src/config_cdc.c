@@ -43,11 +43,13 @@ static const struct proto_store g_store = {
     .get_active = librarian_active_index,
     .get_mode   = librarian_mode,
     .set_mode   = librarian_set_mode,
+    .get_playrole = librarian_play_mode,
+    .set_playrole = librarian_set_play_mode,
     .profiles      = NUM_PROFILES,        /* GLOBAL slots 0..15 (read/write/reset) */
     .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.20.0-beta",
+    .fw         = "0.21.0-beta",
     .uid        = g_uid,
 };
 
@@ -261,6 +263,18 @@ void config_cdc_monitor_mode(int v)
 {
     char buf[48];
     int len = config_cdc_fmt_mode(buf, (int)sizeof buf, v);
+    if (len > 0) {
+        cdc_write(buf);
+    }
+}
+
+/* Unsolicited PLAY-role push (Feature 4). Defined so the symbol resolves and a
+ * future on-device gesture that flips playrole can reflect it to a connected host,
+ * mirroring config_cdc_monitor_mode. DTR-gated poll_out via cdc_write. */
+void config_cdc_monitor_playrole(int v)
+{
+    char buf[48];
+    int len = config_cdc_fmt_playrole(buf, (int)sizeof buf, v);
     if (len > 0) {
         cdc_write(buf);
     }

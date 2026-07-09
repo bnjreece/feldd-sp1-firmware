@@ -218,8 +218,23 @@ static void t_dropped_feed_is_detectable(void)
     assert(t.max_writes_per_feed > 1);     /* the invariant CAN fail -> the guard is real */
 }
 
+/* play_mode policy: absent record -> default 0; present clamps to 0/1 validity;
+ * and the reseed-safety lock: lib_header MUST stay 4 bytes (id-2 record holds
+ * play_mode, NOT the header - growing the header short-reads every device -> WIPE). */
+static void t_playrole_policy_and_header_size(void){
+    assert(sizeof(struct lib_header) == 4);          /* NO wipe: header unchanged */
+    assert(lib_playrole_load(0, 0) == 0);            /* -ENOENT -> shift default */
+    assert(lib_playrole_load(0, 7) == 0);            /* absent ignores stored junk */
+    assert(lib_playrole_load(1, 0) == 0);
+    assert(lib_playrole_load(1, 1) == 1);
+    assert(lib_playrole_load(1, 9) == 0);            /* present but invalid -> default */
+    assert(lib_playrole_valid(0) && lib_playrole_valid(1));
+    assert(!lib_playrole_valid(2) && !lib_playrole_valid(255));
+}
+
 int main(void)
 {
+    t_playrole_policy_and_header_size();
     t_per_mode_active_is_independent();
     t_mode_field_does_not_clobber_actives();
     t_header_survives_remount();

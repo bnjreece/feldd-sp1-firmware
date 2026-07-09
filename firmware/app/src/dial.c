@@ -117,3 +117,10 @@ void dial_track_pattern(unsigned char count, unsigned char tick,
         }
     }
 }
+
+/* Feature 4: the func-mode profile peek reuses dial_track_pattern to render the
+ * 1-based profile number (active_index + 1) on the track row. */
+void dial_profile_peek_pattern(unsigned char active_index, unsigned char tick,
+                               unsigned char out[4]) {
+    dial_track_pattern((unsigned char)(active_index + 1), tick, out);
+}

@@ -287,6 +287,21 @@ int proto_handle(const struct proto_store *s, const char *line,
             id, (unsigned)s->get_mode());
     }
 
+    /* ---- playrole ---- */
+    /* {"t":"playrole"} reads; {"t":"playrole","v":0|1} sets PLAY's role. */
+    if (strcmp(verb, "playrole") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v > 1)
+                return emit_err(out, outcap, id, "BAD_VALUE", "playrole must be 0 or 1");
+            if (s->set_playrole((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_playrole failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"playrole_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_playrole());
+    }
+
     /* ---- list ---- */
     /* list_r{mode,active,profiles:[{n,bank,name,ver}]}. We read each slot's
      * profile and emit only its GLOBAL index, bank, name, and version (NOT the

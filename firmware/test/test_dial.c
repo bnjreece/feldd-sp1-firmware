@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include "../src/dial.h"
+#include "../src/gesture.h"
 
 /* Feed N scan ticks with NO tap; assert each one is a quiet DIAL_NONE. Returns
  * the LAST result so the caller can also inspect the tick a commit fires (a
@@ -218,29 +219,32 @@ static void test_guard_band_invariant(void) {
 }
 
 /* ----------------------------------------------------------------------------
- * PLAY LAYER COUNT-DIAL (#61 gesture pass, spec §2). A SECOND dial.c instance
- * drives PLAY layer select: 1 tap = RELATIVE +1, 2/3/4 taps = ABSOLUTE jump to
- * layer 2/3/4. The pure FSM is byte-for-byte the same as the •• profile dial; the
- * ONLY difference is at the COMMIT site in main.c, which clamps an ABSOLUTE count
- * to GESTURE_LAYER_COUNT (4) under spec Q1 Option (b) — dial.c stays literal-8, so
- * a 5..8-tap PLAY burst still emits its real count here and main.c pins it to 4.
- * These tests assert (a) the layer-dial counts main.c will consume, and (b) the
- * exact clamp expression main.c applies (target = min(count-1, 3)).
+ * PLAY LAYER COUNT-DIAL (#61 gesture pass, spec §2 / §4.2). A SECOND dial.c
+ * instance drives PLAY layer select: 1 tap = RELATIVE +1, 2..8 taps = ABSOLUTE
+ * jump to layer 2..8. The pure FSM is byte-for-byte the same as the •• profile
+ * dial; the ONLY difference is at the COMMIT site in main.c, which clamps an
+ * ABSOLUTE count to GESTURE_LAYER_COUNT (8): dial.c stays literal-8, so count N
+ * SELECTS layer N for all 1..8 with no artificial pin, and >=9 taps clamp to 8 in
+ * the FSM -> the top layer. These tests assert (a) the layer-dial counts main.c
+ * will consume, and (b) the exact clamp expression main.c applies
+ * (target = min(count-1, GESTURE_LAYER_COUNT-1)).
  * --------------------------------------------------------------------------*/
 
-/* The clamp main.c applies to an ABSOLUTE layer-dial commit (spec Q1 Option b).
+/* The clamp main.c applies to an ABSOLUTE layer-dial commit (spec §4.2).
  * Mirrors the main.c expression: target = count-1, pinned to GESTURE_LAYER_COUNT-1
- * (=3). Kept here so the host suite covers the clamp even though its live site is
- * a few lines of main.c routing (not a pure FSM). */
-#define LAYER_MAX_INDEX 3   /* GESTURE_LAYER_COUNT-1; the 4 layers are 0..3 */
+ * (=7). Retied to GESTURE_LAYER_COUNT so it cannot drift from gesture.h. Kept here
+ * so the host suite covers the clamp even though its live site is a few lines of
+ * main.c routing (not a pure FSM). */
+#define LAYER_MAX_INDEX (GESTURE_LAYER_COUNT - 1)   /* 8 layers are 0..7 */
 static int layer_clamp(int count) {
     int target = count - 1;
     if (target > LAYER_MAX_INDEX) target = LAYER_MAX_INDEX;
     return target;
 }
 
-/* 1 PLAY tap -> RELATIVE_NEXT (caller does layer = (layer+1) % 4). Identical to
- * the •• lone-tap path; the layer-dial reuses the exact same FSM instance. */
+/* 1 PLAY tap -> RELATIVE_NEXT (caller does layer = (layer+1) % GESTURE_LAYER_COUNT).
+ * Identical to the •• lone-tap path; the layer-dial reuses the exact same FSM
+ * instance. */
 static void test_layer_one_tap_is_relative_next(void) {
     dial_t d;
     dial_init(&d);
@@ -252,8 +256,9 @@ static void test_layer_one_tap_is_relative_next(void) {
 }
 
 /* 2/3/4 PLAY taps -> ABSOLUTE with count 2/3/4. The caller jumps to layer
- * count-1 (1-indexed like the profile dial), clamped to 4. Verify each count and
- * its post-clamp target index (2->1, 3->2, 4->3, all in range, no clamping yet). */
+ * count-1 (1-indexed like the profile dial), clamped to GESTURE_LAYER_COUNT-1.
+ * Verify each count and its post-clamp target index (2->1, 3->2, 4->3, all in
+ * range, no clamping yet). */
 static void test_layer_two_three_four_taps_absolute(void) {
     for (int n = 2; n <= 4; n++) {
         dial_t d;
@@ -273,11 +278,10 @@ static void test_layer_two_three_four_taps_absolute(void) {
     }
 }
 
-/* 5..8 PLAY taps -> the FSM still emits the real count (up to 8, its literal cap),
- * and main.c's clamp PINS the layer to 4 (index 3). Prove the clamp lands on the
- * top layer for every over-tap (spec §2: "a 5..8-tap PLAY burst silently lands on
- * layer 4"; ≥9 taps clamp to 8 in the FSM, still -> layer 4 after main.c clamp). */
-static void test_layer_five_to_eight_taps_clamp_to_top_layer(void) {
+/* 5..8 PLAY taps -> SELECT layers 5..8 (index count-1). With GESTURE_LAYER_COUNT=8
+ * the main.c absolute clamp ceiling is 7 = DIAL_MAX_COUNT-1, so count N maps to
+ * layer N for all 1..8 with no artificial pin (spec §4.2). count N -> track N. */
+static void test_layer_five_to_eight_taps_select_their_layer(void) {
     for (int n = 5; n <= 8; n++) {
         dial_t d;
         dial_init(&d);
@@ -289,12 +293,31 @@ static void test_layer_five_to_eight_taps_clamp_to_top_layer(void) {
         dial_result_t c = idle_quiet_until_commit(&d);
         assert(c.kind == DIAL_ABSOLUTE);
         assert(c.count == n);             /* FSM (literal-8) emits the real count */
-        assert(layer_clamp(c.count) == LAYER_MAX_INDEX);   /* main.c pins to layer 4 */
+        assert(layer_clamp(c.count) == n - 1);             /* SELECT layer 5..8 */
+        assert(layer_clamp(c.count) <= LAYER_MAX_INDEX);
     }
 }
 
-/* ≥9 PLAY taps: the FSM clamps count to 8 (its hard cap), and main.c then clamps
- * the layer to 4 — a double clamp that can never index past the side LED row. */
+/* Mirrors main.c:1004 relative +1 wrap: layer = (layer+1) % GESTURE_LAYER_COUNT.
+ * Locks the spec §4.2 decision to KEEP the modulo wrap at 8 (single-tap +1 from
+ * layer 8 wraps to layer 1); stop-at-8 is NOT adopted. */
+static int layer_next(int cur) {
+    return (cur + 1) % GESTURE_LAYER_COUNT;
+}
+
+/* 1 PLAY tap = relative +1. Mid-range steps up with no wrap; only the TOP layer
+ * (index 7) wraps back to layer 1 (index 0). At 4 layers index 3 was the top and
+ * wrapped to 0 - proving layer_next(3)==4 is the 8-layer behavior. */
+static void test_layer_single_tap_wrap(void) {
+    assert(layer_next(3) == 4);
+    assert(layer_next(6) == 7);
+    assert(layer_next(7) == 0);   /* wrap 8 -> 1 (spec §4.2) */
+    assert(layer_next(0) == 1);
+}
+
+/* >=9 PLAY taps: the FSM clamps count to 8 (its hard cap), and main.c then clamps
+ * the layer to the top (index 7), a double clamp that can never index past the
+ * side LED row. */
 static void test_layer_nine_plus_taps_pin_to_top_layer(void) {
     dial_t d;
     dial_init(&d);
@@ -306,11 +329,24 @@ static void test_layer_nine_plus_taps_pin_to_top_layer(void) {
     dial_result_t c = idle_quiet_until_commit(&d);
     assert(c.kind == DIAL_ABSOLUTE);
     assert(c.count == DIAL_MAX_COUNT);    /* FSM pins at 8 */
-    assert(layer_clamp(c.count) == LAYER_MAX_INDEX);   /* main.c pins to layer 4 */
+    assert(layer_clamp(c.count) == LAYER_MAX_INDEX);   /* main.c pins to top layer */
+}
+
+/* dial_profile_peek_pattern: active index N renders profile (N+1) via
+ * dial_track_pattern - 3 solid for index 2, and index 5 (count 6) blinks LED idx1. */
+static void test_profile_peek_pattern(void){
+    unsigned char out[4];
+    dial_profile_peek_pattern(2, 0, out);              /* profile 3 */
+    assert(out[0]==1 && out[1]==1 && out[2]==1 && out[3]==0);
+    dial_profile_peek_pattern(5, 0, out);              /* profile 6, tick 0 (blink off) */
+    assert(out[0]==1 && out[1]==0 && out[2]==1 && out[3]==1);
+    dial_profile_peek_pattern(5, 12, out);             /* tick 12 (blink on) */
+    assert(out[0]==1 && out[1]==1 && out[2]==1 && out[3]==1);
 }
 
 int main(void) {
     test_lone_tap_is_relative_next();
+    test_profile_peek_pattern();
     test_two_fast_taps_absolute_two();
     test_eight_fast_taps_absolute_eight();
     test_nine_plus_taps_clamped_at_eight();
@@ -321,7 +357,8 @@ int main(void) {
     /* PLAY layer count-dial (#61): reuse of the same FSM + the main.c clamp-to-4 */
     test_layer_one_tap_is_relative_next();
     test_layer_two_three_four_taps_absolute();
-    test_layer_five_to_eight_taps_clamp_to_top_layer();
+    test_layer_five_to_eight_taps_select_their_layer();
+    test_layer_single_tap_wrap();
     test_layer_nine_plus_taps_pin_to_top_layer();
     printf("all dial tests passed\n");
     return 0;

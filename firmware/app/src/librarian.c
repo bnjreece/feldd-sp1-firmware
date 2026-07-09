@@ -115,6 +115,7 @@ BUILD_ASSERT(DIV_ROUND_UP(NUM_PROFILES, SP1_NVS_ENTRIES_PER_SECTOR)
 /* NVS entry ids. Header is a low fixed id; profiles live in a 0x100+n block so
  * they never collide with the header or any future small bookkeeping ids. */
 #define LIB_ID_HEADER        1u
+#define LIB_ID_SETTINGS      2u   /* future-bookkeeping band 2..0xFF; holds play_mode */
 #define LIB_ID_PROFILE_BASE  0x100u
 
 static struct nvs_fs fs;
@@ -125,6 +126,7 @@ static bool          fs_ready;
 static struct profile active_profile;
 static uint8_t        active_within[NUM_MODES];  /* per-mode WITHIN-bank active (0..7 each) */
 static uint8_t        active_mode;               /* current device mode (fast path) */
+static uint8_t        play_mode_cache;            /* Feature 4: 0 shift, 1 assignable */
 
 /* Build slot `slot`'s default profile into *p.
  *
@@ -342,7 +344,14 @@ static void make_default(int slot, struct profile *p)
         for (int i = 0; i < NUM_BUTTONS; i++) {
             uint8_t bv = default_btn_value(within, L, i);
             if (L == 0) {
-                p->button[i].type    = BTN_CC_MOMENTARY;
+                /* Feature 4: seed PLAY (idx 0) as silent BTN_NONE so an
+                 * un-reserved/promoted PLAY does not emit the CC#0 Bank-Select
+                 * placeholder that collides with fader[0]. default_btn_value(...,0)
+                 * already returns 0 for idx 0 and default_btn_channel(0)==0, so
+                 * PLAY stays fully silent until explicitly mapped. Matches what
+                 * SEED_OPXY8/SEED_TX6/SEED_OP1 already do for idx 0; BTN_NONE still
+                 * passes profile_validate. */
+                p->button[i].type    = (i == 0) ? BTN_NONE : BTN_CC_MOMENTARY;
                 p->button[i].value   = bv;
                 p->button_channel[i] = default_btn_channel(i); /* faders ch1 / front ch2 / side ch3 */
             } else if (L == 1) {
@@ -352,6 +361,7 @@ static void make_default(int slot, struct profile *p)
             }
         }
     }
+    BUILD_ASSERT(BTN_NONE == 0, "PLAY seed relies on BTN_NONE == 0");
 
     /* 0.19: on MIDI-bank slots 1/2/3 (profiles 2/3/4), replace the generic map with a
      * TE starter profile, so they sit right after profile 1 (the Default) with no gap.
@@ -578,6 +588,14 @@ int librarian_init(void)
         active_within[m] = lib_bank_clamp(lib_header_active(&hdr, m));
     }
 
+    /* Feature 4: PLAY role lives in its OWN NVS record (LIB_ID_SETTINGS), never in
+     * the 4-byte header. A device that has never toggled it (-ENOENT) defaults to 0
+     * (shift); a present-but-invalid byte also falls back to the default. This is a
+     * pure ADD, so no existing device is short-read/reseeded. */
+    uint8_t pr = 0;
+    ssize_t rpr = nvs_read(&fs, LIB_ID_SETTINGS, &pr, sizeof(pr));
+    play_mode_cache = lib_playrole_load(rpr == (ssize_t)sizeof(pr), pr);
+
     /* Load the active profile of the CURRENT mode into the RAM hot copy. The NVS
      * slot it addresses is the GLOBAL index lib_bank_global(mode, within) (0..15).
      * A reserved personality (active_mode >= NUM_MODES) has no bank yet, so it
@@ -763,5 +781,32 @@ int librarian_set_mode(uint8_t m)
         make_default(g, &p);
         active_profile = p;
     }
+    return 0;
+}
+
+uint8_t librarian_play_mode(void)
+{
+    return play_mode_cache;   /* RAM copy — never hits flash */
+}
+
+int librarian_set_play_mode(uint8_t v)
+{
+    /* Feature 4: PLAY role. Writes ONLY the id-2 record; the 4-byte lib_header is
+     * never touched (so no short-read reseed/wipe). Range-checked to 0/1; a no-op
+     * same-value set does not burn an NVS write. */
+    if (!fs_ready) {
+        return -EINVAL;
+    }
+    if (!lib_playrole_valid(v)) {
+        return -EINVAL;
+    }
+    if (v == play_mode_cache) {
+        return 0;             /* no-op: don't burn an NVS write */
+    }
+    ssize_t w = nvs_write(&fs, LIB_ID_SETTINGS, &v, sizeof(v));
+    if (w < 0) {
+        return (int)w;
+    }
+    play_mode_cache = v;
     return 0;
 }

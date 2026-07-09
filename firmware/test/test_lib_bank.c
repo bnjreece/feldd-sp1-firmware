@@ -48,9 +48,19 @@ static void t_clamp_guards_within_range(void)
     assert(lib_bank_clamp(200) == 0);
 }
 
+/* cycle_prev wraps within the bank of 8 the other direction (••+Vol- profile prev),
+ * never crossing into the other bank. */
+static void t_cycle_prev_wraps_within_bank(void)
+{
+    assert(lib_bank_cycle_prev(1) == 0);
+    assert(lib_bank_cycle_prev(7) == 6);
+    assert(lib_bank_cycle_prev(0) == 7);   /* wrap 0 -> top of THIS bank, not bank -1 */
+}
+
 int main(void)
 {
     t_bank_of_each_mode();
+    t_cycle_prev_wraps_within_bank();
     t_global_index_math();
     t_within_is_global_inverse();
     t_cycle_wraps_within_bank();

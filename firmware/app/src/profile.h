@@ -17,7 +17,7 @@ enum fader_role { FADER_ROLE_CC=0, FADER_ROLE_CHORD_DEPTH=1 };
  * nothing for them. */
 enum btn_type { BTN_NONE=0, BTN_NOTE=1, BTN_CC_TOGGLE=2, BTN_CC_MOMENTARY=3,
                 BTN_TRANSPORT=4, BTN_PROFILE_SWITCH=5,
-                BTN_CHORD=6 };
+                BTN_CHORD=6, BTN_CC_VALUE=7 };
 struct fader_map { uint8_t cc, min, max, curve, invert; };
 struct button_map { uint8_t type, value; };
 /* v5: per-layer parameter bank for the TWO appended layers (L3, L4). L1 lives
@@ -139,6 +139,16 @@ struct profile {
      * 216 + 16 + 2 = 234-byte tail; 294 + 234 = 528. A v7 blob reaching v8 firmware is
      * rejected by the version check; a v6/older blob decoded by v8 fills these at
      * "no chords" (every chord6 zero, every fader_role cc, velocity 100). */
+    /* Feature 1 (v9, NO format change): a BTN_CC_VALUE button REUSES this same
+     * per-(layer,button) chord6 slot to store its {sub_mode,on_value,off_value}:
+     *   b[0]=0 (reserved), b[1]=on_value, b[2]=off_value,
+     *   b[3]=sub_mode (0=set-on-press, 1=momentary, 2=toggle),
+     *   b[4]=b[5]=0 (reserved for a future field, kept forkless).
+     * INVARIANT: chord6[layer][idx] is read as a CHORD only when the button's
+     * type == BTN_CHORD; a BTN_CC_VALUE slot is NEVER fed to the chord engine
+     * (route_midi_button branches on the type before touching chord6). The b[0]=0
+     * + b[4]=b[5]=0 pinning also makes the slot decode as an EMPTY chord to any
+     * reader that does not understand BTN_CC_VALUE. */
     struct chord6 chord6[NUM_LAYERS][NUM_BUTTONS];     /* 4*9*6 = 216 B; packed per button */
     uint8_t  fader_role[NUM_LAYERS][NUM_FADERS];       /* 4*4   = 16 B; 0=cc,1=chord_depth */
     uint8_t  chord_flags[4];                           /* 4 B: [0]=chord velocity, [1..3]=reserved. [2..3] pad struct to 1038 (multiple of 3) so base64 has no '=' padding (spec 2.1). */

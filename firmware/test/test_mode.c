@@ -3,68 +3,14 @@
 #include <string.h>
 #include "mode.h"
 
-/* A FWD press while the modifier (PLAY) is held -> set KEYBOARD + consume the edge. */
-static void t_fwd_press_with_func_sets_keyboard(void)
-{
-    struct mode_decision d = mode_decide(/*modifier_held=*/1, /*idx=*/7, /*pressed=*/1);
-    assert(d.set == 1);
-    assert(d.which == MODE_KEYBOARD);
-    assert(d.consumed == 1);
-}
+/* Feature 4 retired mode_decide + the mode.c gesture template: the dot-dot+T4 mode
+ * flip is now a genuine combo toggle (combo_dispatch + mode_toggle), so Keyboard
+ * stays reachable and the flip cannot double-fire. These tests pin the combo engine
+ * (press-side dispatch, single-fire toggle, per-index consume-both-edges latch) and
+ * the surviving mode_led_pattern table. */
 
-/* A RWD press while the modifier (PLAY) is held -> set MIDI + consume the edge. */
-static void t_rwd_press_with_func_sets_midi(void)
-{
-    struct mode_decision d = mode_decide(1, 8, 1);
-    assert(d.set == 1);
-    assert(d.which == MODE_MIDI);
-    assert(d.consumed == 1);
-}
-
-/* FWD/RWD with the modifier NOT held -> no set, NOT consumed (normal mapping must run). */
-static void t_fwd_without_func_is_passthrough(void)
-{
-    struct mode_decision d = mode_decide(0, 7, 1);
-    assert(d.set == 0);
-    assert(d.consumed == 0);
-    struct mode_decision r = mode_decide(0, 8, 1);
-    assert(r.set == 0);
-    assert(r.consumed == 0);
-}
-
-/* A RELEASE edge of FWD/RWD while the modifier held: no set, but still consumed
- * so the release of the selector button never types/maps. */
-static void t_release_with_func_is_consumed_not_set(void)
-{
-    struct mode_decision d = mode_decide(1, 7, 0);
-    assert(d.set == 0);
-    assert(d.consumed == 1);
-}
-
-/* A non-FWD/RWD button while the modifier held -> passthrough (modifier held +
- * other ladder button is not a mode gesture). */
-static void t_other_button_with_func_is_passthrough(void)
-{
-    for (int idx = 0; idx <= 6; idx++) {
-        struct mode_decision d = mode_decide(1, idx, 1);
-        assert(d.set == 0);
-        assert(d.consumed == 0);
-    }
-}
-
-/* The consume contract (the load-bearing case): a FWD/RWD tap while the modifier
- * (PLAY-held) is engaged reports both `set` and `consumed`, so the caller persists
- * the mode AND swallows the edge (no map/type) + disarms the shift detector.
- * mode_decide is the single source for that signal. */
-static void t_tap_reports_both_set_and_consumed(void)
-{
-    struct mode_decision d = mode_decide(1, 7, 1);
-    assert(d.set && d.consumed);   /* caller: librarian_set_mode + gesture_disarm */
-}
-
-/* The N-mode LED pattern table (renders on the PLAY row, SP1_PLAY_LED1..4 per
- * spec §7.4 — USER-APPROVED driving the 3 spare play LEDs). MIDI lights 1+4,
- * KEYBOARD lights 2+3. */
+/* The N-mode LED pattern table (renders on the PLAY/side row, SP1_PLAY_LED1..4).
+ * MIDI lights 1+4, KEYBOARD lights 2+3. Retained for side_led.c. */
 static void t_led_pattern_table(void)
 {
     assert(mode_led_pattern(MODE_MIDI)     == (MODE_LED1 | MODE_LED4));
@@ -76,14 +22,77 @@ static void t_led_pattern_table(void)
     assert(mode_led_pattern(99) == (MODE_LED1 | MODE_LED4));
 }
 
+/* combo_dispatch: while func_down, a PRESS on idx 4..8 is consumed as a combo,
+ * carries the right action, and signals reset_hold (clean-hold power-off gate).
+ * A PRESS with func_down NOT held, or on a non-combo idx, is passthrough. */
+static void t_combo_press_maps_and_consumes(void){
+    combo_latch_t l; combo_latch_init(&l);
+    struct combo_decision d;
+    d = combo_dispatch(&l, 1, COMBO_BTN_T4, 1);
+    assert(d.consumed==1 && d.action==COMBO_MODE_TOGGLE && d.reset_hold==1);
+    d = combo_dispatch(&l, 1, COMBO_BTN_VOLUP, 1); assert(d.consumed==1 && d.action==COMBO_PROFILE_NEXT);
+    d = combo_dispatch(&l, 1, COMBO_BTN_VOLDN, 1); assert(d.consumed==1 && d.action==COMBO_PROFILE_PREV);
+    d = combo_dispatch(&l, 1, COMBO_BTN_FWD, 1);   assert(d.consumed==1 && d.action==COMBO_LAYER_NEXT);
+    d = combo_dispatch(&l, 1, COMBO_BTN_RWD, 1);   assert(d.consumed==1 && d.action==COMBO_LAYER_PREV);
+    /* func not held: plain button, no consume, no reset_hold */
+    combo_latch_init(&l);
+    d = combo_dispatch(&l, 0, COMBO_BTN_FWD, 1); assert(d.consumed==0 && d.action==COMBO_NONE && d.reset_hold==0);
+    /* func held but a non-combo idx (PLAY / Track1..3): passthrough */
+    d = combo_dispatch(&l, 1, 0, 1); assert(d.consumed==0);
+    d = combo_dispatch(&l, 1, 1, 1); assert(d.consumed==0);
+}
+/* mode_toggle flips MIDI<->KEYBOARD; combo T4 fires the toggle exactly once
+ * (press only), so no double-toggle. */
+static void t_mode_toggle_and_single_fire(void){
+    assert(mode_toggle(MODE_MIDI)==MODE_KEYBOARD);
+    assert(mode_toggle(MODE_KEYBOARD)==MODE_MIDI);
+    combo_latch_t l; combo_latch_init(&l);
+    struct combo_decision p = combo_dispatch(&l, 1, COMBO_BTN_T4, 1);   /* press */
+    struct combo_decision r = combo_dispatch(&l, 1, COMBO_BTN_T4, 0);   /* release */
+    assert(p.action==COMBO_MODE_TOGGLE);           /* toggle only on the press */
+    assert(r.consumed==1 && r.action==COMBO_NONE); /* release swallowed, no 2nd toggle */
+}
+
+/* Forward ordering: •• released BEFORE the combo button. The PRESS was consumed
+ * (func_down), so the RELEASE must still be swallowed even though func_down is
+ * now 0 - no stray release leaks to the button's plain action. */
+static void t_combo_forward_release_after_func_lifts(void){
+    combo_latch_t l; combo_latch_init(&l);
+    struct combo_decision p = combo_dispatch(&l, 1, COMBO_BTN_FWD, 1);
+    assert(p.consumed==1);
+    struct combo_decision r = combo_dispatch(&l, 0, COMBO_BTN_FWD, 0);  /* •• already up */
+    assert(r.consumed==1 && r.action==COMBO_NONE);
+    assert(l.latched == 0);   /* latch cleared on swallow */
+}
+/* Reverse ordering: a PLAIN press (func NOT held) then •• pressed then release
+ * while func_down is now 1. The press was NOT consumed (latch clear), so the
+ * release must NOT be swallowed - the plain button keeps its own Note-On/Off
+ * pairing. This is the case gating on func_down at release breaks. */
+static void t_combo_reverse_plain_press_then_func(void){
+    combo_latch_t l; combo_latch_init(&l);
+    struct combo_decision p = combo_dispatch(&l, 0, COMBO_BTN_FWD, 1);  /* plain press */
+    assert(p.consumed==0 && l.latched==0);
+    struct combo_decision r = combo_dispatch(&l, 1, COMBO_BTN_FWD, 0);  /* •• now down */
+    assert(r.consumed==0);   /* release routes normally, pairs the plain press */
+}
+/* Two different combo buttons held under one •• hold latch independently. */
+static void t_combo_latch_is_per_index(void){
+    combo_latch_t l; combo_latch_init(&l);
+    combo_dispatch(&l, 1, COMBO_BTN_FWD, 1);
+    combo_dispatch(&l, 1, COMBO_BTN_VOLUP, 1);
+    struct combo_decision rf = combo_dispatch(&l, 1, COMBO_BTN_FWD, 0);
+    assert(rf.consumed==1);
+    struct combo_decision rv = combo_dispatch(&l, 0, COMBO_BTN_VOLUP, 0);  /* other order */
+    assert(rv.consumed==1 && l.latched==0);
+}
+
 int main(void)
 {
-    t_fwd_press_with_func_sets_keyboard();
-    t_rwd_press_with_func_sets_midi();
-    t_fwd_without_func_is_passthrough();
-    t_release_with_func_is_consumed_not_set();
-    t_other_button_with_func_is_passthrough();
-    t_tap_reports_both_set_and_consumed();
+    t_combo_press_maps_and_consumes();
+    t_mode_toggle_and_single_fire();
+    t_combo_forward_release_after_func_lifts();
+    t_combo_reverse_plain_press_then_func();
+    t_combo_latch_is_per_index();
     t_led_pattern_table();
     printf("all mode tests passed\n");
     return 0;

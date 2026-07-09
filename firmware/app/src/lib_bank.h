@@ -44,6 +44,13 @@ static inline uint8_t lib_bank_cycle(uint8_t within)
     return (uint8_t)((within + 1u) % NUM_BANK_PROFILES);
 }
 
+/* Step the within-bank active index the OTHER way (••+Vol- profile prev), wrapping
+ * inside the bank of 8 (within 0 -> the bank's top slot 7, never bank -1). */
+static inline uint8_t lib_bank_cycle_prev(uint8_t within)
+{
+    return (uint8_t)((within + NUM_BANK_PROFILES - 1u) % NUM_BANK_PROFILES);
+}
+
 /* Coerce a possibly-corrupt within index back into 0..7 (a clamp, not a wrap):
  * any value >= NUM_BANK_PROFILES is treated as a corrupt header and reset to 0. */
 static inline uint8_t lib_bank_clamp(uint8_t within)

@@ -195,6 +195,100 @@ static void test_output_is_binary(void) {
     }
 }
 
+/* ----------------------------------------------------------------------------
+ * 7. 8-LAYER position wrap (spec §5.2): every layer 0..7 lights exactly ONE side
+ *    LED at position (layer & 3). Layers 4..7 reuse LED1..LED4 (same column as
+ *    0..3): layer 4 -> LED1, 5 -> LED2, 6 -> LED3, 7 -> LED4. Checked on the
+ *    blink ON-phase (tick 12) so a solid OR a blinking dot both read lit here,
+ *    making this a stable invariant across Task 1 (solid) and Task 2 (blink).
+ * --------------------------------------------------------------------------*/
+static void test_all_8_layers_one_dot_at_layer_mod4(void) {
+    for (unsigned char layer = 0; layer < 8; layer++) {
+        unsigned char out[4];
+        int pos = layer & 3;
+        side_led_pattern(layer, /*flash_ticks=*/0, MODE_MIDI,
+                         /*flash_blink=*/0, /*tick=*/12, out);
+        int lit_count = 0;
+        for (int i = 0; i < 4; i++) {
+            assert(out[i] == (i == pos ? 1 : 0));   /* one dot at layer&3 */
+            if (out[i]) lit_count++;
+        }
+        assert(lit_count == 1);                       /* never a bar, never dark */
+    }
+}
+
+/* ----------------------------------------------------------------------------
+ * 8. SOLID 1-4 / BLINK 5-8 (spec §5.2): layers 0..3 are solid (lit at EVERY
+ *    tick); layers 4..7 blink the single dot on (tick/12)&1 (dark on the
+ *    off-phase). Position is layer & 3 in both cases.
+ * --------------------------------------------------------------------------*/
+static void test_layers_0_3_solid_4_7_blink(void) {
+    for (unsigned char layer = 0; layer < 8; layer++) {
+        int pos = layer & 3;
+        int is_blink = (layer >= 4);
+        int saw_lit = 0, saw_dark = 0;
+        for (unsigned char tick = 0; tick < 48; tick++) {
+            unsigned char out[4];
+            side_led_pattern(layer, 0, MODE_MIDI, 0, tick, out);
+            int want = is_blink ? (blink_on(tick) ? 1 : 0) : 1;
+            for (int i = 0; i < 4; i++) {
+                assert(out[i] == (i == pos ? (unsigned char)want : 0));
+            }
+            if (out[pos]) saw_lit = 1; else saw_dark = 1;
+        }
+        if (is_blink) {
+            assert(saw_lit && saw_dark);    /* layers 5-8 really toggle */
+        } else {
+            assert(saw_lit && !saw_dark);   /* layers 1-4 never go dark */
+        }
+    }
+}
+
+/* Spec-example checkpoints for layer 5 (index 4, dot at LED1): dark at tick 0/11
+ * (phase 0), lit at tick 12/23 (phase 1), dark again at tick 24. Layer 1 (index
+ * 0, SAME column) stays solid at ALL of these ticks - solid-vs-blink is the only
+ * difference between layer 1 and layer 5. */
+static void test_layer5_blink_checkpoints_vs_layer1_solid(void) {
+    unsigned char ticks[]  = {0, 11, 12, 23, 24};
+    int           blink[]  = {0,  0,  1,  1,  0};
+    for (unsigned k = 0; k < sizeof(ticks) / sizeof(ticks[0]); k++) {
+        unsigned char b[4], s[4];
+        side_led_pattern(4, 0, MODE_MIDI, 0, ticks[k], b);   /* layer 5 -> LED1 blink */
+        assert(b[0] == (unsigned char)blink[k]);
+        assert(b[1] == 0 && b[2] == 0 && b[3] == 0);
+        side_led_pattern(0, 0, MODE_MIDI, 0, ticks[k], s);   /* layer 1 -> LED1 solid */
+        assert(s[0] == 1 && s[1] == 0 && s[2] == 0 && s[3] == 0);
+    }
+}
+
+/* Priority guard (spec §5.3): a mode-flash (flash_ticks > 0) fully owns the side
+ * row even when the underlying layer is a BLINKING 5-8 layer. Layer 5 + MIDI
+ * flash must render the mode 1+4 pattern at EVERY tick (both blink phases), never
+ * the lone layer dot. The layer blink and a BLINK-style flash share the
+ * (tick/12)&1 phase but must never render simultaneously. */
+static void test_mode_flash_preempts_blinking_layer(void) {
+    for (unsigned char tick = 0; tick < 48; tick++) {
+        unsigned char out[4];
+        side_led_pattern(/*layer=*/4, /*flash_ticks=*/150, MODE_MIDI,
+                         /*flash_blink=*/0, tick, out);
+        assert(out[0] == 1 && out[1] == 0 && out[2] == 0 && out[3] == 1);
+    }
+}
+
+/* Output is strictly 0/1 across ALL 8 layers at rest, every tick (broadens the
+ * existing test_output_is_binary, which only covered layers 0..3). */
+static void test_output_binary_all_8_layers(void) {
+    for (unsigned char layer = 0; layer < 8; layer++) {
+        for (unsigned char tick = 0; tick < 60; tick++) {
+            unsigned char out[4];
+            side_led_pattern(layer, 0, MODE_MIDI, 0, tick, out);
+            for (int i = 0; i < 4; i++) {
+                assert(out[i] == 0 || out[i] == 1);
+            }
+        }
+    }
+}
+
 int main(void) {
     test_layer0_first_led();
     test_layer1_second_led();
@@ -207,6 +301,11 @@ int main(void) {
     test_flash_ticks_zero_is_always_layer();
     test_flash_matches_mode_led_pattern_bit_order();
     test_output_is_binary();
+    test_all_8_layers_one_dot_at_layer_mod4();
+    test_layers_0_3_solid_4_7_blink();
+    test_layer5_blink_checkpoints_vs_layer1_solid();
+    test_mode_flash_preempts_blinking_layer();
+    test_output_binary_all_8_layers();
     printf("all side led tests passed\n");
     return 0;
 }

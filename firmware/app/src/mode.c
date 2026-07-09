@@ -1,27 +1,5 @@
 #include "mode.h"
 
-struct mode_decision mode_decide(int modifier_hold_ticks, int idx, int pressed)
-{
-    struct mode_decision d = { 0, MODE_MIDI, 0 };
-
-    if (modifier_hold_ticks < MODE_FLIP_ARM_SCANS) {
-        return d;                 /* held too briefly (or not held) -> transport */
-    }
-    if (idx != MODE_BTN_FWD && idx != MODE_BTN_RWD) {
-        return d;                 /* some other button under the modifier -> passthrough */
-    }
-
-    /* modifier held + a FWD/RWD edge: this is the mode gesture. Consume BOTH the
-     * press and the release so the selector button never leaks a keystroke / MIDI
-     * note. Only the PRESS actually sets the mode. */
-    d.consumed = 1;
-    if (pressed) {
-        d.set   = 1;
-        d.which = (idx == MODE_BTN_FWD) ? MODE_KEYBOARD : MODE_MIDI;
-    }
-    return d;
-}
-
 uint8_t mode_led_pattern(int mode)
 {
     switch (mode) {
@@ -31,4 +9,40 @@ uint8_t mode_led_pattern(int mode)
     case 3:             return MODE_LED3 | MODE_LED4;   /* reserved personality */
     default:            return MODE_LED1 | MODE_LED4;   /* clamp -> MIDI */
     }
+}
+
+/* ---- Feature 4: dot-dot Fn-modifier combo engine ---- */
+void combo_latch_init(combo_latch_t *l){ l->latched = 0; }
+
+static uint8_t combo_action_for(int idx){
+    switch (idx){
+    case COMBO_BTN_T4:    return COMBO_MODE_TOGGLE;
+    case COMBO_BTN_VOLUP: return COMBO_PROFILE_NEXT;
+    case COMBO_BTN_VOLDN: return COMBO_PROFILE_PREV;
+    case COMBO_BTN_FWD:   return COMBO_LAYER_NEXT;
+    case COMBO_BTN_RWD:   return COMBO_LAYER_PREV;
+    default:              return COMBO_NONE;
+    }
+}
+
+uint8_t mode_toggle(uint8_t cur){ return (cur == MODE_MIDI) ? MODE_KEYBOARD : MODE_MIDI; }
+
+struct combo_decision combo_dispatch(combo_latch_t *l, int func_down, int idx, int pressed){
+    struct combo_decision d = { COMBO_NONE, 0, 0 };
+    uint16_t bit = (idx >= 0 && idx < 16) ? (uint16_t)(1u << idx) : 0u;
+    if (pressed) {
+        if (func_down && bit && idx >= COMBO_BTN_T4 && idx <= COMBO_BTN_RWD) {
+            l->latched |= bit;
+            d.action = combo_action_for(idx);
+            d.consumed = 1;
+            d.reset_hold = 1;   /* voids the •• power-off hold (clean-hold gate) */
+        }
+        return d;
+    }
+    /* release: swallow iff this idx was consumed-as-combo, regardless of func level */
+    if (bit && (l->latched & bit)) {
+        l->latched &= (uint16_t)~bit;
+        d.consumed = 1;   /* action stays COMBO_NONE; nothing re-fires on release */
+    }
+    return d;
 }

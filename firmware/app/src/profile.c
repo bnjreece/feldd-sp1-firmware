@@ -226,7 +226,7 @@ int profile_validate(const struct profile *p)
         if (p->shift.fader_cc[i]     > 127)        return -1;  /* L2 fader CC (d1) */
     }
     for (int i = 0; i < NUM_BUTTONS; i++) {
-        if (p->button[i].type > BTN_CHORD)          return -1; /* v7: BTN_CHORD allowed */
+        if (p->button[i].type > BTN_CC_VALUE)       return -1; /* v7: BTN_CHORD, F1: BTN_CC_VALUE */
         if (p->button_channel[i] > 15)              return -1; /* v2 per-button ch */
         if (p->button[i].value        > 127)        return -1; /* L1 button d1 (CC/value) */
         if (p->shift.button_value[i]  > 127)        return -1; /* L2 button d1           */
@@ -257,7 +257,7 @@ int profile_validate(const struct profile *p)
             if (p->ext[L].fader_channel[i] > 15)        return -1;
         }
         for (int i = 0; i < NUM_BUTTONS; i++) {
-            if (p->ext[L].button_type[i]    > BTN_CHORD)         return -1; /* v7 */
+            if (p->ext[L].button_type[i]    > BTN_CC_VALUE)      return -1; /* v7 BTN_CHORD, F1 BTN_CC_VALUE */
             if (p->ext[L].button_channel[i] > 15)                return -1;
         }
     }
@@ -267,6 +267,19 @@ int profile_validate(const struct profile *p)
     for (int L = 0; L < NUM_LAYERS; L++) {
         for (int i = 0; i < NUM_BUTTONS; i++) {
             const struct chord6 *c = &p->chord6[L][i];
+            /* Feature 1: a BTN_CC_VALUE button REUSES this slot for {sub,on,off}.
+             * Look up the per-(layer,button) type (same source the wire byte came
+             * from) and validate the reused layout instead of the chord layout;
+             * lock the reserved bytes + sub range so a future field stays forkless. */
+            uint8_t bt = (L == 0) ? p->button[i].type : p->ext[L - 1].button_type[i];
+            if (bt == BTN_CC_VALUE) {
+                if (c->b[0] != 0)  return -1;                 /* reserved */
+                if (c->b[1] > 127) return -1;                 /* on_value  */
+                if (c->b[2] > 127) return -1;                 /* off_value */
+                if (c->b[3] > 2)   return -1;                 /* sub_mode  */
+                if (c->b[4] != 0 || c->b[5] != 0) return -1;  /* reserved (forkless) */
+                continue;   /* skip the chord checks for this slot */
+            }
             uint8_t mode  = (uint8_t)((c->b[0] >> 5) & 0x07);
             uint8_t count = (uint8_t)(c->b[0] & 0x1F);
             if (mode > 2) return -1;                              /* 0=explicit,1=range,2=quality */

@@ -136,11 +136,16 @@ except Exception:
 PYSERIAL_HINT = "pyserial not installed — run: pip3 install --break-system-packages pyserial"
 
 # ── protocol / struct constants (mirror profile.h + protocol.c) ─────────────
-PROFILE_VERSION = 8
+PROFILE_VERSION = 9
 PROTO_VERSION = 1
 NUM_FADERS = 4
 NUM_BUTTONS = 9
-NUM_LAYERS = 4
+# v9 RESIZED the interior arrays from 4 to 8 layers (a HARD FORMAT BREAK, not a
+# prefix-superset). NUM_LAYERS is the live v9 count; LEGACY_NUM_LAYERS is FROZEN at
+# 4 for the v8 decode/migration path (spec 7.1). The shared v8/v9 prefix ends at
+# byte 179; divergence begins at byte 180 (v8 has ext[0], v9 has layer[2]).
+LEGACY_NUM_LAYERS = 4
+NUM_LAYERS = 8
 NAME_LEN = 16
 # Mode-scoped banks (§0 mode>profile>layer, mirrors profile.h / lib_bank.h):
 # profiles are NUM_MODES banks of NUM_BANK_PROFILES each. bank 0 = MIDI (global
@@ -176,19 +181,34 @@ PBYTES_V6 = PBYTES_V5 + 3 * PER_EXT               # 294
 # packed chord per (layer, button) - chords now scale like every other control.
 CHORD6_BYTES = 6
 CHORD6_MAX_EXPLICIT = 5
-PER_V8_TAIL = NUM_LAYERS * NUM_BUTTONS * CHORD6_BYTES \
-            + NUM_LAYERS * NUM_FADERS + 2                                  # 234
+# v8 (FROZEN, migration source): chord6[4][9]*6 = 216 + fader_role[4][4] = 16 +
+# chord_flags[2] = 2 -> 234. 294 + 234 = 528. Uses LEGACY_NUM_LAYERS so the frozen
+# v8 length stays 528 even though the live NUM_LAYERS is now 8.
+PER_V8_TAIL = LEGACY_NUM_LAYERS * NUM_BUTTONS * CHORD6_BYTES \
+            + LEGACY_NUM_LAYERS * NUM_FADERS + 2                           # 234
 PBYTES_V8 = PBYTES_V6 + PER_V8_TAIL                                        # 528
-PBYTES = PBYTES_V8                                # default = full current image
-# Byte length of each on-wire profile version. The format is a strict PREFIX
-# SUPERSET (each version is a clean tail-append), so encoding an older version =
-# build the full v8 image, stamp byte 0 = target, and slice to VSIZE[target].
-# Lets sp1ctl WRITE older formats (a v2..v6 firmware rejects a wrong-length
-# blob) while the parity selftest still proves v6 + v8. Mirrors the web codec's VSIZE.
+# v9: RESIZE the interior arrays to 8 layers (grow-in-place, NOT a tail append).
+#   layer banks  L3..L8  = (8-2) * 31 = 186   -> [118..303]
+#   ext banks    L2..L8  = (8-1) * 38 = 266   -> [304..569]
+#   chord6[8][9]*6 = 432 + fader_role[8][4] = 32 + chord_flags[4] = 4 -> 468
+#                                             -> [570..1037]
+# 118 + 186 + 266 + 468 = 1038. base64 = 1384 chars, no pad (1038 % 3 == 0). The
+# chord_flags pad ([1..3]) makes sizeof a multiple of 3 so the wire form has no '='.
+PER_V9_LAYERS = (NUM_LAYERS - 2) * PER_LAYER                               # 186
+PER_V9_EXT    = (NUM_LAYERS - 1) * PER_EXT                                 # 266
+PER_V9_CHORD  = NUM_LAYERS * NUM_BUTTONS * CHORD6_BYTES \
+              + NUM_LAYERS * NUM_FADERS + 4                                # 468
+PBYTES_V9 = PBYTES_V4 + PER_V9_LAYERS + PER_V9_EXT + PER_V9_CHORD          # 1038
+PBYTES = PBYTES_V9                                # default = full current image
+# Byte length of each on-wire profile version. v1..v8 are strict PREFIX SUPERSETS
+# (each a clean tail-append); v9 is a HARD BREAK (resized interior, see above), so
+# encoding v9 is its own path while v1..v8 still build the frozen legacy image,
+# stamp byte 0 = target, and slice to VSIZE[target]. Lets sp1ctl WRITE older formats
+# and prove the v8 -> v9 migration. Mirrors the web codec's VSIZE.
 # A v7 (444 B) full image is no longer a valid wire length; its v6 prefix (294) is
 # still readable. VSIZE keeps the historical prefixes for the read-only Export path.
 VSIZE = {1: PBYTES_V1, 2: PBYTES_V2, 3: PBYTES_V3, 4: PBYTES_V4,
-         5: PBYTES_V5, 6: PBYTES_V6, 8: PBYTES_V8}
+         5: PBYTES_V5, 6: PBYTES_V6, 8: PBYTES_V8, 9: PBYTES_V9}
 PORT_GLOB = "/dev/cu.usbmodem*"
 BAUD = 115200
 DEFAULT_TIMEOUT = 2.0
@@ -196,7 +216,7 @@ DEFAULT_TIMEOUT = 2.0
 CURVE_NAMES = {0: "linear", 1: "log", 2: "exp"}
 CURVE_VALS = {v: k for k, v in CURVE_NAMES.items()}
 BTN_NAMES = {0: "none", 1: "note", 2: "cc_toggle", 3: "cc_momentary",
-             4: "transport", 5: "profile_switch", 6: "chord"}
+             4: "transport", 5: "profile_switch", 6: "chord", 7: "cc_value"}
 BTN_VALS = {v: k for k, v in BTN_NAMES.items()}
 ROLE_NAMES = {0: "cc", 1: "chord_depth"}
 ROLE_VALS = {v: k for k, v in ROLE_NAMES.items()}
@@ -242,6 +262,19 @@ def _chord6_pack(c):
             _rng("chord6.quality", c.get("quality", 0), 0, 9), 0, 0, 0]
 
 
+def _ccval_pack(c):
+    """friendly cc_value dict -> 6 packed bytes [0, on, off, sub, 0, 0]."""
+    return [0,
+            _rng("cc_value.on",  c.get("on", 0),  0, 127),
+            _rng("cc_value.off", c.get("off", 0), 0, 127),
+            _rng("cc_value.sub_mode", c.get("sub_mode", 0), 0, 2), 0, 0]
+
+
+def _ccval_unpack(b):
+    """6 packed bytes -> friendly cc_value dict."""
+    return {"sub_mode": b[3], "on": b[1], "off": b[2]}
+
+
 def _chord6_unpack(b):
     """6 packed bytes -> friendly chord dict (None if empty)."""
     mode  = (b[0] >> 5) & 0x07
@@ -276,14 +309,16 @@ def encode_profile(p, target_version=PROFILE_VERSION):
         raise ProfileError("profile must be a JSON object")
 
     if target_version not in VSIZE:
-        raise ProfileError(f"unsupported target version {target_version} (expected 1, 2, 3, 4, 5, 6 or 8)")
+        raise ProfileError(f"unsupported target version {target_version} (expected 1, 2, 3, 4, 5, 6, 8 or 9)")
 
-    # Accept a v1..v8 profile dict; always build the full v8 image (auto-upgrade).
+    # Accept a v1..v9 profile dict. Target 9 (default) builds the full 1038-byte v9
+    # image (8 layers); targets 1..8 build the FROZEN legacy image and slice, so a
+    # v8 dict re-encoded at target 9 upconverts (L1..L4 kept, L5..L8 empty).
     # A v7 dict is accepted as INPUT (its v6 prefix re-encodes; its retired chord_table
     # tail is dropped - chords must be re-expressed as the new per-button chord6 grid).
     in_version = p.get("version", PROFILE_VERSION)
-    if in_version not in (1, 2, 3, 4, 5, 6, 7, 8):
-        raise ProfileError(f"unsupported profile version {in_version} (expected 1, 2, 3, 4, 5, 6, 7 or 8)")
+    if in_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+        raise ProfileError(f"unsupported profile version {in_version} (expected 1..9)")
 
     channel = _rng("channel", p.get("channel", 0), 0, 15)
 
@@ -303,7 +338,7 @@ def encode_profile(p, target_version=PROFILE_VERSION):
         raise ProfileError(f"shift.button_value must have {NUM_BUTTONS} entries, got {len(shift_bv)}")
 
     out = bytearray()
-    out.append(PROFILE_VERSION)  # always emit v8 (full image, sliced for older targets)
+    out.append(PROFILE_VERSION)  # v9; restamped for legacy targets (1..8)
     out.append(channel)
 
     for i, f in enumerate(faders):
@@ -330,7 +365,7 @@ def encode_profile(p, target_version=PROFILE_VERSION):
                 raise ProfileError(f"buttons[{i}].type unknown: {type_in!r}")
             btype = BTN_VALS[type_in]
         else:
-            btype = _rng(f"buttons[{i}].type", type_in, 0, 6)   # v8: BTN_CHORD=6
+            btype = _rng(f"buttons[{i}].type", type_in, 0, 7)   # v8 BTN_CHORD=6, F1 BTN_CC_VALUE=7
         bval = _rng(f"buttons[{i}].value", b.get("value", 0), 0, 127)
         out += bytes((btype, bval))
 
@@ -368,17 +403,27 @@ def encode_profile(p, target_version=PROFILE_VERSION):
     for i, b in enumerate(buttons):
         out.append(_u8(f"buttons[{i}].mod_shift", b.get("mod_shift", 0)))
 
-    # v5: the two ADDITIONAL layers (L3, L4) beyond inline-L1 / shift-L2. Read from
-    # an optional `layers` array (index 2 = L3, index 3 = L4); each missing field
-    # defaults the MIDI banks to the base/shift value and the keyboard banks to 0
-    # (unbound), matching the firmware make_default seed.
+    # The interior tail is version-shaped: v9 (target 9) resizes to 8 layers with
+    # ZERO-filled missing banks (a full 1038-byte v9 blob carries every field; a
+    # partial dict / v8-upconvert leaves the extra layers empty). Legacy targets
+    # (1..8) build the FROZEN 4-layer image (L3/L4 inherit base, ext inherits L1 —
+    # the v5 "share from L1" model) so a v5/v6/v8 profile still round-trips.
+    n_layers = NUM_LAYERS if target_version >= 9 else LEGACY_NUM_LAYERS   # 8 or 4
+
     layers = p.get("layers") or []
     def _layer(n):
         return layers[n] if (n < len(layers) and isinstance(layers[n], dict)) else {}
-    for Ln in (2, 3):                       # L3, L4
+
+    # v5/v9: appended layer banks L3..L(n_layers). Legacy inherits base for missing
+    # MIDI banks; v9 zero-fills (the grow-in-place image is fully explicit).
+    for Ln in range(2, n_layers):                 # L3..L4 (legacy) or L3..L8 (v9)
         lb = _layer(Ln)
-        fcc = lb.get("fader_cc", [f.get("cc", 0) for f in faders])
-        bv  = lb.get("button_value", [b.get("value", 0) for b in buttons])
+        if target_version >= 9:
+            fcc = lb.get("fader_cc", [0] * NUM_FADERS)
+            bv  = lb.get("button_value", [0] * NUM_BUTTONS)
+        else:
+            fcc = lb.get("fader_cc", [f.get("cc", 0) for f in faders])
+            bv  = lb.get("button_value", [b.get("value", 0) for b in buttons])
         bk  = lb.get("button_key", [0] * NUM_BUTTONS)
         bm  = lb.get("button_mod", [0] * NUM_BUTTONS)
         for i in range(NUM_FADERS):  out.append(_rng(f"layers[{Ln}].fader_cc[{i}]", fcc[i], 0, 127))
@@ -386,27 +431,30 @@ def encode_profile(p, target_version=PROFILE_VERSION):
         for i in range(NUM_BUTTONS): out.append(_u8(f"layers[{Ln}].button_key[{i}]", bk[i]))
         for i in range(NUM_BUTTONS): out.append(_u8(f"layers[{Ln}].button_mod[{i}]", bm[i]))
 
-    # v6: per-layer ext banks (L2, L3, L4). Read from optional `ext`[0..2]; missing
-    # fields INHERIT L1 (mirrors firmware profile_fill_missing: the v5 "share from
-    # L1" model), so a v5 dict auto-upgrades. Same SoA order as struct layer_ext
-    # (profile.h): fader_min,fader_max,fader_curve,fader_invert,button_type,
-    # fader_channel,button_channel. ext[0]=L2 (shift), ext[1]=L3 (layer[0]),
-    # ext[2]=L4 (layer[1]).
+    # v6/v9: per-layer ext banks (ext[0]=L2, ext[1]=L3, ... ext[n_layers-2]=L(n_layers)).
+    # Same SoA order as struct layer_ext (profile.h): fader_min,fader_max,fader_curve,
+    # fader_invert,button_type,fader_channel,button_channel. Legacy inherits L1 for
+    # missing banks; v9 zero-fills.
     ext_in = p.get("ext") or []
     def _ext(n):
         return ext_in[n] if (n < len(ext_in) and isinstance(ext_in[n], dict)) else {}
-    l1_fmin = [f.get("min", 0)    for f in faders]
-    l1_fmax = [f.get("max", 127)  for f in faders]
-    l1_fcur = [CURVE_VALS.get(f.get("curve", "linear"), f.get("curve", 0))
-               if isinstance(f.get("curve", "linear"), str) else f.get("curve", 0)
-               for f in faders]
-    l1_finv = [1 if f.get("invert", False) in (True, 1) else 0 for f in faders]
-    l1_fch  = [f.get("channel", channel) for f in faders]
-    l1_btype= [BTN_VALS.get(b.get("type", "none"), b.get("type", 0))
-               if isinstance(b.get("type", "none"), str) else b.get("type", 0)
-               for b in buttons]
-    l1_bch  = [b.get("channel", channel) for b in buttons]
-    for Ln in (0, 1, 2):                       # ext[0]=L2, [1]=L3, [2]=L4
+    if target_version >= 9:
+        z4 = [0] * NUM_FADERS; z9 = [0] * NUM_BUTTONS
+        l1_fmin = l1_fmax = l1_fcur = l1_finv = l1_fch = z4
+        l1_btype = l1_bch = z9
+    else:
+        l1_fmin = [f.get("min", 0)    for f in faders]
+        l1_fmax = [f.get("max", 127)  for f in faders]
+        l1_fcur = [CURVE_VALS.get(f.get("curve", "linear"), f.get("curve", 0))
+                   if isinstance(f.get("curve", "linear"), str) else f.get("curve", 0)
+                   for f in faders]
+        l1_finv = [1 if f.get("invert", False) in (True, 1) else 0 for f in faders]
+        l1_fch  = [f.get("channel", channel) for f in faders]
+        l1_btype= [BTN_VALS.get(b.get("type", "none"), b.get("type", 0))
+                   if isinstance(b.get("type", "none"), str) else b.get("type", 0)
+                   for b in buttons]
+        l1_bch  = [b.get("channel", channel) for b in buttons]
+    for Ln in range(0, n_layers - 1):             # ext[0]=L2 .. ext[n_layers-2]
         e = _ext(Ln)
         fmin = e.get("fader_min", l1_fmin); fmax = e.get("fader_max", l1_fmax)
         fcur = e.get("fader_curve", l1_fcur); finv = e.get("fader_invert", l1_finv)
@@ -416,49 +464,62 @@ def encode_profile(p, target_version=PROFILE_VERSION):
         for i in range(NUM_FADERS):  out.append(_rng(f"ext[{Ln}].fader_max[{i}]", fmax[i], 0, 127))
         for i in range(NUM_FADERS):  out.append(_rng(f"ext[{Ln}].fader_curve[{i}]", fcur[i], 0, 2))
         for i in range(NUM_FADERS):  out.append(_rng(f"ext[{Ln}].fader_invert[{i}]", finv[i], 0, 1))
-        for i in range(NUM_BUTTONS): out.append(_rng(f"ext[{Ln}].button_type[{i}]", btype[i], 0, 6))   # v8: BTN_CHORD=6
+        for i in range(NUM_BUTTONS): out.append(_rng(f"ext[{Ln}].button_type[{i}]", btype[i], 0, 7))   # BTN_CHORD=6, F1 BTN_CC_VALUE=7
         for i in range(NUM_FADERS):  out.append(_rng(f"ext[{Ln}].fader_channel[{i}]", fch[i], 0, 15))
         for i in range(NUM_BUTTONS): out.append(_rng(f"ext[{Ln}].button_channel[{i}]", bch[i], 0, 15))
 
-    # v8: chord6 tail. `chord` block carries a per-button chord6 grid (4x9 dicts/None),
-    # fader_role (4x4), chord_velocity. Default = no chords, role cc, velocity 100
-    # (mirrors firmware make_default + profile_fill_missing).
+    # v8/v9: chord6 tail. `chord` block carries a per-button chord6 grid (n_layers x 9
+    # dicts/None), fader_role (n_layers x 4), chord_velocity, and the reserved
+    # chord_flags pad (1 byte for v8, 3 for v9 -> sizeof multiple of 3). Default = no
+    # chords, role cc, velocity 100. A shorter grid (v8-upconvert) zero-fills the tail.
     ch = p.get("chord") or {}
-    grid = ch.get("chord6")        # 4x9 of dict|None, or None
-    frole = ch.get("fader_role")   # 4x4 or None
+    grid = ch.get("chord6")        # n x 9 of dict|None, or None
+    cvgrid = ch.get("cc_value")    # n x 9 of dict|None, or None (Feature 1)
+    frole = ch.get("fader_role")   # n x 4 or None
     cvel = ch.get("chord_velocity", 100)
-    for L in range(NUM_LAYERS):
+    # Feature 1: a BTN_CC_VALUE button REUSES its chord6 slot for {sub,on,off}.
+    # Dispatch per (L,i) on the SAME type source that wrote the wire type byte (L0 ->
+    # buttons[i]["type"]; L>=1 -> ext button_type), so the reused slot round-trips.
+    for L in range(n_layers):
         for i in range(NUM_BUTTONS):
-            cell = (grid[L][i] if grid else None)
-            if cell:
-                out.extend(_chord6_pack(cell))
+            if L == 0:
+                t = buttons[i].get("type", "none")
             else:
-                out.extend([0, 0, 0, 0, 0, 0])   # empty packed chord
-    for L in range(NUM_LAYERS):
+                e = _ext(L - 1); bt = e.get("button_type", l1_btype)
+                t = bt[i]
+            if t == "cc_value" or t == 7:
+                cv = (cvgrid[L][i] if (cvgrid and L < len(cvgrid)) else None) or {"sub_mode": 0, "on": 0, "off": 0}
+                out.extend(_ccval_pack(cv))
+            else:
+                cell = (grid[L][i] if (grid and L < len(grid)) else None)
+                out.extend(_chord6_pack(cell) if cell else [0, 0, 0, 0, 0, 0])   # empty packed chord
+    for L in range(n_layers):
         for f in range(NUM_FADERS):
-            v = (frole[L][f] if frole else 0)
+            v = (frole[L][f] if (frole and L < len(frole)) else 0)
             out.append(_rng(f"fader_role[{L}][{f}]", v, 0, 1))
     out.append(_rng("chord_velocity", cvel, 0, 127))
-    out.append(0)   # chord_flags[1] reserved
+    out.extend([0] * (3 if target_version >= 9 else 1))   # chord_flags[1..3] / [1] reserved
 
-    if len(out) != PBYTES:
-        raise ProfileError(f"internal: encoded {len(out)} bytes, expected {PBYTES}")
+    if target_version >= 9:
+        if len(out) != PBYTES_V9:
+            raise ProfileError(f"internal: encoded {len(out)} bytes, expected {PBYTES_V9}")
+        return bytes(out)                           # v9: full 1038-byte image, byte 0 == 9
 
-    # Default (target_version == 8): byte 0 is already v8 and the full 528-byte
-    # image is returned unchanged - the parity fixture holds. Older target: stamp
-    # the version byte and slice to that version's length (prefix-superset layout).
-    # v7 encode is retired (a v7 full image is no longer a valid wire length); the
-    # Export path reads older formats but only writes v6-and-below prefixes or v8.
-    if target_version == PROFILE_VERSION:           # v8: full 528-byte image
-        return bytes(out)
+    # Legacy target: full frozen 528-byte image built above; stamp the version byte and
+    # slice to that version's length (v1..v8 are clean prefix-supersets). v7 is retired.
+    if len(out) != PBYTES_V8:
+        raise ProfileError(f"internal: encoded {len(out)} bytes, expected {PBYTES_V8}")
     if target_version == 7:
-        raise ProfileError("v7 encode retired; v8 only (export reads older formats, does not write them)")
+        raise ProfileError("v7 encode retired; v8/v9 only (export reads older formats, does not write them)")
     out[0] = target_version
     return bytes(out[:VSIZE[target_version]])
 
 
 def decode_profile(blob):
-    """packed blob (bytes) -> friendly-JSON dict. v8 = 528 B; v6 = 294 B; v5 = 180 B; v4 = 118 B; v3 = 100 B; v2 = 82 B; v1 = 69 B."""
+    """packed blob (bytes) -> friendly-JSON dict. v9 = 1038 B (8 layers); v8 = 528 B
+    (FROZEN 4-layer legacy / migration source); v6 = 294 B; v5 = 180 B; v4 = 118 B;
+    v3 = 100 B; v2 = 82 B; v1 = 69 B. v9 and v8 share the [0..179] prefix; the interior
+    tail (layer banks, ext, chord) is decoded with the source version's layer count."""
     is_v2 = len(blob) >= PBYTES_V2
     if not is_v2 and len(blob) < PBYTES_V1:
         raise ProfileError(f"profile blob too short: {len(blob)} < {PBYTES_V1}")
@@ -523,12 +584,23 @@ def decode_profile(blob):
             b["key_shift"] = 0
             b["mod_shift"] = 0
 
-    # v5: the two appended layers (L3, L4). Older blobs stop before them; default
-    # the layers to None so the friendly form carries only the banks the device has.
-    is_v5 = len(blob) >= PBYTES_V5
-    layers = [None, None, None, None]   # L1/L2 live in the base fields; L3/L4 here
+    # Interior layer count + chord_flags pad width are version-shaped: v9 (>=1038) is
+    # the 8-layer grow-in-place image; v8 (>=528) is the FROZEN 4-layer legacy layout
+    # (also the v8 -> v9 migration source); older blobs carry the historical prefixes.
+    n = len(blob)
+    if n >= PBYTES_V9:
+        n_layers = NUM_LAYERS            # 8
+        chord_pad = 4                    # chord_flags[4]
+    else:
+        n_layers = LEGACY_NUM_LAYERS     # 4 (frozen v8 / migration)
+        chord_pad = 2                    # chord_flags[2]
+
+    # v5/v9: appended layer banks. layers[0]/[1] live in the base/shift fields;
+    # layers[2..n_layers-1] are the appended banks. Older blobs stop before them.
+    is_v5 = n >= PBYTES_V5
+    layers = [None] * n_layers
     if is_v5:
-        for Ln in (2, 3):
+        for Ln in range(2, n_layers):
             fcc = list(blob[off:off + NUM_FADERS]); off += NUM_FADERS
             bv  = list(blob[off:off + NUM_BUTTONS]); off += NUM_BUTTONS
             bk  = list(blob[off:off + NUM_BUTTONS]); off += NUM_BUTTONS
@@ -536,14 +608,14 @@ def decode_profile(blob):
             layers[Ln] = {"fader_cc": fcc, "button_value": bv,
                           "button_key": bk, "button_mod": bm}
 
-    # v6: per-layer ext banks (L2, L3, L4). Older blobs stop before them; default
-    # ext to None so the friendly form only carries banks the device actually has.
-    # Same SoA order as struct layer_ext (profile.h): fader_min, fader_max,
-    # fader_curve, fader_invert, button_type, fader_channel, button_channel.
-    is_v6 = len(blob) >= PBYTES_V6
-    ext = [None, None, None]
+    # v6/v9: per-layer ext banks (ext[0]=L2 .. ext[n_layers-2]=L(n_layers)). Older
+    # blobs stop before them. Same SoA order as struct layer_ext (profile.h):
+    # fader_min, fader_max, fader_curve, fader_invert, button_type, fader_channel,
+    # button_channel.
+    is_v6 = n >= PBYTES_V6
+    ext = [None] * (n_layers - 1)
     if is_v6:
-        for Ln in (0, 1, 2):
+        for Ln in range(0, n_layers - 1):
             fmin = list(blob[off:off + NUM_FADERS]); off += NUM_FADERS
             fmax = list(blob[off:off + NUM_FADERS]); off += NUM_FADERS
             fcur = list(blob[off:off + NUM_FADERS]); off += NUM_FADERS
@@ -555,24 +627,36 @@ def decode_profile(blob):
                        "fader_invert": finv, "button_type": btype,
                        "fader_channel": fch, "button_channel": bch}
 
-    # v8: chord6 grid (4x9 packed) + fader_role (4x4) + chord_flags. Older blobs stop
-    # before it; chord=None so the friendly form only carries a chord block when the
-    # device actually has the v8 tail. Each chord6 is the packed 6-byte stored chord.
-    is_v8 = len(blob) >= PBYTES_V8
+    # v8/v9: chord6 grid (n_layers x 9 packed) + fader_role (n_layers x 4) + chord_flags
+    # (2 B for v8, 4 B for v9). Older blobs stop before it (chord=None). Each chord6 is
+    # the packed 6-byte stored chord.
+    is_chord = n >= PBYTES_V8
     chord = None
-    if is_v8:
-        grid = [[None] * NUM_BUTTONS for _ in range(NUM_LAYERS)]
-        for L in range(NUM_LAYERS):
+    if is_chord:
+        grid = [[None] * NUM_BUTTONS for _ in range(n_layers)]
+        cvgrid = [[None] * NUM_BUTTONS for _ in range(n_layers)]   # Feature 1
+        # Feature 1: dispatch each slot on the already-decoded button type (L0 name in
+        # buttons[i]["type"], L>=1 int in ext[L-1]["button_type"][i]); a cc_value slot
+        # reads {sub,on,off} instead of a chord so the reused slot survives round-trip.
+        for L in range(n_layers):
             for i in range(NUM_BUTTONS):
-                cell = _chord6_unpack(list(blob[off:off + 6])); off += 6
-                grid[L][i] = cell
-        frole = [[0] * NUM_FADERS for _ in range(NUM_LAYERS)]
-        for L in range(NUM_LAYERS):
+                six = list(blob[off:off + 6]); off += 6
+                if L == 0:
+                    t = buttons[i]["type"]
+                else:
+                    t = ext[L - 1]["button_type"][i] if ext[L - 1] else 0
+                if t == "cc_value" or t == 7:
+                    cvgrid[L][i] = _ccval_unpack(six)
+                else:
+                    grid[L][i] = _chord6_unpack(six)
+        frole = [[0] * NUM_FADERS for _ in range(n_layers)]
+        for L in range(n_layers):
             for f in range(NUM_FADERS):
                 frole[L][f] = blob[off]; off += 1
         cvel = blob[off]; off += 1
-        _reserved = blob[off]; off += 1
-        chord = {"chord6": grid, "fader_role": frole, "chord_velocity": cvel}
+        off += chord_pad - 1              # skip chord_flags[1..] reserved pad
+        chord = {"chord6": grid, "fader_role": frole, "chord_velocity": cvel,
+                 "cc_value": cvgrid}
 
     return {
         "format": "sp1-profile",
@@ -718,6 +802,7 @@ class MockTransport:
         self.profiles = [encode_profile(_named_default(i)) for i in range(PROFILES)]
         self.active_within = [0] * NUM_MODES   # per-mode WITHIN-bank active (0..7)
         self.mode = 0          # current device mode: 0 MIDI (default), 1 KEYBOARD
+        self.play_mode = 0     # 0 shift (default), 1 assignable
         self.mon_on = False
         self._next_id = 1
         # A canned burst of mon frames to emit, then stop (for monitor demo/test).
@@ -829,6 +914,15 @@ class MockTransport:
                     return err("BAD_VALUE", "mode must be 0 or 1")
                 self.mode = v
             return {"t": "mode_r", "i": rid, "ok": True, "v": self.mode}
+        if verb == "playrole":
+            # Firmware-parity verb (protocol.c dispatches "playrole"). {"t":"playrole"}
+            # reads PLAY's role; {"t":"playrole","v":0|1} sets it (0 shift, 1 assignable).
+            if "v" in fields:
+                v = fields.get("v")
+                if not isinstance(v, int) or isinstance(v, bool) or v not in (0, 1):
+                    return err("BAD_VALUE", "playrole must be 0 or 1")
+                self.play_mode = v
+            return {"t": "playrole_r", "i": rid, "ok": True, "v": self.play_mode}
         return err("BAD_VERB", "unknown verb")
 
     def read_mon(self):
@@ -1075,7 +1169,7 @@ def run_selftest():
     print("sp1ctl.py self-test")
     print(f"pyserial: {'installed (' + serial.__version__ + ')' if HAVE_PYSERIAL else 'NOT installed -> --mock fallback'}")
 
-    print("\n1. blob size + field offsets match profile.h v6 layout")
+    print("\n1. blob size + field offsets match profile.h v9 layout")
     blob = encode_profile(default_profile())
     check(len(blob) == PBYTES, f"blob is exactly pbytes={PBYTES} bytes (got {len(blob)})")
     check(blob[0] == PROFILE_VERSION, "version at offset 0")
@@ -1094,30 +1188,25 @@ def run_selftest():
     check(blob[91] == 0, "button_mod[0] at offset 91 (== 0, no modifier)")
     check(blob[100] == 0, "button_key_shift[0] at offset 100 (== 0, factory unbound)")
     check(blob[109] == 0, "button_mod_shift[0] at offset 109 (== 0, no modifier)")
-    # v5 L3/L4: default_profile omits `layers`, so the MIDI fader_cc banks default
-    # to the base fader CC (offset 118 == base fader[0].cc == 7) and the keyboard
-    # banks default to 0 (unbound). The first 180 bytes are a clean prefix-superset.
-    check(blob[118] == 7, "L3 fader_cc[0] at offset 118 (defaults to base fader cc == 7)")
+    # v9 L3..L8 (layer[6] @118..303): default_profile omits `layers`, so the v9 image
+    # ZERO-fills every appended layer bank (a full v9 blob is fully explicit; unset ==
+    # empty). This is the HARD BREAK from v8, which INHERITED base for the missing
+    # banks. layer[0]=L3 @118, layer[1]=L4 @149, layer[5]=L8 @273.
+    check(len(blob) == 1038, f"v9 blob is exactly 1038 bytes (got {len(blob)})")
+    check(blob[118] == 0, "L3 fader_cc[0] at offset 118 (== 0, v9 zero-fill)")
     check(blob[131] == 0, "L3 button_key[0] at offset 131 (== 0, factory unbound)")
-    check(blob[149] == 7, "L4 fader_cc[0] at offset 149 (defaults to base fader cc == 7)")
-    # v6 ext tail (L2/L3/L4): default_profile omits `ext`, so each ext bank INHERITS
-    # L1 (the v5 share-from-L1 model). The 294-byte v6 region is a clean prefix-
-    # superset of the 180-byte v5 image. ext[0]=L2 starts at offset 180.
-    check(len(blob) == 528, f"v8 blob is exactly 528 bytes (got {len(blob)})")
-    check(blob[180] == 0, "ext[0].fader_min[0] at offset 180 (inherits L1 fader min == 0)")
-    check(blob[184] == 127, "ext[0].fader_max[0] at offset 184 (inherits L1 fader max == 127)")
-    check(blob[196] == BTN_VALS["cc_momentary"],
-          "ext[0].button_type[0] at offset 196 (inherits L1 button[0].type == cc_momentary)")
-    check(blob[205] == 0, "ext[0].fader_channel[0] at offset 205 (inherits L1 fader ch == 0)")
-    check(blob[210] == 1, "ext[0].button_channel[1]=Track1 at offset 210 (inherits L1 button ch == 1)")
-    check(blob[293] == 2, "ext[2].button_channel[8]=RWD at offset 293 (last byte of the v6 region, inherits L1 ch == 2)")
-    # v8 chord tail (default_profile omits `chord`): chord6 grid all-zero from offset
-    # 294 (216 B = no chords); fader_role all-zero from 510 (16 B = role cc); chord
-    # velocity 100 at 526; chord_flags[1] reserved = 0 at 527 (the last byte).
-    check(blob[294] == 0, "chord6[0][0].hdr at offset 294 (== 0, empty chord)")
-    check(blob[510] == 0, "fader_role[0][0] at offset 510 (== 0, role cc)")
-    check(blob[526] == 100, "chord_flags[0]=velocity at offset 526 (== 100, default)")
-    check(blob[527] == 0, "chord_flags[1]=reserved at offset 527 (== 0, last byte)")
+    check(blob[149] == 0, "L4 fader_cc[0] at offset 149 (== 0, v9 zero-fill)")
+    check(blob[273] == 0, "L8 fader_cc[0] at offset 273 (== 0, v9 zero-fill)")
+    # v9 ext[7] (@304..569): default_profile omits `ext`, so every ext bank zero-fills.
+    check(blob[304] == 0, "ext[0].fader_min[0] at offset 304 (== 0, v9 zero-fill)")
+    check(blob[569 - NUM_BUTTONS + 2] == 0, "ext[6].button_channel[.] near offset 569 (== 0)")
+    # v9 chord tail (default_profile omits `chord`): chord6[8][9] grid all-zero from
+    # offset 570 (432 B = no chords); fader_role all-zero from 1002 (32 B = role cc);
+    # chord velocity 100 at 1034; chord_flags[1..3] reserved = 0 at 1035..1037 (the pad).
+    check(blob[570] == 0, "chord6[0][0].hdr at offset 570 (== 0, empty chord)")
+    check(blob[1002] == 0, "fader_role[0][0] at offset 1002 (== 0, role cc)")
+    check(blob[1034] == 100, "chord_flags[0]=velocity at offset 1034 (== 100, default)")
+    check(blob[1035] == 0 and blob[1037] == 0, "chord_flags[1..3]=reserved pad at 1035..1037 (== 0)")
     # 0.12.1 three-channel default: button_channel[9] at offset 73 (v2 layout).
     # PLAY (idx 0) -> ch1 (0); front Track1..4 (idx 1..4) -> ch2 (1); side
     # Vol/FWD/RWD (idx 5..8) -> ch3 (2). Keeps faders (ch1) and buttons off the
@@ -1151,10 +1240,12 @@ def run_selftest():
         "shift": {"fader_cc": [20, 21, 22, 23],
                   "button_value": [30, 31, 32, 33, 34, 35, 36, 37, 38]},
     }
-    blob1 = encode_profile(p_in)                 # full v8 image (528 B)
+    blob1 = encode_profile(p_in)                 # full v9 image (1038 B, default target)
     b64 = base64.b64encode(blob1).decode("ascii")
     blob1_v4 = encode_profile(p_in, 4)           # the v4 prefix (118 B, byte 0 = 4)
     b64_v4 = base64.b64encode(blob1_v4).decode("ascii")
+    blob1_v8 = encode_profile(p_in, 8)           # the FROZEN legacy image (528 B) for
+                                                 # the v1..v8 prefix-superset checks
     # Cross-repo v4 parity fixture (must be byte-identical to the web repo's
     # SELFTEST_V4 / codec.test.ts SELFTEST_V4_B64). Base keymap: a,b,Enter,Space,
     # Tab,Esc,Left,Right,unbound with Ctrl,Shift,-,Alt,Gui,Ctrl+Shift modifiers.
@@ -1164,10 +1255,10 @@ def run_selftest():
     PARITY_V4_B64 = ("BAUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhce"
                      "HyAhIiMkJSZPUC1YWSBtaXgAAAAAAAAAAAECAwQFBgcICQoLDAQFKCwrKVBP"
                      "AAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAAA==")
-    check(len(blob1) == 528, f"v8 image is 528 bytes (got {len(blob1)})")
+    check(len(blob1) == 1038, f"v9 image is 1038 bytes (got {len(blob1)})")
     check(len(blob1_v4) == 118, f"v4 parity slice is 118 bytes (got {len(blob1_v4)})")
     check(b64_v4 == PARITY_V4_B64, "cross-repo v4 parity base64 matches the canonical literal")
-    check(blob1[1:118] == blob1_v4[1:], "v5 first 118 bytes == v4 image (prefix superset)")
+    check(blob1[1:118] == blob1_v4[1:], "v9 first 118 bytes == v4 image (shared prefix [0..117])")
     check(blob1[82] == 0x04, "parity fixture button_key[0] at offset 82 (== 0x04 'a')")
     check(blob1[84] == 0x28, "parity fixture button_key[2] at offset 84 (== 0x28 Enter)")
     check(blob1[90] == 0x00, "parity fixture button_key[8] at offset 90 (== 0x00 unbound)")
@@ -1190,17 +1281,20 @@ def run_selftest():
             p_out["shift"] == p_in["shift"])
     check(same, "decoded friendly-JSON equals input (channel/name/faders/buttons/shift)")
 
-    # 2b. version-aware encode: write an OLDER device's own format. Build the full
-    # v8 image, stamp byte 0, slice to VSIZE[target]. Default (no target) == v8.
-    check(encode_profile(p_in) == blob1, "encode default == v8 (target arg optional)")
-    check(VSIZE == {1: 69, 2: 82, 3: 100, 4: 118, 5: 180, 6: 294, 8: 528},
-          "VSIZE = {1:69,2:82,3:100,4:118,5:180,6:294,8:528}")
+    # 2b. version-aware encode: the default (no target) is the full v9 image; older
+    # targets (1..8) build the FROZEN legacy image, stamp byte 0, and slice to
+    # VSIZE[target] (v1..v8 are clean prefix-supersets of the 528-byte v8 image).
+    check(encode_profile(p_in) == blob1, "encode default == v9 (target arg optional)")
+    check(VSIZE == {1: 69, 2: 82, 3: 100, 4: 118, 5: 180, 6: 294, 8: 528, 9: 1038},
+          "VSIZE = {1:69,2:82,3:100,4:118,5:180,6:294,8:528,9:1038}")
+    check(len(encode_profile(p_in, 9)) == 1038 and encode_profile(p_in, 9) == blob1,
+          "encode(p, 9) is the 1038-byte v9 image (== default)")
     for tv, sz in ((1, 69), (2, 82), (3, 100), (4, 118), (5, 180), (6, 294), (8, 528)):
         bv = encode_profile(p_in, tv)
         check(len(bv) == sz, f"encode(p, {tv}) is {sz} bytes")
         check(bv[0] == tv, f"encode(p, {tv}) byte0 == {tv}")
         if tv < 7:
-            check(bytes(bv[1:]) == blob1[1:sz], f"encode(p, {tv}) body == v8 image[1:{sz}] (prefix superset)")
+            check(bytes(bv[1:]) == blob1_v8[1:sz], f"encode(p, {tv}) body == v8 image[1:{sz}] (prefix superset)")
     # a v2-target encode then decode round-trips the v1+v2 fields (no v3/v4 tail)
     pv2 = decode_profile(encode_profile(p_in, 2))
     check(pv2["version"] == 2, "v2-target decode reports version 2")
@@ -1209,12 +1303,12 @@ def run_selftest():
           "v2-target decode round-trips per-control channels")
     check(all(b["key"] == 0 and b["mod"] == 0 and b["key_shift"] == 0 and b["mod_shift"] == 0
               for b in pv2["buttons"]), "v2-target decode: v3/v4 tail defaults to 0")
-    # v7 is a retired wire target (its 444-byte full image is no longer valid); v8 is
-    # the only full-image target. Both an unknown target (9) and the retired v7 raise.
+    # v7 is a retired wire target (its 444-byte full image is no longer valid). It
+    # raises; an unknown target (99) also raises.
     try:
-        encode_profile(p_in, 9); check(False, "encode target 9 rejected (unknown)")
+        encode_profile(p_in, 99); check(False, "encode target 99 rejected (unknown)")
     except ProfileError:
-        check(True, "encode target 9 rejected (unknown)")
+        check(True, "encode target 99 rejected (unknown)")
     try:
         encode_profile(p_in, 7); check(False, "encode target 7 rejected (retired)")
     except ProfileError:
@@ -1317,6 +1411,134 @@ def run_selftest():
     p_v8_out = decode_profile(blob_v8)
     check(encode_profile(p_v8_out, 8) == blob_v8, "v8 re-encode of decoded profile is byte-identical")
 
+    print("\n2e. v9 3-way byte-parity: the shared 1384-char golden (firmware authoritative)")
+    PARITY_V9_B64 = (
+        "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAA"
+        "ECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwNDg8QERIC"
+        "AwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB"
+        "4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoLDA0OJicoKVNUVVZX"
+        "WFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAA"
+        "ECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQFAwQFBgQFBgcICQoLDAQFBgdo"
+        "aWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ"
+        "4GBwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1uAQIAAQEAAQABAgMEBQABAgMHCAkKCAkK"
+        "CwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFkAAAA"
+       )
+    check(VSIZE.get(9) == 1038, "VSIZE[9] == 1038")
+    check(VSIZE[8] == 528 and VSIZE[6] == 294, "VSIZE[8]==528 / VSIZE[6]==294 tripwires still pinned")
+    check(len(PARITY_V9_B64) == 1384 and not PARITY_V9_B64.endswith("="),
+          "v9 base64 is 1384 chars, no padding (1038 % 3 == 0)")
+    blob9 = base64.b64decode(PARITY_V9_B64)
+    check(len(blob9) == 1038, f"v9 golden decodes to 1038 bytes (got {len(blob9)})")
+    p9 = decode_profile(blob9)                                  # 8-layer v9 decode
+    check(p9["version"] == 9, "v9 golden version byte == 9")
+    # semantic spot-checks mirror firmware make_parity_v9 arithmetic (independent oracle):
+    #   fader_cc = 10 + L*4 + i ; ext.fader_min = L + i ; button_value = 20 + L*9 + i
+    check(p9["faders"][0]["cc"] == 10, "L0 fader0 cc == 10 (10+0*4+0)")
+    check(p9["buttons"][0]["value"] == 20, "L0 button0 value == 20 (20+0*9+0)")
+    check(p9["shift"]["fader_cc"][0] == (10 + 1 * 4 + 0) & 0x7F, "L1 shift fader_cc[0] == 14")
+    # higher layers/ext: layers[2..7]=L3..L8, ext[0..6]=L2..L8 (sp1ctl v9 decode shape)
+    check(p9["layers"][7]["fader_cc"][0] == (10 + 7 * 4 + 0) & 0x7F, "L8 fader_cc[0] == 38")
+    check(p9["ext"][6]["fader_min"][1] == (7 + 1) & 0x7F, "L8 ext fader_min[1] == 8")
+    check(p9["chord"]["chord6"][2][3]["mode"] == 2 and p9["chord"]["chord6"][2][3]["root"] == 48,
+          "chord6[2][3] decodes to Cmin7 root 48")
+    check(p9["chord"]["fader_role"][0][0] == 1 and p9["chord"]["chord_velocity"] == 100,
+          "fader_role diagonal + velocity 100")
+    # RECONCILE: python v9 re-encode of the decoded golden is byte-identical to firmware.
+    reenc9 = base64.b64encode(encode_profile(p9)).decode("ascii")
+    check(reenc9 == PARITY_V9_B64, "python v9 re-encode == firmware PARITY_V9_B64 (RECONCILED)")
+
+    print("\n2h. v9 cc_value 3-way byte-parity (firmware authoritative)")
+    PARITY_V9_CCVAL_B64 = (
+        "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgcXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAA"
+        "AAAAECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwN"
+        "Dg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGA"
+        "QFBgcICQoLDB4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoL"
+        "DA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQ"
+        "YHCAkKAgMEBWZnaGkCAAECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAcCAwQF"
+        "AwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAA"
+        "UAAQIDBAUAAQUGBwgGBwgJCgsMDQ4GBwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1u"
+        "AQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAktAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAktAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAA"
+        "EAAAAAAQEAAAAAAQAAAAABAAAAAAFkAAAA"
+    )
+    check(len(PARITY_V9_CCVAL_B64) == 1384 and not PARITY_V9_CCVAL_B64.endswith("="),
+          "cc_value golden is 1384 chars, no padding")
+    blob_cv = base64.b64decode(PARITY_V9_CCVAL_B64)
+    check(len(blob_cv) == 1038, "cc_value golden decodes to 1038 bytes")
+    # offset asserts (spec Section 7): slot at 570 + (L*9+i)*6
+    check(blob_cv[28] == 7,  "button[3].type == cc_value at offset 28")
+    check(blob_cv[400] == 7, "ext[2].button_type[4] == cc_value at offset 400")
+    check(list(blob_cv[588:594]) == [0, 9, 45, 0, 0, 0], "chord6[0][3] cc_value slot at 588 (set-on-press)")
+    check(list(blob_cv[756:762]) == [0, 9, 45, 2, 0, 0], "chord6[3][4] cc_value slot at 756 (toggle)")
+    p_cv = decode_profile(blob_cv)
+    check(p_cv["buttons"][3]["type"] == "cc_value", "L0 idx3 decodes to cc_value")
+    check(p_cv["chord"]["cc_value"][0][3] == {"sub_mode": 0, "on": 9, "off": 45},
+          "L0 idx3 cc_value decodes to set-on-press 9/45")
+    check(p_cv["chord"]["cc_value"][3][4] == {"sub_mode": 2, "on": 9, "off": 45},
+          "L3 idx4 cc_value decodes to toggle 9/45")
+    reenc_cv = base64.b64encode(encode_profile(p_cv)).decode("ascii")
+    check(reenc_cv == PARITY_V9_CCVAL_B64, "python cc_value re-encode == firmware golden (RECONCILED)")
+
+    print("\n2g. v8 -> v9 legacy migration: frozen 4-layer decode upconverts to 8 layers")
+    PARITY_V8_LEGACY_SRC_B64 = (
+        "CAUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhceHyAhIiMkJSZPUC1YWSBtaXgAAAAAAAAAAA"
+        "ECAwQFBgcICQoLDAQFKCwrKVBPAAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAACgpKis8PT4/QEFCQ0QUFRYXGBkaGxwB"
+        "AgQIAQIECAAyMzQ1RkdISUpLTE1OHh8gISIjJCUmCAQCAQgEAgEAAAUKD394ZFoAAQIAAAEAAQECAwQFAAECAwECAwQAAQ"
+        "IDBAUGBwgBAgMEbm9wcQECAAEBAAEAAgMEBQABAgMEBQYHCAkKCwwNDg8AARQABwB/QFBgAgABAgEBAAADBAUAAQIDBAUJ"
+        "CgsMAgMEBQYHCAkKAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAF"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAWQA"
+       )
+    PARITY_V8_LEGACY_B64 = (
+        "CQUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhceHyAhIiMkJSZPUC1YWSBtaXgAAAAAAAAAAA"
+        "ECAwQFBgcICQoLDAQFKCwrKVBPAAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAACgpKis8PT4/QEFCQ0QUFRYXGBkaGxwB"
+        "AgQIAQIECAAyMzQ1RkdISUpLTE1OHh8gISIjJCUmCAQCAQgEAgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCg9/eGRaAAECAAABAAEBAgMEBQABAgMBAgMEAAECAwQFBgcIAQIDBG5vcHEBAg"
+        "ABAQABAAIDBAUAAQIDBAUGBwgJCgsMDQ4PAAEUAAcAf0BQYAIAAQIBAQAAAwQFAAECAwQFCQoLDAIDBAUGBwgJCgAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQAAAAAAAAAAAAAAAAAAAABkAAAA"
+       )
+    v8src = base64.b64decode(PARITY_V8_LEGACY_SRC_B64)
+    check(len(v8src) == 528, f"frozen v8 source is 528 bytes (got {len(v8src)})")
+    p_mig = decode_profile(v8src)                # frozen LEGACY_NUM_LAYERS=4 decode path
+    check(p_mig["version"] == 8, "legacy source decodes as version 8")
+    check(len(p_mig["layers"]) == LEGACY_NUM_LAYERS, "v8 decode exposes the frozen 4-layer shape")
+    check(p_mig["faders"][0]["cc"] == 7, "migrated L1 fader0 cc == 7 (from v8 inline)")
+    check(p_mig["layers"][3]["fader_cc"][0] == 50, "migrated L4 fader_cc[0] == 50 (v8 layer[1])")
+    mig9 = base64.b64encode(encode_profile({**p_mig, "version": 9})).decode("ascii")
+    check(len(mig9) == 1384, "upconverted v9 image is 1384 chars")
+    check(mig9 == PARITY_V8_LEGACY_B64, "python v8 -> v9 upconvert == C reference (RECONCILED)")
+    # L5..L8 come up EMPTY under the frozen upconvert; L1..L4 carry the v8 data.
+    p_up = decode_profile(base64.b64decode(mig9))
+    check(p_up["version"] == 9 and len(p_up["layers"]) == 8, "upconvert exposes 8 layers")
+    check(p_up["layers"][3]["fader_cc"][0] == 50, "L4 preserved from v8 after upconvert")
+    check(all(x == 0 for x in p_up["layers"][7]["fader_cc"]) and
+          all(x == 0 for x in p_up["layers"][7]["button_value"]), "L8 layer bank EMPTY after upconvert")
+    check(p_up["ext"][6]["fader_max"] == [0, 0, 0, 0], "L8 ext bank EMPTY after upconvert")
+    check(p_up["chord"]["chord6"][7] == [None] * NUM_BUTTONS and p_up["chord"]["fader_role"][7] == [0, 0, 0, 0],
+          "L8 chord + role EMPTY after upconvert")
+
+
     print("\n3. firmware-parity: b64 alphabet is standard + padding matches profile.c")
     # profile.c uses A-Za-z0-9+/ with canonical '=' padding; pad = (3 - pbytes%3)%3.
     # v5 (180 B): 180 % 3 == 0 -> pad == 0, so the 240-char wire form has NO padding.
@@ -1393,6 +1615,18 @@ def run_selftest():
         mt.request("mode", v=2); check(False, "mode v=2 rejected")
     except ProtocolError as e:
         check("BAD" in str(e), "mode v=2 -> BAD_*")
+    # playrole verb (Feature 4): firmware protocol.c dispatches "playrole" right
+    # after "mode". get defaults to 0 (shift), set 1 -> assignable, get reflects,
+    # v=2 rejected -> playrole_r {v} / BAD_VALUE matches the firmware.
+    pr = mt.request("playrole")
+    check(pr["t"] == "playrole_r" and pr["v"] == 0, "playrole get defaults to 0 (shift)")
+    ps = mt.request("playrole", v=1)
+    check(ps["t"] == "playrole_r" and ps["v"] == 1, "playrole set 1 -> assignable")
+    check(mt.request("playrole")["v"] == 1, "playrole get reflects the set")
+    try:
+        mt.request("playrole", v=2); check(False, "playrole v=2 rejected")
+    except ProtocolError as e:
+        check("BAD" in str(e), "playrole v=2 -> BAD_*")
     # mock error paths
     try:
         mt.request("read", n=99); check(False, "bad index rejected")

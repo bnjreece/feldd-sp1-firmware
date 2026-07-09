@@ -1,12 +1,12 @@
 SRC=../app/src
 CFLAGS=-Wall -Wextra -I$(SRC)
-TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override
+TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override test_nvs_erase test_btn_toggle test_cc_value
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
 test_control_logic: test_control_logic.c $(SRC)/control_logic.c $(SRC)/control_logic.h
 	$(CC) $(CFLAGS) -o $@ test_control_logic.c $(SRC)/control_logic.c
-test_mapping: test_mapping.c $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h
-	$(CC) $(CFLAGS) -o $@ test_mapping.c $(SRC)/mapping.c $(SRC)/chord6.c
+test_mapping: test_mapping.c $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/cc_value.c $(SRC)/cc_value.h
+	$(CC) $(CFLAGS) -o $@ test_mapping.c $(SRC)/mapping.c $(SRC)/chord6.c $(SRC)/cc_value.c
 test_profile: test_profile.c $(SRC)/profile.c $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h
 	$(CC) $(CFLAGS) -o $@ test_profile.c $(SRC)/profile.c $(SRC)/chord6.c
 test_profile_h_dep: $(SRC)/profile.h
@@ -44,5 +44,11 @@ test_chord6: test_chord6.c $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/profile.h
 	$(CC) $(CFLAGS) -o $@ test_chord6.c $(SRC)/chord6.c
 test_led_override: test_led_override.c $(SRC)/led_override.c $(SRC)/led_override.h
 	$(CC) $(CFLAGS) -o $@ test_led_override.c $(SRC)/led_override.c
+test_btn_toggle: test_btn_toggle.c $(SRC)/btn_toggle.h $(SRC)/profile.h
+	$(CC) $(CFLAGS) -o $@ test_btn_toggle.c
+test_cc_value: test_cc_value.c $(SRC)/cc_value.c $(SRC)/cc_value.h $(SRC)/profile.h $(SRC)/btn_toggle.h
+	$(CC) $(CFLAGS) -o $@ test_cc_value.c $(SRC)/cc_value.c
+test_nvs_erase: test_nvs_erase.c $(SRC)/nvs_erase.h
+	$(CC) $(CFLAGS) -o $@ test_nvs_erase.c
 .PHONY: test clean
 clean: ; rm -f $(TESTS)

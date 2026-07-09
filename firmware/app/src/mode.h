@@ -11,10 +11,10 @@
  * shows the LAYER (one LED at gesture_layer()), and mode_led_pattern() is now the
  * source for a TEMPORARY MODE-FLASH that plays for ~1.2 s on a switch and then
  * yields back to the layer LED (side_led.c / side_led_pattern, armed via
- * mode_flash_ticks in main.c). There is no resting mode indicator anymore. The
- * toggle gesture (PLAY held + tap FWD/RWD) decision is mode_decide(); main.c owns
- * the gesture_disarm + librarian write — this unit is pure, modifier-agnostic
- * logic only. */
+ * mode_flash_ticks in main.c). There is no resting mode indicator anymore.
+ * Feature 4 retired the mode_decide hold-plateau gesture: the mode flip is now a
+ * genuine dot-dot+T4 combo toggle (mode_toggle + combo_dispatch below), so this
+ * unit is the pure mode enum + LED table + the combo engine. */
 
 enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1 };
 
@@ -43,43 +43,34 @@ enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1 };
 #define MODE_LED3 0x04u
 #define MODE_LED4 0x08u
 
-/* The ladder indices the mode gesture watches (buttons.c order). */
-#define MODE_BTN_FWD 7   /* •• + FWD -> KEYBOARD */
-#define MODE_BTN_RWD 8   /* •• + RWD -> MIDI     */
-
-/* PLAY must be held at least this many scan ticks before a FWD/RWD edge is taken
- * as a mode flip (else it passes through to transport). Guards the OP-XY 8-track
- * collision (spec §4.3): a quick track-select PLAY tap coincident with a rocker
- * edge must NOT silently flip MIDI<->Keyboard. Value MATCHES the peek plateau
- * PEEK_HOLD_SCANS (gesture.h); main.c BUILD_ASSERTs the two are equal. */
-#define MODE_FLIP_ARM_SCANS 75
-
-struct mode_decision {
-    uint8_t set;       /* 1 -> caller calls librarian_set_mode(which) */
-    uint8_t which;     /* MODE_MIDI / MODE_KEYBOARD (valid iff set) */
-    uint8_t consumed;  /* 1 -> caller MUST NOT map_button/usb_hid this edge, and
-                        *      MUST gesture_disarm() the shift detector so the held
-                        *      PLAY press can't complete a stray shift double-tap */
-};
-
-/* Decide what a single button edge means given the modifier state THIS tick.
- *   modifier_hold_ticks : scan ticks the modifier (PLAY) has been continuously
- *                         held this hold (0 = not held); a FWD/RWD PRESS is a mode
- *                         flip only once this reaches MODE_FLIP_ARM_SCANS. Below
- *                         the plateau the edge is passthrough (transport).
- *   idx                 : the logical button index of the edge (0..8).
- *   pressed             : 1 press edge, 0 release edge.
- * A FWD/RWD PRESS while the modifier is held PAST the arm plateau sets the mode
- * and consumes the edge. The matching RELEASE while armed is consumed (so it never
- * types/maps) but sets nothing. Anything else is passthrough (set=0, consumed=0).
- * This logic is modifier-agnostic: main.c supplies the PLAY hold-tick count. */
-struct mode_decision mode_decide(int modifier_hold_ticks, int idx, int pressed);
-
 /* The SIDE-row (PLAY-LED) on/off pattern for `mode` (an OR of MODE_LED* bits, each
  * mapping to SP1_PLAY_LED1..4 — see the HARDWARE CONTRACT above). Used as the
  * MODE-FLASH pattern source (0.9.1: a temporary flash on a switch, not a resting
  * indicator). MIDI = 1+4, KEYBOARD = 2+3, modes 2/3 reserved (1+2, 3+4);
  * out-of-range clamps to the MIDI pattern. Raw on/off — no PWM, no pulsing. */
 uint8_t mode_led_pattern(int mode);
+
+/* ---- Feature 4: dot-dot (••) Fn-modifier combo engine ----
+ * While •• is held (func_down), a PRESS on the combo ladder buttons carries an
+ * action: T4 flips MODE (MIDI<->Keyboard), Vol+/- cycle the profile, FWD/RWD step
+ * the layer. The press is consumed (latched per index) and, whatever the crossing
+ * ordering, the matching RELEASE is swallowed IFF that index's latch bit is set -
+ * never gated on the instantaneous func_down at the release edge (spec (h)1). Any
+ * consumed press signals reset_hold so main.c voids the •• power-off hold (clean-
+ * hold gate, spec (b)4). This retires mode_decide's press logic; the toggle is a
+ * genuine flip fired once on the press so Keyboard stays reachable and cannot
+ * double-fire. */
+enum combo_action { COMBO_NONE=0, COMBO_MODE_TOGGLE=1, COMBO_PROFILE_NEXT=2,
+                    COMBO_PROFILE_PREV=3, COMBO_LAYER_NEXT=4, COMBO_LAYER_PREV=5 };
+#define COMBO_BTN_T4 4
+#define COMBO_BTN_VOLUP 5
+#define COMBO_BTN_VOLDN 6
+#define COMBO_BTN_FWD 7
+#define COMBO_BTN_RWD 8
+typedef struct { uint16_t latched; } combo_latch_t;   /* bit i = idx i consumed-as-combo */
+struct combo_decision { uint8_t action; uint8_t consumed; uint8_t reset_hold; };
+void combo_latch_init(combo_latch_t *l);
+struct combo_decision combo_dispatch(combo_latch_t *l, int func_down, int idx, int pressed);
+uint8_t mode_toggle(uint8_t cur);
 
 #endif /* MODE_H */

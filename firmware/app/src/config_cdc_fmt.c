@@ -37,3 +37,14 @@ int config_cdc_fmt_mode(char *buf, int cap, int v)
     }
     return len;
 }
+
+int config_cdc_fmt_playrole(char *buf, int cap, int v)
+{
+    int role = (v == 1) ? 1 : 0;   /* clamp to 0/1 like fmt_mode's defensive clamp */
+    int len = snprintf(buf, (size_t)(cap > 0 ? cap : 0),
+                       "{\"t\":\"mon\",\"k\":\"playrole\",\"v\":%d}\n", role);
+    if (len < 0 || len >= cap) {
+        return -1;
+    }
+    return len;
+}

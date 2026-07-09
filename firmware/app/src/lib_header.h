@@ -63,4 +63,13 @@ static inline void lib_header_set_active(struct lib_header *h, uint8_t mode,
     }
 }
 
+/* PLAY-role global byte (Feature 4). Stored in a SEPARATE NVS record
+ * (LIB_ID_SETTINGS), never in this 4-byte header. 0 = shift (default), 1 = assignable. */
+#define LIB_PLAYROLE_DEFAULT 0u
+#define LIB_PLAYROLE_MAX     1u
+static inline int lib_playrole_valid(uint8_t v){ return v <= LIB_PLAYROLE_MAX; }
+static inline uint8_t lib_playrole_load(int present, uint8_t stored){
+    return (present && lib_playrole_valid(stored)) ? stored : LIB_PLAYROLE_DEFAULT;
+}
+
 #endif /* LIB_HEADER_H */

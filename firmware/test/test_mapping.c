@@ -6,16 +6,18 @@
 static struct midi_msg cap[8]; static int ncap;
 static void sink(const struct midi_msg *m, void *ctx){ (void)ctx; cap[ncap++]=*m; }
 
-/* v5: seed the two appended layers (L3, L4) with values distinct from inline
- * (L1) and shift (L2) so the per-layer select test can tell all four apart. */
+/* v9: seed ALL appended layer banks (L3..L8 = layer[0..NUM_LAYERS-3]) distinct
+ * from inline (L1) and shift (L2). Bases 40/60 keep layer[0]=L3 and layer[1]=L4
+ * byte-identical to the pre-v9 seed so t_*_four_layers still pass. */
 static void seed_extra_layers(struct profile *p) {
-    for (int i = 0; i < NUM_FADERS; i++) {
-        p->layer[0].fader_cc[i] = (uint8_t)(40 + i);   /* L3 */
-        p->layer[1].fader_cc[i] = (uint8_t)(50 + i);   /* L4 */
-    }
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-        p->layer[0].button_value[i] = (uint8_t)(60 + i);
-        p->layer[1].button_value[i] = (uint8_t)(70 + i);
+    for (int b = 0; b < NUM_LAYERS - 2; b++) {
+        for (int i = 0; i < NUM_FADERS; i++)
+            p->layer[b].fader_cc[i] = (uint8_t)(40 + b * 10 + i);
+        for (int i = 0; i < NUM_BUTTONS; i++) {
+            p->layer[b].button_value[i] = (uint8_t)(60 + b * 10 + i);
+            p->layer[b].button_key[i]   = (uint8_t)(1  + b * 10 + i);
+            p->layer[b].button_mod[i]   = (uint8_t)(b + 1);
+        }
     }
 }
 /* v6: seed the per-layer ext banks (L2/L3/L4) with values DISTINCT from L1 and
@@ -90,6 +92,22 @@ static void t_button_four_layers(void){
     ncap=0; map_button(&p,1,1,1,sink,0); assert(cap[0].d1==p.shift.button_value[1]); /* L2 */
     ncap=0; map_button(&p,1,1,2,sink,0); assert(cap[0].d1==61);   /* L3 layer[0] */
     ncap=0; map_button(&p,1,1,3,sink,0); assert(cap[0].d1==71);   /* L4 layer[1] */
+}
+/* v9: the four per-layer SELECT accessors resolve L5..L8 (layers 4..7) to
+ * layer[layer-2] (layer[2..5]), NOT the L1 inline default. Before the widen a
+ * layer>=4 fell to `default` and returned L1's CC/value/key/mod. */
+static void t_select_accessors_layers_5_8(void){
+    struct profile p=P();
+    for (int L = 4; L < NUM_LAYERS; L++) {
+        const struct layer_bank *b = &p.layer[L-2];
+        for (int i = 0; i < NUM_FADERS; i++)
+            assert(profile_layer_fader_cc(&p,i,L)==b->fader_cc[i]);
+        for (int i = 0; i < NUM_BUTTONS; i++) {
+            assert(profile_layer_button_value(&p,i,L)==b->button_value[i]);
+            assert(profile_layer_button_key(&p,i,L)==b->button_key[i]);
+            assert(profile_layer_button_mod(&p,i,L)==b->button_mod[i]);
+        }
+    }
 }
 /* v6: the new per-layer ext accessors return the ACTIVE LAYER's value: layer 0
  * = L1 inline, 1 = ext[0] (L2), 2 = ext[1] (L3), 3 = ext[2] (L4). */
@@ -166,6 +184,21 @@ static void t_fader_per_layer_channel(void){
     ncap=0; map_fader(&p,0,100,1,sink,0); assert(cap[0].status==(0xB0|5));
     ncap=0; map_fader(&p,0,100,2,sink,0); assert(cap[0].status==(0xB0|9));
     ncap=0; map_fader(&p,0,100,3,sink,0); assert(cap[0].status==(0xB0|12));
+}
+/* v9: the misroute trap. A fader on L5 (layer 4) must ride L5's OWN channel
+ * (ext[3]), not silently fall back to L1's. Before the ext-accessor widen,
+ * layer 4 failed the <=3 guard and emitted on L1's channel. The CC (d1) comes
+ * from the M1-widened select accessor (layer[2]); the channel from ext[3]. */
+static void t_fader_layer5_rides_own_channel(void){
+    struct profile p=P();
+    p.fader_channel[0]=2;                 /* L1 */
+    p.ext[3].fader_channel[0]=10;         /* L5 = ext[3] */
+    p.ext[3].fader_min[0]=0;   p.ext[3].fader_max[0]=127;
+    p.ext[3].fader_curve[0]=CURVE_LINEAR; p.ext[3].fader_invert[0]=0;
+    ncap=0; map_fader(&p,0,100,4,sink,0);
+    assert(cap[0].status==(uint8_t)(0xB0|10));       /* rides ch10, NOT ch2 */
+    assert(cap[0].d1==p.layer[2].fader_cc[0]);       /* L5 CC = layer[2].fader_cc[0] (60) */
+    assert(cap[0].d2==100);                          /* full range, linear */
 }
 /* v6: button TYPE is read per-layer. Same button is NOTE on L1, CC_MOMENTARY on
  * L2, and NONE (silent) on L3. */
@@ -272,15 +305,44 @@ static void t_fader_role_accessor(void){
     assert(profile_layer_fader_role(&p,0,3)==FADER_ROLE_CHORD_DEPTH);
     assert(profile_layer_fader_role(&p,9,0)==FADER_ROLE_CC);   /* OOB -> cc */
 }
+/* Feature 1: profile_layer_ccval decodes the reused chord6 slot and bounds-guards
+   idx/layer exactly like profile_layer_chord (mapping.c). */
+static void t_ccval_accessor(void){
+    struct profile p; memset(&p,0,sizeof p); p.version=PROFILE_VERSION;
+    /* L0 button 3 = set-on-press on_value 9; L3 button 4 = toggle 9<->45 */
+    p.chord6[0][3] = (struct chord6){ .b = { 0, 9, 45, 0, 0, 0 } };
+    p.chord6[3][4] = (struct chord6){ .b = { 0, 9, 45, 2, 0, 0 } };
+    uint8_t sub,on,off;
+    assert(profile_layer_ccval(&p,3,0,&sub,&on,&off)==0);
+    assert(sub==0 && on==9 && off==45);
+    assert(profile_layer_ccval(&p,4,3,&sub,&on,&off)==0);
+    assert(sub==2 && on==9 && off==45);
+    /* out-of-range idx/layer guarded -> -1 (no write past the array) */
+    assert(profile_layer_ccval(&p,99,0,&sub,&on,&off)==-1);
+    assert(profile_layer_ccval(&p,0,NUM_LAYERS,&sub,&on,&off)==-1);
+    assert(profile_layer_ccval(&p,-1,0,&sub,&on,&off)==-1);
+}
+/* effective_layer: play_mode 0 (shift) + play_held -> L2 (index 1); otherwise
+ * the engaged gesture layer. Assignable mode (play_mode 1) NEVER shifts. */
+static void t_effective_layer_shift_vs_assignable(void){
+    assert(effective_layer(0, 1, 3) == 1);   /* shift held -> L2 */
+    assert(effective_layer(0, 0, 3) == 3);   /* shift released -> engaged */
+    assert(effective_layer(0, 1, 0) == 1);   /* held from L1 -> L2 */
+    assert(effective_layer(1, 1, 3) == 3);   /* assignable: no shift */
+    assert(effective_layer(1, 0, 2) == 2);   /* assignable, released */
+}
+
 int main(void){ t_fader_cc();t_fader_invert();t_fader_range();t_fader_shift_bank();
     t_button_note();t_button_cc_momentary();t_button_none_silent();
     t_fader_curve_log();t_fader_curve_exp();t_button_toggle_engine_silent();
     t_fader_per_channel();t_button_per_channel();
-    t_fader_four_layers();t_button_four_layers();
+    t_fader_four_layers();t_button_four_layers();t_select_accessors_layers_5_8();
     t_ext_accessors_per_layer();
     t_fader_per_layer_range();t_fader_per_layer_curve();
-    t_fader_per_layer_invert();t_fader_per_layer_channel();
+    t_fader_per_layer_invert();t_fader_per_layer_channel();t_fader_layer5_rides_own_channel();
     t_button_per_layer_type();t_button_per_layer_channel();
     t_chord_accessor();
+    t_ccval_accessor();
     t_fader_role_accessor();
+    t_effective_layer_shift_vs_assignable();
     printf("all mapping tests passed\n"); return 0; }

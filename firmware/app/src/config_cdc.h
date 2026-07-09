@@ -23,6 +23,11 @@ void config_cdc_monitor_button(int idx, int pressed);
 void config_cdc_monitor_active(int n);            /* ALWAYS emit active-changed mon line (independent of monitor gate) */
 void config_cdc_monitor_mode(int v);              /* ALWAYS emit a mode-changed mon line (independent of monitor gate) */
 int  config_cdc_fmt_mode(char *buf, int cap, int v);
+/* Feature 4: PLAY role (play_mode) unsolicited push. fmt writes
+ * {"t":"mon","k":"playrole","v":0|1}\n (mirrors config_cdc_fmt_mode); monitor_playrole
+ * formats then cdc_write()s it. */
+int  config_cdc_fmt_playrole(char *buf, int cap, int v);
+void config_cdc_monitor_playrole(int v);
 int  config_cdc_dtr(void);   /* 1 if a host has the port open (DTR asserted), else 0 */
 
 /* Pure, host-testable formatter for the active-changed monitor frame. Writes

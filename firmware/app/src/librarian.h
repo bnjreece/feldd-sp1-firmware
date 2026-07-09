@@ -29,5 +29,7 @@ int  librarian_reset(uint8_t g);                           /* g = GLOBAL slot 0.
 int  librarian_reset_all(void);                            /* 0 ok; reseed all 16 slots to factory default, persist, refresh RAM */
 uint8_t librarian_mode(void);                              /* device mode: 0=MIDI (default), 1=KEYBOARD, 2..3 reserved personalities (mode.h) */
 int  librarian_set_mode(uint8_t m);                        /* switch bank -> reload that mode's remembered active profile; persists raw mode (0..LIB_HEADER_MODE_MAX); -EINVAL if out of range */
+uint8_t librarian_play_mode(void);                         /* Feature 4: PLAY role 0=shift (default), 1=assignable. -ENOENT -> 0; read from the SEPARATE id-2 NVS record, never the header */
+int  librarian_set_play_mode(uint8_t v);                   /* persist PLAY role to the id-2 record ONLY (no header write, no wipe); range 0/1, -EINVAL out of range; same-value set is a no-op */
 
 #endif

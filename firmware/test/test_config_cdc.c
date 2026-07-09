@@ -117,14 +117,62 @@ static void t_line_cap_fits_v6_write(void)
     assert(frame + 1 > 320);
 }
 
+/* 7. inbound RX line-cap budget for v9: a v9 profile is 1038 bytes -> 1384-char
+ * base64, so a `write` frame is 1429 chars (1384 b64 + the 45-char JSON wrapper)
+ * + the trailing '\0' = 1430. That overflows the old 768-byte cap (a v9 write
+ * would be silently dropped + resynced and a bench flash would "succeed" yet store
+ * nothing). Pin the new budget here so a future struct growth that overflows the
+ * line is caught in CI, not on a bench flash. */
+static void t_line_cap_fits_v9_write(void)
+{
+    int v9_b64 = ((1038 + 2) / 3) * 4;               /* 1384 */
+    int frame  = (int)sizeof("{\"t\":\"write\",\"i\":4294967295,\"n\":15,\"data\":\"\"}") - 1
+                 + v9_b64;                            /* wrapper (45) + payload = 1429 */
+    assert(CONFIG_CDC_LINE_CAP >= frame + 1);        /* +1 for the trailing '\0' */
+    /* regression guard: the old 768-byte cap was too small for the v9 frame. */
+    assert(frame + 1 > 768);
+}
+
+/* 8. outbound response-cap budget for v9: a v9 read_r reply carries the full
+ * 1384-char base64 profile plus the {"t":"read_r","i":<u32>,"ok":true,"n":<nn>,
+ * "data":"<b64>"} wrapper (56 chars with a max u32 id + 2-digit n) = 1440 chars
+ * + '\0' = 1441. That exceeds the old g_resp[1280] (sized for the 1184-byte
+ * 16-name list_r worst case), so a v9 read would emit() -> -1 and the host would
+ * get OVERFLOW instead of the profile. Pin the response cap so a v9 read cannot
+ * truncate. */
+static void t_resp_cap_fits_v9_read(void)
+{
+    int v9_b64 = ((1038 + 2) / 3) * 4;               /* 1384 */
+    int frame  = (int)sizeof("{\"t\":\"read_r\",\"i\":4294967295,\"ok\":true,\"n\":15,\"data\":\"\"}") - 1
+                 + v9_b64;                            /* wrapper (56) + payload = 1440 */
+    assert(CONFIG_CDC_RESP_CAP >= frame + 1);        /* +1 for the trailing '\0' */
+    /* regression guard: the old 1280-byte g_resp was too small for a v9 read. */
+    assert(frame + 1 > 1280);
+}
+
+/* playrole push frame: exact bytes, trailing newline; raw value 0/1; overflow. */
+static void t_fmt_playrole_basic(void)
+{
+    char buf[64];
+    assert(config_cdc_fmt_playrole(buf, (int)sizeof buf, 0) > 0);
+    assert(strcmp(buf, "{\"t\":\"mon\",\"k\":\"playrole\",\"v\":0}\n") == 0);
+    assert(config_cdc_fmt_playrole(buf, (int)sizeof buf, 1) > 0);
+    assert(strcmp(buf, "{\"t\":\"mon\",\"k\":\"playrole\",\"v\":1}\n") == 0);
+    char tiny[8];
+    assert(config_cdc_fmt_playrole(tiny, (int)sizeof tiny, 1) == -1);   /* overflow */
+}
+
 int main(void)
 {
     t_fmt_active_basic();
+    t_fmt_playrole_basic();
     t_fmt_active_indices();
     t_fmt_active_overflow();
     t_fmt_mode_basic();
     t_line_cap_fits_v5_write();
     t_line_cap_fits_v6_write();
+    t_line_cap_fits_v9_write();
+    t_resp_cap_fits_v9_read();
     printf("all config_cdc tests passed\n");
     return 0;
 }
