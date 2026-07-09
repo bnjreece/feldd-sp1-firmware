@@ -10,12 +10,13 @@
 
 ## What it does
 
-- 🎛️ **4 faders + 9 buttons → MIDI**, map any control to any CC or note, each on its own channel
+- 🎛️ **4 faders + 9 buttons → MIDI**, map any control to any CC or note, each on its own channel; a button can also send a value you pick (set-on-press, momentary, or toggle)
 - ⌨️ **Keyboard mode**, buttons can type keys and shortcuts (Cmd+C, Cmd+Z) so it drives any app, not just music software
 - 🎵 **Chords + note-sets on any button**, build a chord per button as a hand-picked set, a root and quality, or a range for an M8 cluster, one press fires the whole set
-- 🪜 **4 layers per profile**, a hold-PLAY shift stack, so every profile is really four, switched on-device
-- 💾 **8 profiles per mode on the device**, switch them live with the •• count-dial, no computer needed
-- 💡 **On-device controls + lights**, the side lights show your layer and mode, hold PLAY to peek your profile
+- 🪜 **8 layers per profile**, hold PLAY to shift to a layer you pick (the side light follows), or flip PLAY to a normal mappable button
+- 💾 **8 profiles per mode on the device**, step them live with •• + Vol, no computer needed
+- 🎚️ **•• is the function button**, hold it and tap a control to step layers or profiles, flip MIDI/Keyboard mode, or reach the utility row (battery, LED brightness, MIDI panic); hold •• to peek your profile
+- 🏷️ **Name your controls**, per-control labels save with your .feldd file so a shared profile explains itself
 - 🎹 **USB-MIDI 1.0 + TRS (3.5 mm) MIDI** out, drives your DAW or your hardware
 - 🔌 **Configure live in the browser**, read, edit, write, and watch your controls move in real time over USB
 
