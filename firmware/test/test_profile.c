@@ -323,6 +323,21 @@ static void t_v9_validate(void)
     q = p; q.chord_flags[0]  = 128; assert(profile_validate(&q) == -1);
 }
 
+/* 0.22 Feature 1: profile_validate range-checks the reused shift-target byte
+ * chord_flags[1] <= NUM_LAYERS-1 (0..7 legal, 0 = default); 8+ rejected. */
+static void t_v9_validate_shift_target(void)
+{
+    struct profile p = make_full_profile();
+    for (uint8_t t = 0; t <= NUM_LAYERS - 1; t++) {         /* 0..7 all legal */
+        struct profile q = p; q.chord_flags[1] = t;
+        assert(profile_validate(&q) == 0);
+    }
+    struct profile q = p; q.chord_flags[1] = NUM_LAYERS;    /* 8 rejected */
+    assert(profile_validate(&q) == -1);
+    q = p; q.chord_flags[1] = 200;                          /* far out of range rejected */
+    assert(profile_validate(&q) == -1);
+}
+
 /* Feature 1: a cc_value button validates with a legal reused slot; the reserved
    bytes + sub range are locked; an existing all-zero non-chord slot still passes. */
 static void t_ccval_validate(void)
@@ -487,6 +502,57 @@ static void t_v9_ccval_golden(void)
     struct profile d; memset(&d,0,sizeof d); assert(profile_from_b64(b64,n,&d)==0);
     assert(d.button[3].type == BTN_CC_VALUE);         /* offset 28 */
     assert(d.ext[2].button_type[4] == BTN_CC_VALUE);  /* offset 400 */
+}
+
+/* 0.22 Feature 1 golden fixture: make_parity_v9 with the reused shift-target byte
+ * chord_flags[1] set to 3 (PLAY shifts to layer index 3 / UI L4). This is the
+ * cross-repo authoritative vector for the shift target; sp1ctl.py + codec.test.ts
+ * pin PARITY_V9_SHIFT_B64 to whatever this encodes. Only byte 1035 differs from
+ * make_parity_v9, so the whole tail is byte-identical except the final triple. */
+static struct profile make_parity_v9_shift(void)
+{
+    struct profile p = make_parity_v9();
+    p.chord_flags[1] = 3;                            /* PLAY shift target = layer 3 (byte 1035) */
+    return p;
+}
+static void t_v9_shift_round_trip(void)
+{
+    struct profile p = make_parity_v9_shift();
+    assert(profile_validate(&p) == 0);              /* 3 is a legal target */
+    assert(p.chord_flags[1] == 3);                  /* stored in the reused byte */
+    char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
+    assert(n == 1384);                              /* no format change */
+    struct profile d; memset(&d, 0, sizeof d);
+    assert(profile_from_b64(b64, n, &d) == 0);
+    assert(memcmp(&p, &d, sizeof p) == 0);          /* exact round-trip */
+    assert(d.chord_flags[1] == 3);                  /* offset 1035 survives */
+    /* everything else is identical to the base v9 fixture */
+    struct profile base = make_parity_v9();
+    assert(base.chord_flags[1] == 0);               /* base leaves it default */
+    base.chord_flags[1] = 3;
+    assert(memcmp(&base, &p, sizeof p) == 0);       /* only chord_flags[1] differs */
+}
+
+/* Authoritative 0.22 Feature 1 golden (1384 chars, no '=' padding). FIRMWARE IS
+ * AUTHORITATIVE: sp1ctl.py run_selftest + codec.test.ts pin this exact string.
+ * It equals PARITY_V9_B64 except the final triple (byte 1035 = 3), so only the
+ * last 4 chars differ (AAAA -> AwAA). */
+#define PARITY_V9_SHIFT_B64 \
+    "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAAECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwNDg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGR" \
+    "obHB0eBgcICQoLDA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAAECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQFAwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ4GBwgJamtsbQABAgAAAQABAAECAwQFAAEC" \
+    "BgcICQcICQoLDA0ODwcICQprbG1uAQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFkAwAA"
+
+static void t_v9_shift_golden(void)
+{
+    struct profile p = make_parity_v9_shift();
+    char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
+    assert(n == 1384);
+    assert(strcmp(b64, PARITY_V9_SHIFT_B64) == 0);      /* byte-identical to sp1ctl.py + codec.ts */
+    assert(b64[1383] != '=');
+    /* offset assert: chord_flags[1] lives at byte 1035 (final triple) */
+    struct profile d; memset(&d, 0, sizeof d); assert(profile_from_b64(b64, n, &d) == 0);
+    assert(d.chord_flags[1] == 3);                      /* byte 1035 == 3 */
 }
 
 /* Frozen 528-byte v8 blob (verbatim the retired PARITY_V8_B64). The input to the
@@ -1093,6 +1159,8 @@ int main(void)
     t_v9_golden_is_load_bearing();
     t_v9_ccval_round_trip();
     t_v9_ccval_golden();
+    t_v9_shift_round_trip();
+    t_v9_shift_golden();
     t_v8_legacy_upconvert_golden();
     t_round_trip();
     t_v4_encoded_length();
@@ -1100,6 +1168,7 @@ int main(void)
     t_v4_shift_keymap_round_trip();
     t_v9_wire_len_and_roundtrip();
     t_v9_validate();
+    t_v9_validate_shift_target();
     t_ccval_validate();
     t_v5_extra_layers_round_trip();
     t_v6_ext_layers_round_trip();

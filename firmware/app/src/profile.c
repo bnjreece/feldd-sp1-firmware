@@ -304,5 +304,9 @@ int profile_validate(const struct profile *p)
         for (int f = 0; f < NUM_FADERS; f++)
             if (p->fader_role[L][f] > 1) return -1;              /* 0=cc,1=chord_depth */
     if (p->chord_flags[0] > 127) return -1;                     /* chord velocity */
+    /* 0.22 Feature 1: chord_flags[1] REUSED as the PLAY shift target (was reserved).
+     * 0 = default (resolves to layer 1); 1..NUM_LAYERS-1 select a layer. A value
+     * past the last layer is malformed. chord_flags[2..3] stay reserved-pad. */
+    if (p->chord_flags[1] > NUM_LAYERS - 1) return -1;          /* shift target 0..7 */
     return 0;
 }

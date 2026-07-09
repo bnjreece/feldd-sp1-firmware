@@ -806,13 +806,15 @@ int main(void)
          * render + any later edge already see the new mode. */
         int mode_now = librarian_mode();
         /* Feature 4: PLAY role + the effective routing layer for THIS tick. In
-         * shift mode (play_mode 0) a held PLAY momentarily shifts routing to L2
-         * (effective_layer); assignable mode (play_mode 1) never shifts. The
-         * side-row LED keeps reading the RAW engaged layer (gesture_layer), never
-         * eff_layer (spec (d)). */
+         * shift mode (play_mode 0) a held PLAY momentarily shifts routing to the
+         * profile's configurable shift target (0.22 Feature 1, profile_shift_target;
+         * legacy profiles resolve to L2); assignable mode (play_mode 1) never
+         * shifts. The side-row LED now FOLLOWS this effective layer (0.22 Feature 2),
+         * reversing the old spec (d); see the side-row render below. */
         int play_mode = librarian_play_mode();
         int layer_now = effective_layer(play_mode, play_held,
-                                        gesture_layer(&shift_gesture));
+                                        gesture_layer(&shift_gesture),
+                                        profile_shift_target(librarian_active()));
         /* Edge-arm fader soft-takeover on shift enter/exit so faders never jump as
          * PLAY momentarily shifts to/from L2 (shift mode only). */
         if (play_mode == 0 && play_held != g_play_held_prev) {
@@ -1016,10 +1018,13 @@ int main(void)
          * FELDD_SHIFT_TRIGGER_PLAY=0 there is no PLAY gesture FSM, so the layer pins
          * to 0 (SP1_PLAY_LED1 = the single resting layer), mirroring the old
          * front-row guard. */
-        /* Side row always shows the RAW engaged layer (gesture_layer), never the
-         * PLAY-shifted eff_layer (spec (d)): a momentary PLAY shift must not move the
-         * layer LED. */
-        unsigned char side_layer = (unsigned char)gesture_layer(&shift_gesture);
+        /* Side row FOLLOWS the effective layer (layer_now): a held PLAY shift moves
+         * the dot to the profile's shift target and releasing snaps it back. This
+         * DELIBERATELY reverses the old "spec (d)" (a momentary shift must not move
+         * the LED); the solid/blink encoding already disambiguates same-column
+         * layers (e.g. L2 solid vs L6 blink), so no new cadence is needed.
+         * (0.22 Feature 2, spec 2026-07-08-feldd-022.) */
+        unsigned char side_layer = (unsigned char)layer_now;
         {
             unsigned char side_out[4];
             side_led_pattern(side_layer, (unsigned int)mode_flash_ticks,

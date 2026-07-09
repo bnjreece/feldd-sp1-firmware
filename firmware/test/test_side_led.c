@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "../src/side_led.h"
 #include "../src/mode.h"
+#include "../src/mapping.h"
 
 /* Host tests for the pure SIDE-row (SP1_PLAY_LED1..4) render of the feldd LED
  * redesign (spec 2026-06-19-feldd-led-redesign-side-layer-design.md §3, with the
@@ -289,6 +290,51 @@ static void test_output_binary_all_8_layers(void) {
     }
 }
 
+/* ----------------------------------------------------------------------------
+ * 9. DOT FOLLOWS SHIFT (Feature 2, spec 2026-07-08-feldd-022): main.c feeds the
+ *    side row the EFFECTIVE layer (effective_layer, = layer_now), NOT the raw
+ *    engaged gesture layer. So holding PLAY in SHIFT mode moves the dot to the
+ *    profile's shift target and releasing snaps it back. This DELIBERATELY
+ *    reverses the old "spec (d)" (a momentary shift must not move the LED); the
+ *    solid/blink encoding already disambiguates same-column layers, so no new
+ *    cadence is needed. These cases compose the two host-tested pure functions
+ *    (effective_layer + side_led_pattern) exactly the way main.c wires them, at
+ *    rest (flash_ticks == 0) so the dot, not a mode-flash, owns the row.
+ * --------------------------------------------------------------------------*/
+static void test_side_dot_follows_shift_target(void) {
+    /* SHIFT mode (play_mode 0), engaged on base layer 0, target = L4 (index 3).
+     * Held -> effective layer 3 -> dot at LED4 (solid); released -> layer 0 ->
+     * dot at LED1 (solid). The dot MOVES column with the shift. */
+    int held     = effective_layer(0, 1, 0, 3);
+    int released = effective_layer(0, 0, 0, 3);
+    assert(held == 3 && released == 0);
+    for (unsigned char tick = 0; tick < 48; tick++) {
+        unsigned char h[4], r[4];
+        side_led_pattern((unsigned char)held,     0, MODE_MIDI, 0, tick, h);
+        side_led_pattern((unsigned char)released, 0, MODE_MIDI, 0, tick, r);
+        assert(h[0] == 0 && h[1] == 0 && h[2] == 0 && h[3] == 1);  /* target dot */
+        assert(r[0] == 1 && r[1] == 0 && r[2] == 0 && r[3] == 0);  /* snapped back */
+    }
+
+    /* Same-column disambiguation: engaged layer 0 (LED1 SOLID) shifting to target
+     * L5 (index 4, LED1 BLINK). Both land on LED1, but held is a blinking dot and
+     * released is a solid one, so on the blink OFF-phase (tick 0) the shift is
+     * visible: held dark at LED1, released lit. */
+    int held4 = effective_layer(0, 1, 0, 4);
+    assert(held4 == 4);
+    unsigned char h0[4], r0[4];
+    side_led_pattern((unsigned char)held4, 0, MODE_MIDI, 0, /*tick=*/0, h0);   /* blink off */
+    side_led_pattern(0,                    0, MODE_MIDI, 0, /*tick=*/0, r0);   /* solid */
+    assert(h0[0] == 0 && r0[0] == 1);
+
+    /* ASSIGNABLE PLAY (play_mode 1) NEVER shifts, so the dot does NOT move even
+     * with a non-base target: the side row stays on the engaged gesture layer. */
+    assert(effective_layer(1, 1, 0, 3) == 0);
+    unsigned char a[4];
+    side_led_pattern((unsigned char)effective_layer(1, 1, 0, 3), 0, MODE_MIDI, 0, 7, a);
+    assert(a[0] == 1 && a[1] == 0 && a[2] == 0 && a[3] == 0);
+}
+
 int main(void) {
     test_layer0_first_led();
     test_layer1_second_led();
@@ -306,6 +352,7 @@ int main(void) {
     test_layer5_blink_checkpoints_vs_layer1_solid();
     test_mode_flash_preempts_blinking_layer();
     test_output_binary_all_8_layers();
+    test_side_dot_follows_shift_target();
     printf("all side led tests passed\n");
     return 0;
 }

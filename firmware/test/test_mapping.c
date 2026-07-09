@@ -322,14 +322,34 @@ static void t_ccval_accessor(void){
     assert(profile_layer_ccval(&p,0,NUM_LAYERS,&sub,&on,&off)==-1);
     assert(profile_layer_ccval(&p,-1,0,&sub,&on,&off)==-1);
 }
-/* effective_layer: play_mode 0 (shift) + play_held -> L2 (index 1); otherwise
- * the engaged gesture layer. Assignable mode (play_mode 1) NEVER shifts. */
+/* profile_shift_target: reads chord_flags[1]. Legacy 0 or an out-of-range value
+ * (>= NUM_LAYERS) resolves to the default 1 (UI L2); explicit 1..7 are honored. */
+static void t_profile_shift_target(void){
+    struct profile p; memset(&p, 0, sizeof p);
+    assert(profile_shift_target(&p) == 1);       /* legacy 0 -> default 1 */
+    p.chord_flags[1] = 1; assert(profile_shift_target(&p) == 1);
+    p.chord_flags[1] = 3; assert(profile_shift_target(&p) == 3);   /* explicit honored */
+    p.chord_flags[1] = NUM_LAYERS - 1; assert(profile_shift_target(&p) == NUM_LAYERS - 1); /* 7 max */
+    p.chord_flags[1] = NUM_LAYERS; assert(profile_shift_target(&p) == 1);   /* >= NUM_LAYERS -> 1 */
+    p.chord_flags[1] = 200; assert(profile_shift_target(&p) == 1);          /* far out of range */
+}
+/* effective_layer: play_mode 0 (shift) + play_held -> the resolved shift_target;
+ * otherwise the engaged gesture layer. Assignable mode (play_mode 1) NEVER shifts. */
 static void t_effective_layer_shift_vs_assignable(void){
-    assert(effective_layer(0, 1, 3) == 1);   /* shift held -> L2 */
-    assert(effective_layer(0, 0, 3) == 3);   /* shift released -> engaged */
-    assert(effective_layer(0, 1, 0) == 1);   /* held from L1 -> L2 */
-    assert(effective_layer(1, 1, 3) == 3);   /* assignable: no shift */
-    assert(effective_layer(1, 0, 2) == 2);   /* assignable, released */
+    assert(effective_layer(0, 1, 3, 1) == 1);   /* shift held -> target 1 (L2) */
+    assert(effective_layer(0, 0, 3, 1) == 3);   /* shift released -> engaged */
+    assert(effective_layer(0, 1, 0, 1) == 1);   /* held from L1 -> target 1 */
+    assert(effective_layer(1, 1, 3, 1) == 3);   /* assignable: no shift */
+    assert(effective_layer(1, 0, 2, 1) == 2);   /* assignable, released */
+    /* a non-1 target lands there while held (shift mode) */
+    assert(effective_layer(0, 1, 3, 4) == 4);   /* shift held -> target 4 (L5) */
+    assert(effective_layer(0, 0, 3, 4) == 3);   /* released -> engaged, target ignored */
+    assert(effective_layer(1, 1, 0, 4) == 0);   /* assignable never shifts to target */
+    /* resolved through profile_shift_target: legacy 0 lands on 1, explicit honored */
+    struct profile p; memset(&p, 0, sizeof p);
+    assert(effective_layer(0, 1, 3, profile_shift_target(&p)) == 1);   /* legacy 0 -> 1 */
+    p.chord_flags[1] = 5;
+    assert(effective_layer(0, 1, 0, profile_shift_target(&p)) == 5);   /* explicit 5 */
 }
 
 int main(void){ t_fader_cc();t_fader_invert();t_fader_range();t_fader_shift_bank();
@@ -344,5 +364,6 @@ int main(void){ t_fader_cc();t_fader_invert();t_fader_range();t_fader_shift_bank
     t_chord_accessor();
     t_ccval_accessor();
     t_fader_role_accessor();
+    t_profile_shift_target();
     t_effective_layer_shift_vs_assignable();
     printf("all mapping tests passed\n"); return 0; }

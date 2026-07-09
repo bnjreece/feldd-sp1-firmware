@@ -38,11 +38,18 @@ int profile_layer_ccval(const struct profile *p, int idx, int layer,
 /* v7: a fader's role for `layer` (DIRECT 0..3). 0=cc, 1=chord_depth. */
 uint8_t profile_layer_fader_role(const struct profile *p, int idx, int layer);
 
+/* 0.22 Feature 1: resolve a profile's configurable PLAY shift target. Stored in
+ * the reused v9 byte chord_flags[1]. Legacy 0 (every existing v9 profile) or an
+ * out-of-range value (>= NUM_LAYERS) means "default", which is layer index 1
+ * (UI L2, the historical behavior); explicit values 1..7 are honored. Pure. */
+uint8_t profile_shift_target(const struct profile *p);
+
 /* Feature 4: the LAYER a PLAY-shift build routes buttons/faders through. In
- * shift mode (play_mode 0) a held PLAY momentarily shifts to L2 (index 1);
- * otherwise the engaged gesture layer is used. Assignable mode (play_mode 1)
- * never shifts, so PLAY is a plain assignable button. Pure/host-tested. */
-int effective_layer(int play_mode, int play_held, int gesture_layer);
+ * shift mode (play_mode 0) a held PLAY momentarily shifts to shift_target (the
+ * profile's resolved PLAY shift target, see profile_shift_target); otherwise the
+ * engaged gesture layer is used. Assignable mode (play_mode 1) never shifts, so
+ * PLAY is a plain assignable button. Pure/host-tested. */
+int effective_layer(int play_mode, int play_held, int gesture_layer, int shift_target);
 
 /* fader idx 0..3, cc value 0..127 (already from fader_update); layer 0..3 */
 void map_fader(const struct profile *p, int idx, int cc_val, int layer,

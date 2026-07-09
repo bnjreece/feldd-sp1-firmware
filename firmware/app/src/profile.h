@@ -135,7 +135,8 @@ struct profile {
      * non-chord button is inert/zero. Replaces v7's button_chord_ix + shared
      * chord_table (the "8 distinct chords / profile" limit). 216 B.
      * fader_role[L][f]: 0=cc, 1=chord_depth (carried from v7). 16 B.
-     * chord_flags[0]=chord velocity (default 100); [1] reserved. 2 B.
+     * chord_flags[0]=chord velocity (default 100); [1] reserved in v8, REUSED in
+     * place by 0.22 F1 as the PLAY shift target (0=default->L2, 1..7 a layer). 2 B.
      * 216 + 16 + 2 = 234-byte tail; 294 + 234 = 528. A v7 blob reaching v8 firmware is
      * rejected by the version check; a v6/older blob decoded by v8 fills these at
      * "no chords" (every chord6 zero, every fader_role cc, velocity 100). */
@@ -151,7 +152,7 @@ struct profile {
      * reader that does not understand BTN_CC_VALUE. */
     struct chord6 chord6[NUM_LAYERS][NUM_BUTTONS];     /* 4*9*6 = 216 B; packed per button */
     uint8_t  fader_role[NUM_LAYERS][NUM_FADERS];       /* 4*4   = 16 B; 0=cc,1=chord_depth */
-    uint8_t  chord_flags[4];                           /* 4 B: [0]=chord velocity, [1..3]=reserved. [2..3] pad struct to 1038 (multiple of 3) so base64 has no '=' padding (spec 2.1). */
+    uint8_t  chord_flags[4];                           /* 4 B: [0]=chord velocity, [1]=PLAY shift target (0.22 F1, reused in place; 0=default->L2, 1..7 select a layer), [2..3]=reserved pad struct to 1038 (multiple of 3) so base64 has no '=' padding (spec 2.1). */
 } __attribute__((packed));
 
 /* v9 byte layout (packed, all u8). v9 is the FIRST version to RESIZE the interior
@@ -164,7 +165,7 @@ struct profile {
  *   [304..569]   ext[7]          (L2..L8 completion; was ext[3] @180..293)
  *   [570..1001]  chord6[8][9]    (packed per (layer,button); was @294..509)
  *   [1002..1033] fader_role[8][4]
- *   [1034..1037] chord_flags[4]  ([0]=velocity, [1..3]=reserved pad)
+ *   [1034..1037] chord_flags[4]  ([0]=velocity, [1]=PLAY shift target @1035, [2..3]=reserved pad)
  *   sizeof = 1038; base64 = ceil(1038/3)*4 = 1384 chars, no '=' padding.
  */
 

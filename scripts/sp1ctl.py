@@ -477,6 +477,7 @@ def encode_profile(p, target_version=PROFILE_VERSION):
     cvgrid = ch.get("cc_value")    # n x 9 of dict|None, or None (Feature 1)
     frole = ch.get("fader_role")   # n x 4 or None
     cvel = ch.get("chord_velocity", 100)
+    stgt = ch.get("shift_target", 0)   # Feature 1 (0.22): chord_flags[1] PLAY shift target (0 = default)
     # Feature 1: a BTN_CC_VALUE button REUSES its chord6 slot for {sub,on,off}.
     # Dispatch per (L,i) on the SAME type source that wrote the wire type byte (L0 ->
     # buttons[i]["type"]; L>=1 -> ext button_type), so the reused slot round-trips.
@@ -498,7 +499,11 @@ def encode_profile(p, target_version=PROFILE_VERSION):
             v = (frole[L][f] if (frole and L < len(frole)) else 0)
             out.append(_rng(f"fader_role[{L}][{f}]", v, 0, 1))
     out.append(_rng("chord_velocity", cvel, 0, 127))
-    out.extend([0] * (3 if target_version >= 9 else 1))   # chord_flags[1..3] / [1] reserved
+    # Feature 1 (0.22): chord_flags[1] is REUSED in place as the PLAY shift target
+    # (0 = default). Carry the friendly value through instead of zeroing it; the
+    # remaining chord_flags[2..] stay reserved pad so sizeof is unchanged.
+    out.append(_rng("shift_target", stgt, 0, NUM_LAYERS - 1))       # chord_flags[1]
+    out.extend([0] * ((3 if target_version >= 9 else 1) - 1))       # chord_flags[2..] reserved
 
     if target_version >= 9:
         if len(out) != PBYTES_V9:
@@ -654,9 +659,13 @@ def decode_profile(blob):
             for f in range(NUM_FADERS):
                 frole[L][f] = blob[off]; off += 1
         cvel = blob[off]; off += 1
+        # Feature 1 (0.22): chord_flags[1] is REUSED in place as the PLAY shift target
+        # (0 = default -> firmware resolves to layer 1 / UI L2). Carry it through instead
+        # of dropping it; chord_flags[2..] stay reserved pad.
+        stgt = blob[off]
         off += chord_pad - 1              # skip chord_flags[1..] reserved pad
         chord = {"chord6": grid, "fader_role": frole, "chord_velocity": cvel,
-                 "cc_value": cvgrid}
+                 "cc_value": cvgrid, "shift_target": stgt}
 
     return {
         "format": "sp1-profile",
@@ -1538,6 +1547,38 @@ def run_selftest():
     check(p_up["chord"]["chord6"][7] == [None] * NUM_BUTTONS and p_up["chord"]["fader_role"][7] == [0, 0, 0, 0],
           "L8 chord + role EMPTY after upconvert")
 
+    print("\n2i. v9 shift-target 3-way parity (firmware authoritative)")
+    # make_parity_v9 with the reused chord_flags[1] byte set to 3 (PLAY shifts to layer
+    # index 3 / UI L4). Reuses the reserved v9 byte IN PLACE: byte-identical to
+    # PARITY_V9_B64 except the final triple (byte 1035 = 3), so only the last 4 chars
+    # differ (AAAA -> AwAA). FIRMWARE IS AUTHORITATIVE (test_profile.c
+    # PARITY_V9_SHIFT_B64); sp1ctl.py + codec.test.ts pin this exact string.
+    PARITY_V9_SHIFT_B64 = (
+        "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAA"
+        "ECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwNDg8QERIC"
+        "AwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB"
+        "4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoLDA0OJicoKVNUVVZX"
+        "WFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAA"
+        "ECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQFAwQFBgQFBgcICQoLDAQFBgdo"
+        "aWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ"
+        "4GBwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1uAQIAAQEAAQABAgMEBQABAgMHCAkKCAkK"
+        "CwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFkAwAA"
+    )
+    check(len(PARITY_V9_SHIFT_B64) == 1384 and not PARITY_V9_SHIFT_B64.endswith("="),
+          "shift-target golden is 1384 chars, no padding")
+    blob_st = base64.b64decode(PARITY_V9_SHIFT_B64)
+    check(len(blob_st) == 1038, "shift-target golden decodes to 1038 bytes")
+    check(blob_st[1035] == 3, "chord_flags[1]=shift_target at offset 1035 (== 3, UI L4)")
+    p_st = decode_profile(blob_st)
+    check(p_st["chord"]["shift_target"] == 3, "shift_target decodes to 3 (carried through, not dropped)")
+    reenc_st = base64.b64encode(encode_profile(p_st)).decode("ascii")
+    check(reenc_st == PARITY_V9_SHIFT_B64, "python shift-target re-encode == firmware golden (RECONCILED)")
 
     print("\n3. firmware-parity: b64 alphabet is standard + padding matches profile.c")
     # profile.c uses A-Za-z0-9+/ with canonical '=' padding; pad = (3 - pbytes%3)%3.

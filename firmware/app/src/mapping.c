@@ -149,9 +149,17 @@ void map_button(const struct profile *p, int idx, int pressed, int layer,
     case BTN_NONE: default: break;
     }
 }
+/* 0.22 Feature 1: resolve the configurable PLAY shift target from the reused v9
+ * byte chord_flags[1]. A value of 0 (every existing v9 profile) or >= NUM_LAYERS
+ * means "default" = layer index 1 (UI L2, the historical behavior); explicit
+ * values 1..7 are honored. So NO existing profile changes behavior. */
+uint8_t profile_shift_target(const struct profile *p) {
+    uint8_t t = p->chord_flags[1];
+    return (t == 0 || t >= NUM_LAYERS) ? 1 : t;
+}
 /* Feature 4: pick the routing layer. Shift mode (play_mode 0) with PLAY held ->
- * L2 (index 1) momentary shift; else the engaged gesture layer. Assignable mode
- * (play_mode 1) never shifts. */
-int effective_layer(int play_mode, int play_held, int gesture_layer) {
-    return (play_mode == 0 && play_held) ? 1 : gesture_layer;
+ * shift_target momentary shift (0.22: the profile's resolved PLAY shift target);
+ * else the engaged gesture layer. Assignable mode (play_mode 1) never shifts. */
+int effective_layer(int play_mode, int play_held, int gesture_layer, int shift_target) {
+    return (play_mode == 0 && play_held) ? shift_target : gesture_layer;
 }

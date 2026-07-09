@@ -24,8 +24,8 @@ test_led_dial: test_led_dial.c $(SRC)/dial.c $(SRC)/dial.h
 	$(CC) $(CFLAGS) -o $@ test_led_dial.c $(SRC)/dial.c
 test_mode: test_mode.c $(SRC)/mode.c $(SRC)/mode.h
 	$(CC) $(CFLAGS) -o $@ test_mode.c $(SRC)/mode.c
-test_side_led: test_side_led.c $(SRC)/side_led.c $(SRC)/side_led.h $(SRC)/mode.c $(SRC)/mode.h
-	$(CC) $(CFLAGS) -o $@ test_side_led.c $(SRC)/side_led.c $(SRC)/mode.c
+test_side_led: test_side_led.c $(SRC)/side_led.c $(SRC)/side_led.h $(SRC)/mode.c $(SRC)/mode.h $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/cc_value.c $(SRC)/cc_value.h $(SRC)/profile.h
+	$(CC) $(CFLAGS) -o $@ test_side_led.c $(SRC)/side_led.c $(SRC)/mode.c $(SRC)/mapping.c $(SRC)/chord6.c $(SRC)/cc_value.c
 test_lib_header: test_lib_header.c $(SRC)/lib_header.h $(SRC)/lib_bank.h $(SRC)/seed_cadence.h $(SRC)/mode.h $(SRC)/profile.h
 	$(CC) $(CFLAGS) -o $@ test_lib_header.c
 test_lib_bank: test_lib_bank.c $(SRC)/lib_bank.h $(SRC)/profile.h
