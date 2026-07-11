@@ -243,10 +243,24 @@ static void t_brightness_load(void)
     assert(LIB_BRIGHTNESS_DEFAULT == 0);                           /* default is dim */
 }
 
+static void t_bpm_load(void)
+{
+    assert(lib_bpm_load(0, 0)   == LIB_BPM_DEFAULT);   /* absent (legacy <=2B rec) -> default */
+    assert(lib_bpm_load(0, 150) == LIB_BPM_DEFAULT);   /* absent ignores stored junk */
+    assert(lib_bpm_load(1, 40)  == 40);                /* present, low bound */
+    assert(lib_bpm_load(1, 240) == 240);               /* present, high bound */
+    assert(lib_bpm_load(1, 120) == 120);               /* present, mid */
+    assert(lib_bpm_load(1, 39)  == LIB_BPM_DEFAULT);   /* below range -> default */
+    assert(lib_bpm_load(1, 241) == LIB_BPM_DEFAULT);   /* above range -> default */
+    assert(lib_bpm_load(1, 0)   == LIB_BPM_DEFAULT);   /* zero (never-set byte) -> default */
+    assert(LIB_BPM_DEFAULT == 120);                    /* musical default */
+}
+
 int main(void)
 {
     t_playrole_policy_and_header_size();
     t_brightness_load();
+    t_bpm_load();
     t_per_mode_active_is_independent();
     t_mode_field_does_not_clobber_actives();
     t_header_survives_remount();

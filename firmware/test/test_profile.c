@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include "profile.h"
 #include "chord6.h"
+#include "clock_cfg.h"
 
 /* v5: populate the appended L3..L8 banks with distinct values. Appended at the END
  * of make_full_profile(), just before `return p;`. The loop covers layer[0..5]
@@ -336,6 +337,49 @@ static void t_v9_validate_shift_target(void)
     assert(profile_validate(&q) == -1);
     q = p; q.chord_flags[1] = 200;                          /* far out of range rejected */
     assert(profile_validate(&q) == -1);
+}
+
+/* clock: per-profile clock_cfg round-trips through chord_flags[2..3] + b64, without
+ * disturbing chord_flags[0] (velocity) or [1] (shift target). */
+static void t_v9_clock_cfg_roundtrip(void)
+{
+    struct profile p = make_full_profile();
+    p.chord_flags[0] = 77;    /* velocity witness */
+    p.chord_flags[1] = 3;     /* shift-target witness */
+
+    struct clock_cfg set = { .enable = 1, .tap_button = 7,
+                             .bpm_fader = 3, .default_bpm = 140 };
+    profile_set_clock_cfg(&p, &set);
+
+    /* neighbours untouched */
+    assert(p.chord_flags[0] == 77);
+    assert(p.chord_flags[1] == 3);
+
+    struct clock_cfg got;
+    profile_clock_cfg(&p, &got);
+    assert(got.enable == 1 && got.tap_button == 7 &&
+           got.bpm_fader == 3 && got.default_bpm == 140);
+
+    /* survives a full b64 encode/decode */
+    char b64[1500];
+    int n = profile_to_b64(&p, b64, (int)sizeof b64);
+    assert(n == 1384);
+    struct profile dec; memset(&dec, 0, sizeof dec);
+    assert(profile_from_b64(b64, n, &dec) == 0);
+    struct clock_cfg dgot;
+    profile_clock_cfg(&dec, &dgot);
+    assert(dgot.enable == 1 && dgot.tap_button == 7 &&
+           dgot.bpm_fader == 3 && dgot.default_bpm == 140);
+
+    /* a legacy pad (0,0) decodes to a DISABLED clock (enable=0); the control/bpm
+     * fields read back as 0 and are ignored while disabled. */
+    struct profile leg = make_full_profile();
+    leg.chord_flags[2] = 0; leg.chord_flags[3] = 0;
+    struct clock_cfg lg;
+    profile_clock_cfg(&leg, &lg);
+    assert(lg.enable == 0 && lg.tap_button == 0 &&
+           lg.bpm_fader == 0 && lg.default_bpm == 0);
+    assert(profile_validate(&leg) == 0);   /* pad bytes never reject a profile */
 }
 
 /* Feature 1: a cc_value button validates with a legal reused slot; the reserved
@@ -1168,6 +1212,7 @@ int main(void)
     t_v4_shift_keymap_round_trip();
     t_v9_wire_len_and_roundtrip();
     t_v9_validate();
+    t_v9_clock_cfg_roundtrip();
     t_v9_validate_shift_target();
     t_ccval_validate();
     t_v5_extra_layers_round_trip();

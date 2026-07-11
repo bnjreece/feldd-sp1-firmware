@@ -67,6 +67,9 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
 #include "chord_engine.h"
 #include "led_override.h"
 #include "led.h"
+#include "clock_timer.h"
+#include "clock_router.h"
+#include "clockgen.h"
 
 /* Feature 4: PLAY is the shift/assignable control and •• is the Fn-modifier; the
  * behavior is now a RUNTIME branch on play_mode (librarian_play_mode()), not a
@@ -117,6 +120,50 @@ static uint8_t g_chord_chan[NUM_BUTTONS];
 static struct chord_tx_ring g_chord_tx;
 /* Stage-2 per-layer last-emitted chord-depth CC (zero-init -> triad band). */
 static int g_chord_depth_cc[NUM_LAYERS];
+/* Tap-tempo state: the profile's assigned tap button feeds clock_tap_bpm; the gen
+ * clock retempos once a 2nd tap lands (clockgen.c, host-tested). */
+static struct clock_tap g_clock_tap;
+/* Debounced global-BPM persistence: a fader sweep must NOT hammer NVS, so a tempo
+ * change only arms a settle timer; the main loop writes the last value once it stops
+ * moving. g_bpm_save_at is a k_uptime deadline (ms); 0 = nothing pending. */
+static uint8_t g_bpm_pending;
+static int64_t g_bpm_save_at;
+
+/* Set the live gen tempo AND arm the ~3 s debounced global-BPM NVS save of it. The
+ * assigned BPM fader + tap button both funnel through here. */
+static void clock_set_live_bpm(uint16_t bpm)
+{
+    clock_timer_set_bpm(bpm);
+    g_bpm_pending = (uint8_t)bpm;
+    g_bpm_save_at = k_uptime_get() + 3000;
+}
+
+/* The active profile's GLOBAL slot (0..15, mode-aware). The clock change-detector
+ * keys on THIS, not the within-bank index, so a MODE flip (MIDI<->Keyboard) - which
+ * swaps to the other bank's profile but can keep the same within-index - is correctly
+ * seen as a profile change and re-applies the clock config. */
+static inline uint8_t clock_active_slot(void)
+{
+    return lib_bank_global(librarian_mode(), librarian_active_index());
+}
+
+/* The active profile's packed clock config (chord_flags[2..3]). The detector watches
+ * this so a LIVE configurator edit of the active profile (enable/tap/fader/BPM synced
+ * over the config protocol, which refreshes the RAM copy but does not change the slot)
+ * re-applies the clock immediately - matching how a live CC edit takes effect. */
+static inline uint16_t clock_active_cfg(void)
+{
+    const struct profile *p = librarian_active();
+    return (uint16_t)(p->chord_flags[2] | ((uint16_t)p->chord_flags[3] << 8));
+}
+
+/* Re-apply the active profile's clock config (on boot or any active-profile change). */
+static void clock_apply_active(bool is_boot)
+{
+    struct clock_cfg cc;
+    profile_clock_cfg(librarian_active(), &cc);
+    clock_router_apply_profile(&cc, is_boot, librarian_bpm());
+}
 /* Forward decl: defined just above route_midi_button, but called from
  * enter_bootloader (which appears earlier). Purges the TX ring + emits Offs. */
 static void chord_flush_all(void);
@@ -621,6 +668,8 @@ int main(void)
     buttons_init();         /* reset the ladder decode/debounce state */
     chord_tx_init(&g_chord_tx);  /* v7: empty the chord MIDI-out deferral ring at boot */
     midi_out_init();        /* bring up uart1 TRS MIDI out + enable the ring PNP */
+    clock_timer_init();     /* MIDI clock generator (GEN mode) */
+    clock_router_init();    /* GEN/THRU selector: USB-in clock -> THRU, else GEN */
     usbdev_start();         /* enumerate the USB composite: CDC console + USB-MIDI */
 
     /* M5.2: mount NVS, lay down 8 default profiles on first boot, and load the
@@ -634,6 +683,12 @@ int main(void)
     /* Feature B (0.23): apply the persisted LED brightness. The charge-standby gate
      * left us at the ambient default, so honor a user "full" preference here. */
     led_set_brightness(librarian_brightness() ? LED_BRIGHTNESS_FULL : LED_BRIGHTNESS_DEFAULT);
+
+    /* Clock: apply the active profile's clock config now that the librarian has
+     * loaded. is_boot=true keeps the restored global tempo (a power cycle resumes the
+     * last-used tempo, not a snap to the profile default). A clock-less/legacy profile
+     * decodes to disabled, so the clock stays silent unless the profile opted in. */
+    clock_apply_active(true);
 
     /* M6.2: bind the CDC console as the JSON-lines config protocol channel and
      * start its line reader. From here on the control loop calls
@@ -680,7 +735,8 @@ int main(void)
      * setactive/write/reset that lands on a different slot — without each call
      * site having to remember to do it. Seed from the boot-loaded active index
      * so the first loop iteration doesn't spuriously re-arm. */
-    uint8_t last_active = librarian_active_index();
+    uint8_t last_active = clock_active_slot();   /* mode-aware active-profile key (0..15) */
+    uint16_t last_clk = clock_active_cfg();      /* active profile's clock bytes (live-edit watch) */
     /* PLAY engaged-layer holder (Feature 4). gesture_t now carries ONLY the engaged
      * layer (the peek FSM is retired): the layer is SET by the ••+FWD/RWD combo
      * (gesture_set_layer(gesture_layer_step(...))) and READ by the side-row LED +
@@ -776,7 +832,7 @@ int main(void)
          * current physical positions on the next read — otherwise the unchanged
          * raw codes would stay suppressed and the new CCs would never reach the
          * host/OP-XY until each fader was physically moved. */
-        uint8_t now_active = librarian_active_index();
+        uint8_t now_active = clock_active_slot();   /* mode-aware (0..15), catches a MODE flip */
         if (now_active != last_active) {
             chord_flush_all();   /* v7: release held chords on ANY profile change (dial/host/switch) */
             faders_rearm();
@@ -788,7 +844,20 @@ int main(void)
                 g_takeover_arm[i] = 0;
                 layer_takeover_clear_fader(&g_layer_takeover, i);
             }
+            /* Clock: re-apply the newly-active profile's clock config. is_boot=false
+             * loads THIS profile's default tempo (each profile can host clock at its
+             * own tempo); a disabled/clock-less profile silences the clock. This
+             * detector covers the dial + host set-active + ••+Vol paths; the ••+T4
+             * MODE flip is handled in its own combo case (which resyncs last_active). */
+            clock_apply_active(false);
             last_active = now_active;
+            last_clk = clock_active_cfg();
+        } else if (clock_active_cfg() != last_clk) {
+            /* Same profile, but its clock config just changed under us - a LIVE
+             * configurator edit synced over the config protocol. Re-apply just the
+             * clock (no chord-flush / fader-rearm; those are for a real switch). */
+            clock_apply_active(false);
+            last_clk = clock_active_cfg();
         }
 
         /* Scan both ladders FIRST (buttons before faders, like the verified
@@ -876,7 +945,12 @@ int main(void)
                                 g_takeover_arm[fi] = 0;
                                 layer_takeover_clear_fader(&g_layer_takeover, fi);
                             }
-                            last_active = librarian_active_index();
+                            /* Clock: the mode flip moved to the OTHER bank's profile
+                             * (its own clock_cfg). Re-apply here + resync last_active to
+                             * the new mode-aware slot so the detector does not also fire. */
+                            clock_apply_active(false);
+                            last_active = clock_active_slot();
+                            last_clk = clock_active_cfg();
                         }
                         break;
                     }
@@ -940,6 +1014,23 @@ int main(void)
                     }
                 }
                 config_cdc_monitor_button(idx, pressed);   /* still report the swallowed edge */
+                continue;
+            }
+
+            /* Tap-tempo: when the active profile's clock is on AND this button is its
+             * assigned tap button, a press taps the tempo. Placed after the •• combo
+             * consume above, so ••+<button> combos are untouched. The button is
+             * SWALLOWED (tempo only, no MIDI) - it is a tap pad on this profile. Feed
+             * clock_tap_bpm a ms-resolution timestamp (ample for human tapping). */
+            if (clock_router_enabled() && (int)clock_router_tap_button() == idx) {
+                if (pressed) {
+                    uint16_t bpm = clock_tap_bpm(&g_clock_tap,
+                                        (uint32_t)(k_uptime_get() * 1000));
+                    if (bpm) {
+                        clock_set_live_bpm(bpm);
+                    }
+                }
+                config_cdc_monitor_button(idx, pressed);
                 continue;
             }
 
@@ -1177,16 +1268,26 @@ int main(void)
 
                 int cc = fader_update_rail(&g_fader[idx], (uint16_t)raw, rail_loaded);
                 if (cc >= 0) {
-                    map_fader(librarian_active(), idx, cc, layer_now, midi_out_send, NULL);
-                    config_cdc_monitor_fader(idx, cc);   /* mon frame if monitoring */
-                    layer_takeover_record(&g_layer_takeover, idx, layer_now, (uint8_t)cc);
-                    /* Stage 2: cache the settled CC of a chord_depth fader so the
-                     * next chord press samples this layer's depth band. The scan is
-                     * idx 0..3 ascending, so the highest-idx chord_depth fader is the
-                     * last writer (the firmware fallback to the UI one-per-layer rule). */
-                    if (profile_layer_fader_role(librarian_active(), idx, layer_now)
-                            == FADER_ROLE_CHORD_DEPTH) {
-                        g_chord_depth_cc[layer_now] = cc;   /* cache the settled CC */
+                    /* BPM fader: when the active profile's clock is on and this is its
+                     * assigned BPM fader, the fader sets the TEMPO instead of sending
+                     * CC (tempo-only, so the clock byte never fights a CC on the shared
+                     * TRS wire). fader_update_rail returns cc>=0 only on a real move, so
+                     * a held fader never flickers the tempo. */
+                    if (clock_router_enabled() && (int)clock_router_bpm_fader() == idx) {
+                        clock_set_live_bpm(clockgen_fader_bpm((uint8_t)cc, 40, 240));
+                        config_cdc_monitor_fader(idx, cc);   /* still report the move */
+                    } else {
+                        map_fader(librarian_active(), idx, cc, layer_now, midi_out_send, NULL);
+                        config_cdc_monitor_fader(idx, cc);   /* mon frame if monitoring */
+                        layer_takeover_record(&g_layer_takeover, idx, layer_now, (uint8_t)cc);
+                        /* Stage 2: cache the settled CC of a chord_depth fader so the
+                         * next chord press samples this layer's depth band. The scan is
+                         * idx 0..3 ascending, so the highest-idx chord_depth fader is the
+                         * last writer (the firmware fallback to the UI one-per-layer rule). */
+                        if (profile_layer_fader_role(librarian_active(), idx, layer_now)
+                                == FADER_ROLE_CHORD_DEPTH) {
+                            g_chord_depth_cc[layer_now] = cc;   /* cache the settled CC */
+                        }
                     }
                 }
             }
@@ -1225,6 +1326,20 @@ int main(void)
             for (int i = 0; i < 4; i++)
                 led_pin(hl_play[i], ((hm >> (i + 4)) & 1u) != 0u);
 #endif
+        }
+
+        /* Clock GEN/THRU: age out a vanished USB-in master (>2 s) and resume the
+         * internal generator at its last measured tempo. External clock bytes are
+         * fed in from the USB class OUT callback (clock_router_ext_rt); this only
+         * handles the timeout/fallback side, so it runs every tick. */
+        clock_router_service();
+
+        /* Debounced global-BPM persistence: write the settled tempo to NVS once the
+         * BPM fader/tap has stopped moving for ~3 s, so a sweep does not wear flash.
+         * librarian_set_bpm no-ops when the value is unchanged. */
+        if (g_bpm_save_at && k_uptime_get() >= g_bpm_save_at) {
+            g_bpm_save_at = 0;
+            librarian_set_bpm(g_bpm_pending);
         }
 
         tick++;

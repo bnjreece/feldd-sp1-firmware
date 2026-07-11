@@ -171,6 +171,12 @@ struct profile {
 
 /* codec API */
 int profile_validate(const struct profile *p);                        /* 0 ok, -1 bad */
+
+/* Per-profile MIDI-clock config, stored in the chord_flags[2..3] pad via the
+ * clock_cfg codec (no version bump; persists with the profile). */
+struct clock_cfg;   /* fwd decl (clock_cfg.h) */
+void profile_clock_cfg(const struct profile *p, struct clock_cfg *out);
+void profile_set_clock_cfg(struct profile *p, const struct clock_cfg *cfg);
 int profile_to_b64(const struct profile *p, char *out, int outcap);   /* returns encoded len, or -1 */
 int profile_from_b64(const char *b64, int len, struct profile *out);  /* 0 ok, -1 bad */
 /* Wire byte count for a given profile version (the clean prefix length). v1..v6

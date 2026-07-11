@@ -41,6 +41,12 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(usb_midi1, LOG_LEVEL_INF);
 
+/* MIDI clock feature: host->device real-time bytes (clock/transport) are no longer
+ * discarded - they are parsed out of the USB-MIDI packets and handed to the clock
+ * router (forward to TRS + external-master detection for the GEN/THRU selector). */
+#include "usb_rt_parse.h"
+#include "clock_router.h"
+
 /* USB Device Class Definition for MIDI Devices 1.0 constants. */
 /* B.4.1 MS Class-Specific Interface Descriptor Subtypes */
 #define MS_HEADER		0x01
@@ -449,8 +455,23 @@ static int usb_midi1_request(struct usbd_class_data *const class_data,
 	}
 
 	if (USB_EP_DIR_IS_OUT(bi->ep)) {
-		/* Host->device MIDI: discard it, then re-arm the read (unless the
-		 * transfer was aborted on disable/suspend). */
+		/* Host->device MIDI: scan the 4-byte USB-MIDI events for system
+		 * real-time clock/transport bytes and hand each to the clock router
+		 * (THRU forward + external-master detection). Everything else (notes,
+		 * CC, sysex) is still dropped - feldd is a control surface, not a sink.
+		 * Then re-arm the read (unless aborted on disable/suspend). */
+		if (err != -ECONNABORTED) {
+			const uint8_t *d = buf->data;
+			/* Bound the scan to the pooled buffer (MPS 64 -> <=16 events), so a
+			 * future net_buf resize can never widen the parse past the payload. */
+			size_t n = MIN(buf->len, buf->size);
+			for (size_t i = 0; i + 4 <= n; i += 4) {
+				uint8_t rt = usb_midi_extract_rt(&d[i]);
+				if (rt) {
+					clock_router_ext_rt(rt);
+				}
+			}
+		}
 		(void)usbd_ep_buf_free(uds_ctx, buf);
 		if (err != -ECONNABORTED && data->enabled) {
 			usb_midi1_out_prep(data);

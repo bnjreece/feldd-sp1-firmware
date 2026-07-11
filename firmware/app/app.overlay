@@ -96,6 +96,17 @@
      * current copy) deferred until one-pin drive proves too weak. */
 };
 
+/* MIDI clock generator (GEN mode): a dedicated nRF hardware TIMER gives the
+ * 24-PPQN ticks microsecond precision (clock_timer.c drives it via the Zephyr
+ * counter API). Replaces the k_timer whose ~30 us system-tick quantisation
+ * jittered the tempo visibly above ~100 BPM. prescaler 4 -> 16 MHz / 2^4 =
+ * 1 MHz = 1 us/tick; the 40..240 BPM tick periods (10416..62500 us) sit well
+ * inside the counter range. No other feldd code claims a TIMER instance. */
+&timer2 {
+    status = "okay";
+    prescaler = <4>;
+};
+
 &adc {
     status = "okay";
     #address-cells = <1>;

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stddef.h>
 #include "profile.h"
+#include "clock_cfg.h"   /* per-profile MIDI-clock config packed into chord_flags[2..3] */
 
 /* Compile-time guard: the version wire boundaries (in profile_wire_len) MUST equal
  * the real struct offsets, so a future struct reorder can't silently break
@@ -308,5 +309,24 @@ int profile_validate(const struct profile *p)
      * 0 = default (resolves to layer 1); 1..NUM_LAYERS-1 select a layer. A value
      * past the last layer is malformed. chord_flags[2..3] stay reserved-pad. */
     if (p->chord_flags[1] > NUM_LAYERS - 1) return -1;          /* shift target 0..7 */
+    /* chord_flags[2..3] carry the per-profile MIDI-clock config (clock_cfg codec).
+     * Left UNVALIDATED on purpose: the decode is total (any 2 bytes -> a clock_cfg),
+     * enable=0 (every legacy profile, whose pad is 0) ignores the rest, and the
+     * runtime clamps BPM via clockgen - so no byte pattern here can reject a profile. */
     return 0;
+}
+
+/* Read the per-profile MIDI-clock config out of the chord_flags[2..3] pad. A legacy
+ * profile (pad = 0,0) decodes to enable=0 (clock off), so its zero control/bpm
+ * fields are ignored - the runtime only consults them when enable=1. */
+void profile_clock_cfg(const struct profile *p, struct clock_cfg *out)
+{
+    clock_cfg_unpack(&p->chord_flags[2], out);
+}
+
+/* Write the per-profile MIDI-clock config into the chord_flags[2..3] pad (persisted
+ * with the rest of the profile via profile_to_b64 / NVS; no version bump). */
+void profile_set_clock_cfg(struct profile *p, const struct clock_cfg *cfg)
+{
+    clock_cfg_pack(cfg, &p->chord_flags[2]);
 }

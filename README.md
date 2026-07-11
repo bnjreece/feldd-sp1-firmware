@@ -6,7 +6,9 @@
 
 > The SP-1 is an unreleased TE device. This is unofficial community firmware, not affiliated with or endorsed by Teenage Engineering.
 
-**Latest firmware: v0.23.0 (stable)** (get it at [feldd.com](https://feldd.com)).
+**Latest firmware: v0.23.0 (stable)**, plus **v0.24.0-beta** (get both at [feldd.com](https://feldd.com)).
+
+**New in 0.24.0-beta:** MIDI clock, the SP-1 can be a clock master, set tempo by tap or fader, or pass clock through, and PLAY is now a normal mappable button.
 
 ## What it does
 

@@ -81,4 +81,14 @@ static inline uint8_t lib_brightness_load(int present, uint8_t stored){
     return (present && lib_brightness_valid(stored)) ? stored : LIB_BRIGHTNESS_DEFAULT;
 }
 
+/* MIDI clock feature: persisted global GEN tempo (BPM). Stored in LIB_ID_SETTINGS
+ * byte [2] (byte [0]=play_mode, [1]=brightness). A legacy <=2-byte record, a missing
+ * record, or an out-of-range byte decodes as 120 BPM, so no existing device is
+ * short-read/reseeded. Range matches clockgen (40..240), so it fits one byte. */
+#define LIB_BPM_DEFAULT 120u
+static inline int     lib_bpm_valid(uint8_t v){ return v >= 40u && v <= 240u; }
+static inline uint8_t lib_bpm_load(int present, uint8_t stored){
+    return (present && lib_bpm_valid(stored)) ? stored : LIB_BPM_DEFAULT;
+}
+
 #endif /* LIB_HEADER_H */

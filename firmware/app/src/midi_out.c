@@ -1,23 +1,25 @@
 /*
- * midi_out.c — dual MIDI output path: TRS UART (31250 baud, TX-only) + USB-MIDI.
+ * midi_out.c - dual MIDI output path: TRS UART (31250 baud, TX-only) + USB-MIDI.
  *
  * The mapping engine (mapping.c) emits struct midi_msg's into a midi_sink_fn;
  * midi_out_send is that sink and fans each message out to BOTH sinks:
  *
- *  - TRS: ship the raw status/data bytes out uart1's TXD (P0.20 tip) one byte
- *    at a time via uart_poll_out (no IRQ/DMA needed at MIDI's 31.25 kbps,
- *    ~320 us/byte). The ring (P0.23) gates the PNP current source for the opto
- *    on the OP-XY side; it's a DT-active-LOW GPIO so logical-1 = enabled.
+ *  - TRS: an INTERRUPT-DRIVEN uart1 TX draining a two-tier priority ring
+ *    (midi_rt_ring). Normal CC/note bytes go to the normal tier; real-time bytes
+ *    (clock 0xF8, transport Start/Stop/Continue) go to the PRIORITY tier via
+ *    midi_out_rt(), so a fast fader-CC burst can never delay a clock tick by more
+ *    than one in-flight byte (~320 us at 31250 baud). A real-time byte may land
+ *    between the status and data bytes of a channel message; that is legal MIDI 1.0
+ *    (single-byte system real-time is allowed anywhere in the stream). Ring access
+ *    is irq_lock'd: producers run from BOTH thread context (fader/button CC) and
+ *    ISR context (the clock timer), while the UART TX ISR is the sole consumer.
  *  - USB: encode the channel-voice message as a 4-byte USB-MIDI 1.0 event and
- *    queue it on the hand-rolled USB-MIDI 1.0 function (usb_midi1.c, brought up
- *    by usbdev_start in main). usb_midi1_send drops cleanly when no host has
- *    enabled the interface or its TX ring is full — that's the common idle case
- *    and is swallowed.
+ *    queue it on the hand-rolled USB-MIDI 1.0 function (usb_midi1.c). usb_midi1_send
+ *    drops cleanly when no host has enabled the interface or its ring is full.
  *
- * BUILD-VERIFIED only: the on-hardware TRS electrical bench-test (scope P0.20 +
- * the ring line, send into the OP-XY over a Type-A TRS cable) AND the USB-MIDI
- * computer-enumeration check are DEFERRED until Unit A + a scope + the OP-XY are
- * on the bench (Renode has no USBD/SAADC model).
+ * The TRS electrical path is HARDWARE-VALIDATED: feldd drives the OP-XY over the
+ * 3.5 mm TRS out (Type A, data on the tip P0.20). The USB clock-out for gen mode is
+ * added separately once usb_midi1_send is confirmed ISR-safe.
  */
 #include "midi_out.h"
 #include <errno.h>
@@ -26,20 +28,63 @@
 
 #include "usb_midi1.h"
 #include "midi1_codec.h"
+#include "midi_rt_ring.h"
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/irq.h>
 
 static const struct device *const trs = DEVICE_DT_GET(DT_NODELABEL(uart1));
 static const struct gpio_dt_spec ring =
     GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), midi_ring_gpios);
+
+static struct midi_rt_ring trs_ring;
+
+/* UART TX ISR: drain the priority ring into the TX FIFO one byte at a time; stop
+ * the TX IRQ when the ring is empty. */
+static void trs_uart_isr(const struct device *dev, void *user_data)
+{
+    ARG_UNUSED(user_data);
+    if (!uart_irq_update(dev)) {
+        return;
+    }
+    while (uart_irq_tx_ready(dev)) {
+        uint8_t b;
+        unsigned int key = irq_lock();
+        bool got = midi_rt_next(&trs_ring, &b);
+        irq_unlock(key);
+        if (!got) {
+            uart_irq_tx_disable(dev);
+            break;
+        }
+        uart_fifo_fill(dev, &b, 1);
+    }
+}
+
+/* Enqueue one byte (rt = priority tier) and kick the TX IRQ. Best-effort: a full
+ * ring drops the byte, which never happens at MIDI rates with a 128-byte tier. */
+static void trs_enqueue(uint8_t b, bool rt)
+{
+    unsigned int key = irq_lock();
+    if (rt) {
+        (void)midi_rt_put_rt(&trs_ring, b);
+    } else {
+        (void)midi_rt_put(&trs_ring, b);
+    }
+    irq_unlock(key);
+    uart_irq_tx_enable(trs);
+}
 
 int midi_out_init(void)
 {
     if (!device_is_ready(trs)) {
         return -1;
     }
+    midi_rt_ring_init(&trs_ring);
+    uart_irq_rx_disable(trs);
+    uart_irq_tx_disable(trs);
+    uart_irq_callback_user_data_set(trs, trs_uart_isr, NULL);
     if (gpio_is_ready_dt(&ring)) {
         gpio_pin_configure_dt(&ring, GPIO_OUTPUT_INACTIVE);
         gpio_pin_set_dt(&ring, 1);   /* logical-1 = ON; GPIO_ACTIVE_LOW (DT) drives the pin low */
@@ -47,24 +92,29 @@ int midi_out_init(void)
     return 0;
 }
 
-/* TRS sink: raw status/data bytes out uart1 TXD. Respect m->len so a 1-byte
- * system real-time message (Start 0xFA / Stop 0xFC / Continue 0xFB, len 1) emits
- * ONLY its status byte — writing a spurious d1/d2 after it would inject a stray
- * data byte into the stream and corrupt the next message on the wire. */
+/* TRS sink: enqueue the raw status/data bytes (NORMAL tier). Respect m->len so a
+ * 1-byte system real-time message emits ONLY its status byte. */
 static void trs_send(const struct midi_msg *m)
 {
-    uart_poll_out(trs, m->status);
+    trs_enqueue(m->status, false);
     if (m->len >= 2) {
-        uart_poll_out(trs, m->d1);
+        trs_enqueue(m->d1, false);
     }
     if (m->len == 3) {
-        uart_poll_out(trs, m->d2);
+        trs_enqueue(m->d2, false);
     }
 }
 
-/* USB-MIDI 1.0 sink: encode the channel-voice message as a 4-byte USB-MIDI 1.0
- * event and queue it on the always-on 1.0 function. Best-effort — usb_midi1_send
- * drops cleanly if no host is listening or its ring is full. */
+/* Real-time byte (clock 0xF8 / transport 0xFA/FB/FC) to the TRS PRIORITY tier.
+ * Safe to call from ISR context (irq_lock'd ring op + a register write to enable
+ * the TX IRQ). USB clock-out is added later. */
+void midi_out_rt(uint8_t status)
+{
+    trs_enqueue(status, true);
+}
+
+/* USB-MIDI 1.0 sink: encode the channel-voice message as a 4-byte event and queue
+ * it on the always-on 1.0 function. Best-effort. */
 static void midi1_send(const struct midi_msg *m)
 {
     uint8_t pkt[4];
@@ -73,7 +123,7 @@ static void midi1_send(const struct midi_msg *m)
     }
 }
 
-#else  /* MIDI_OUT_HOST_TEST: Zephyr I/O shell excluded; both sinks are no-ops */
+#else  /* MIDI_OUT_HOST_TEST: Zephyr I/O shell excluded; sinks are no-ops */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -83,7 +133,8 @@ static void midi1_send(const struct midi_msg *m)
 static void trs_send(const struct midi_msg *m) { (void)m; }
 static void midi1_send(const struct midi_msg *m) { (void)m; }
 
-int midi_out_init(void) { return 0; }
+int  midi_out_init(void) { return 0; }
+void midi_out_rt(uint8_t status) { (void)status; }
 
 #endif /* MIDI_OUT_HOST_TEST */
 

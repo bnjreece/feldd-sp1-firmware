@@ -32,6 +32,7 @@
 #include <zephyr/sys/util.h>
 #include "librarian.h"
 #include "lib_header.h"
+#include "clock_cfg.h"   /* seed the per-profile MIDI-clock config in make_default */
 #include "lib_bank.h"
 #include "seed_cadence.h"
 #include "nvs_erase.h"
@@ -128,6 +129,7 @@ static uint8_t        active_within[NUM_MODES];  /* per-mode WITHIN-bank active 
 static uint8_t        active_mode;               /* current device mode (fast path) */
 static uint8_t        play_mode_cache;            /* Feature 4: 0 shift, 1 assignable */
 static uint8_t        brightness_cache;   /* Feature B: 0 dim (default), 1 full; persisted in LIB_ID_SETTINGS[1] */
+static uint8_t        bpm_cache;          /* clock: persisted global GEN tempo 40..240; LIB_ID_SETTINGS[2] */
 
 /* Build slot `slot`'s default profile into *p.
  *
@@ -408,6 +410,20 @@ static void make_default(int slot, struct profile *p)
      * plain note's 127, user-configurable without a version bump). */
     p->chord_flags[0] = 100;
 
+    /* clock: seed a DISABLED per-profile MIDI-clock config with the controls
+     * pre-wired (T4 = tap, fader 4 = BPM) + a musical default, so turning the clock
+     * on for a profile is one flip and never lands on Play/fader0/BPM-0. Packs into
+     * the chord_flags[2..3] pad (no version bump). */
+    {
+        struct clock_cfg cc = {
+            .enable = 0,
+            .tap_button = 4,        /* T4 (Track 4) */
+            .bpm_fader = 3,         /* feldd fader idx 3 = the 4th fader */
+            .default_bpm = LIB_BPM_DEFAULT,
+        };
+        profile_set_clock_cfg(p, &cc);
+    }
+
     /* Keyboard profile 1 (the first slot of the Keyboard bank) ships with a
      * starter keymap so flipping into Keyboard mode is never blank: the "Editor
      * pad" preset (mirrors the web davinciShortcutPad) — T1-4 = J/K/L/I,
@@ -593,10 +609,11 @@ int librarian_init(void)
      * the 4-byte header. A device that has never toggled it (-ENOENT) defaults to 0
      * (shift); a present-but-invalid byte also falls back to the default. This is a
      * pure ADD, so no existing device is short-read/reseeded. */
-    uint8_t st[2] = { 0, 0 };
+    uint8_t st[3] = { 0, 0, 0 };
     ssize_t rst = nvs_read(&fs, LIB_ID_SETTINGS, st, sizeof(st));
     play_mode_cache  = lib_playrole_load(rst >= 1, st[0]);
     brightness_cache = lib_brightness_load(rst >= 2, st[1]);
+    bpm_cache        = lib_bpm_load(rst >= 3, st[2]);
 
     /* Load the active profile of the CURRENT mode into the RAM hot copy. The NVS
      * slot it addresses is the GLOBAL index lib_bank_global(mode, within) (0..15).
@@ -786,19 +803,27 @@ int librarian_set_mode(uint8_t m)
     return 0;
 }
 
-/* Feature B (0.23): write the whole 2-byte LIB_ID_SETTINGS record from both RAM
- * caches ({ play_mode, brightness }). The id-2 record grows from 1 to 2 bytes; the
- * 4-byte lib_header is never touched (so no short-read reseed/wipe). */
+/* Write the whole LIB_ID_SETTINGS record from the RAM caches
+ * ({ play_mode, brightness, bpm }). The record has grown 1 -> 2 -> 3 bytes across
+ * features; each reader short-reads defensively (rst >= N), so an older/shorter
+ * record decodes with defaults and the 4-byte lib_header is never touched (no
+ * short-read reseed/wipe). */
 static int settings_write(void)
 {
-    uint8_t st[2] = { play_mode_cache, brightness_cache };
+    uint8_t st[3] = { play_mode_cache, brightness_cache, bpm_cache };
     ssize_t w = nvs_write(&fs, LIB_ID_SETTINGS, st, sizeof(st));
     return (w == (ssize_t)sizeof(st)) ? 0 : -1;
 }
 
 uint8_t librarian_play_mode(void)
 {
-    return play_mode_cache;   /* RAM copy — never hits flash */
+    /* PLAY-shift RETIRED in 0.24. PLAY shares a resistor ladder with the track
+     * buttons (TimK pinout: ladder 1 = Play + T1..T4), so holding PLAY to shift and
+     * pressing a front button can never be read reliably - the ladder returns one
+     * blurred value for two presses. PLAY is now ALWAYS an assignable MIDI button;
+     * layer switching lives on ••+rocker (•• is a dedicated GPIO, contention-free).
+     * The stored role byte is ignored (kept only for record-format stability). */
+    return 1;   /* 1 = assignable, always */
 }
 
 int librarian_set_play_mode(uint8_t v)
@@ -829,5 +854,28 @@ int librarian_set_brightness(uint8_t v)
     if (v > 1u) return -1;
     if (v == brightness_cache) return 0;
     brightness_cache = v;
+    return settings_write();
+}
+
+uint8_t librarian_bpm(void)
+{
+    return bpm_cache;   /* RAM copy */
+}
+
+int librarian_set_bpm(uint8_t v)
+{
+    /* clock: persist the global GEN tempo. Writes ONLY the id-2 record; the
+     * 4-byte lib_header is never touched. Range 40..240; a same-value set does not
+     * burn an NVS write (callers debounce a fader sweep on top of this). */
+    if (!fs_ready) {
+        return -EINVAL;
+    }
+    if (!lib_bpm_valid(v)) {
+        return -EINVAL;
+    }
+    if (v == bpm_cache) {
+        return 0;             /* no-op: don't burn an NVS write */
+    }
+    bpm_cache = v;
     return settings_write();
 }
