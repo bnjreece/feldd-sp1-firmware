@@ -27,6 +27,9 @@
 #include "config_cdc.h"
 #include "protocol.h"
 #include "librarian.h"
+#ifdef CONFIG_FELDD_BT_PROVISION
+#include "bt_provision.h"   /* bt_provision_probe_ss — wired into g_store below */
+#endif
 
 /* The chosen console UART — the cdc_acm_uart0 node. usbdev_start() already
  * enumerated the composite; we read/write it here, we do NOT bring USB up. */
@@ -49,8 +52,21 @@ static const struct proto_store g_store = {
     .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.24.0-beta",
+    .fw         = "0.27.3-beta",
     .uid        = g_uid,
+#ifdef CONFIG_FELDD_BT_PROVISION
+    /* Q5 P0 stage-1 READ-ONLY SS probe. proto_handle's bt_ss_probe verb calls this; it does
+     * the UART handoff from bt_link, reads the SS (no flash write), runs the gate, and returns
+     * a status. The multi-second, WDT-fed call blocks config_cdc_poll (main loop) for its
+     * duration — acceptable for an explicit, configurator-triggered dev probe. */
+    .bt_ss_probe = bt_provision_probe_ss,
+    /* Q5 P0 stage-2 DS-WRITE provisioning. proto_handle's bt_provision verb calls this; it
+     * power-gates, then (only on GATE_OK + the ds_base assert) DS-only writes our BLE app to
+     * the compile-time CYBT_DS_BASE_ADDR, verifies, proves the SS is untouched, and cold-boots
+     * the new app. The multi-minute, WDT-fed call blocks config_cdc_poll (main loop) for its
+     * duration — which is exactly what inhibits the •• power-off across the window. */
+    .bt_provision = bt_provision_run,
+#endif
 };
 
 /* Frame assembly. Cap from config_cdc.h (320 for v5); an overrun is dropped and

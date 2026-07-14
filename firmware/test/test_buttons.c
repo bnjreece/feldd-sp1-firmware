@@ -205,10 +205,26 @@ static void test_dfu_band_short_then_real_press(void)
     CHECK(ev[0].idx == 4 && ev[0].pressed == 1);
 }
 
+static void test_rail_class_pure(void)
+{
+    CHECK(buttons_rail_class_pure(TRK_IDLE, VOL_IDLE) == 0);   /* idle */
+    CHECK(buttons_rail_class_pure(TRK_T1,   VOL_IDLE) == 1);   /* Track1: loaded */
+    CHECK(buttons_rail_class_pure(TRK_T4,   VOL_IDLE) == 1);   /* Track4 ~1220: loaded, NOT heavy */
+    CHECK(buttons_rail_class_pure(TRK_PLAY, VOL_IDLE) == 2);   /* PLAY ~1823: HEAVY (max sag) */
+    CHECK(buttons_rail_class_pure(TRK_IDLE, VOL_LO)   == 1);   /* vol low plateau: loaded */
+    CHECK(buttons_rail_class_pure(TRK_IDLE, VOL_HI)   == 2);   /* VolUp ~1820: HEAVY */
+    CHECK(buttons_rail_class_pure(1499, 0) == 1);             /* just below the heavy threshold */
+    CHECK(buttons_rail_class_pure(1500, 0) == 2);             /* heavy threshold (tracks) */
+    CHECK(buttons_rail_class_pure(109, 0)  == 0);             /* below the tracks idle band */
+    CHECK(buttons_rail_class_pure(0, 199)  == 0);             /* below the vol idle band */
+    CHECK(buttons_rail_class_pure(0, 200)  == 1);             /* vol loaded entry */
+}
+
 int main(void)
 {
     test_decode_tracks_boundaries();
     test_decode_vol_boundaries();
+    test_rail_class_pure();
     test_dfu_band();
     test_press_after_three_reads();
     test_single_glitch_emits_nothing();

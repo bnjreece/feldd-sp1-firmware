@@ -138,6 +138,28 @@ static void test_fader_settle_edge_triggers_not_held(void) {
     s = fader_settle_step(0, 1, s); assert(s == 0);   // release: no new skip
 }
 
+static void test_fader_rail_compensate(void) {
+    // 0.26 rail-sag compensation: add the droop back, scaled by rail class, so a
+    // button press never dips the fader CC.
+    assert(fader_rail_compensate(2881, 0) == 2881);   // no button held: passthrough
+    assert(fader_rail_compensate(2881, 1) == 2909);   // light (~1%): 2881 + 2881*10/1000 = 2909
+    assert(fader_rail_compensate(2881, 2) == 2938);   // heavy PLAY/VolUp (~2%): 2881 + 57 = 2938
+    assert(fader_rail_compensate(4095, 2) == 4095);   // clamps at ADC full scale
+    assert(fader_rail_compensate(4050, 2) == 4095);   // 4050 + 81 > 4095 -> clamp
+    assert(fader_rail_compensate(1000, 5) == fader_rail_compensate(1000, 2));  // class clamps to 2
+    assert(fader_rail_compensate(1000, -1) == 1000);  // class clamps to 0
+}
+
+static void test_fader_rail_compensation_cancels_droop(void) {
+    // A fader truly at CC 100 = raw ~2881. Seed it (idle, no button held):
+    fader_t f = {0};
+    assert(fader_update_rail(&f, fader_rail_compensate(2881, 0), 0) == 100);
+    // Uncompensated, PLAY's 2-CC rail sag (raw 2824) would emit a -2 dip to CC 98:
+    assert(fader_raw_to_cc(2824) == 98);
+    // Compensated (rail class 2), the SAME sagged read holds CC 100 (no dip; residual < deadband):
+    assert(fader_update_rail(&f, fader_rail_compensate(2824, 2), 2) == -1);
+}
+
 int main(void) {
     test_fader_rescales_to_full_0_127();
     test_fader_suppresses_jitter_and_duplicates();
@@ -147,6 +169,8 @@ int main(void) {
     test_fader_update_rail_tracks_moves_swallows_droop();
     test_fader_update_rail_deadbands_rail_band_droop();
     test_fader_update_rail_unloaded_equals_idle();
+    test_fader_rail_compensate();
+    test_fader_rail_compensation_cancels_droop();
     test_fader_settle_edge_triggers_not_held();
     test_takeover_no_catch_when_at_target();
     test_takeover_catch_from_above();

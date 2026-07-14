@@ -6,9 +6,9 @@
 
 > The SP-1 is an unreleased TE device. This is unofficial community firmware, not affiliated with or endorsed by Teenage Engineering.
 
-**Latest firmware: v0.24.0 (stable)** (get it at [feldd.com](https://feldd.com)).
+**Latest firmware: v0.27.3 (stable)** (get it at [feldd.com](https://feldd.com)).
 
-**New in 0.24.0:** MIDI clock, the SP-1 can be a clock master, set tempo by tap or fader, or pass clock through, and PLAY is now a normal mappable button.
+**New in 0.27:** Bluetooth. feldd reprograms the SP-1's built-in radio, in place from the browser, into a wireless BLE-MIDI controller and a Bluetooth keyboard, turn it on with •• + PLAY and pair with a phone, laptop, or iPad, no cable. (0.24 added MIDI clock; PLAY is a normal mappable button.)
 
 ## What it does
 
@@ -20,6 +20,7 @@
 - 🎚️ **•• is the function button**, hold it and tap a control to step layers or profiles, flip MIDI/Keyboard mode, or reach the utility row (battery, LED brightness, MIDI panic); hold •• to peek your profile
 - 🏷️ **Name your controls**, per-control labels save with your .feldd file so a shared profile explains itself
 - 🎹 **USB-MIDI 1.0 + TRS (3.5 mm) MIDI** out, drives your DAW or your hardware
+- 📶 **Wireless Bluetooth (BLE-MIDI + keyboard)**, feldd reprograms the SP-1's onboard radio from the browser so it pairs with a phone, laptop, or iPad with no cable (0.27+)
 - 🔌 **Configure live in the browser**, read, edit, write, and watch your controls move in real time over USB
 
 ## Use it, all in the browser, no app to install
@@ -30,6 +31,26 @@
 - **[Flash the firmware](https://feldd.com/sp-1/flash)**, a guided walkthrough using the community **Solderless** tool.
 
 Flash once, then configure and reconfigure from the browser whenever you like.
+
+## What's not in this repo
+
+feldd's **Bluetooth radio firmware is deliberately not open-sourced here.** Getting the SP-1's
+onboard radio (a Cypress/Infineon CYW20706) to speak Bluetooth means loading a compiled radio image
+onto it, and that image plus the vendor's download minidriver are **not ours to redistribute as
+source.** So the following are intentionally omitted from this tree:
+
+- `firmware/app/src/cybt_blobs.h` — the CYW20706 payloads (the vendor download minidriver + our
+  compiled BLE-MIDI app image for the radio). Vendor-derived binaries, not our source to publish.
+- `firmware/app/src/bt_provision.*`, `bt_download.*`, `bt_probe.*` and the rest of the radio-flashing
+  subsystem, which embeds and depends on that image.
+- The Bluetooth build overlays and their host tests.
+
+The controller firmware in this repo builds and runs completely without any of that. The Bluetooth
+feature itself is **fully written up** in [`bluetooth/`](bluetooth) (architecture, how the reflash
+works, findings), and the **flashable Bluetooth build** — the one that includes the radio image — is
+the public download at [feldd.com](https://feldd.com). A few build files (`CMakeLists.txt`, `Kconfig`,
+`config_cdc.c`) still carry the conditional hooks that reference the omitted sources; they compile out
+by default.
 
 ## 🤖 Claude Code console (feldd-cc)
 

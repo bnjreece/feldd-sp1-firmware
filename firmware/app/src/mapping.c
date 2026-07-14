@@ -113,6 +113,10 @@ void map_fader(const struct profile *p, int idx, int cc_val, int layer,
                midi_sink_fn sink, void *ctx) {
     if (idx < 0 || idx >= NUM_FADERS || cc_val < 0) return;
     uint8_t cc = profile_layer_fader_cc(p, idx, layer);
+    /* fader_cc == 0 is the "unbound" sentinel (librarian.c: L3/L4 default 0; profile.c
+     * "0 == unbound"), mirroring how map_button drops BTN_NONE. Without this an unbound
+     * fader transmits controller 0 (visible as at-rest jitter, e.g. in keyboard mode). */
+    if (cc == 0) return;
     /* v6: min/max/curve/invert come from the ACTIVE layer's bank, not L1. */
     struct fader_map f = {
         .cc     = cc,
@@ -141,6 +145,11 @@ void map_button(const struct profile *p, int idx, int pressed, int layer,
         m.status = (pressed ? 0x90 : 0x80) | ch; m.d1 = val; m.d2 = pressed ? 127 : 0;
         sink(&m, ctx); break;
     case BTN_CC_MOMENTARY:
+        /* CC#0 = unbound sentinel (mirrors map_fader's cc==0 guard, 0.27.2): a button left on
+         * CC0 - e.g. an old promoted-but-unmapped PLAY carried in a pre-0.24 profile - must stay
+         * silent, not fire CC0 (Bank Select) and collide with fader 0. Reported by Peter after
+         * loading old presets on 0.27.2: upper-layer PLAY buttons were cc_momentary CC0. */
+        if (val == 0) break;
         m.status = 0xB0 | ch; m.d1 = val; m.d2 = pressed ? 127 : 0; sink(&m, ctx); break;
     /* Latching toggle / transport / profile-switch are STATEFUL: the firmware
      * control loop (main.c, later milestone) owns their on/off + transport state

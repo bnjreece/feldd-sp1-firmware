@@ -13,8 +13,14 @@ int  buttons_dfu_held(void);
    (instantaneous, pre-debounce). The control loop gates the fader read on this:
    a button sags the shared rail and drops the fader ADC reads, and the raw read
    catches the press edge on the first sagged tick (the committed state lags it
-   by ~24 ms). Valid after buttons_scan() has run this tick. */
+   by ~24 ms). Valid after buttons_scan() has run this tick. Returns the rail-load
+   CLASS: 0 idle / 1 loaded / 2 heavy (PLAY/VolUp top plateau); truthy = loaded. */
 int  buttons_rail_loaded(void);
+/* Rail-load class (0/1/2) from two raw ladder reads. Pure, host-testable. */
+int  buttons_rail_class_pure(int trk_raw, int vol_raw);
+/* Fresh instantaneous rail-load class, re-read NOW (two ladder ADC reads). Call
+   right before the fader read to close the intra-tick press race. */
+int  buttons_rail_probe(void);
 /* The tracks-ladder committed (debounced) button index: -1 idle, 0=Play,
    1..4 = Track1..4. Drives the track-LED button-press feedback (light track LED
    N while its Track button is held). */

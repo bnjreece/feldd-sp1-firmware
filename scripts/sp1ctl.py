@@ -932,6 +932,17 @@ class MockTransport:
                     return err("BAD_VALUE", "playrole must be 0 or 1")
                 self.play_mode = v
             return {"t": "playrole_r", "i": rid, "ok": True, "v": self.play_mode}
+        if verb == "bt_ss_probe":
+            # canned OK reply using the REAL burner SS (gate OK -> FLEET-UNIFORM) so the
+            # bt-probe handler is exercised end-to-end without hardware.
+            ss = bytes([
+                0x01,0x08,0x00,0xF0,0x00,0x00,0x62,0x08,0xC0,0x5D,0x89,0xFD,0x04,0x00,0xFF,0xFF,
+                0xFF,0xFF,0x40,0x06,0x00,0x93,0x17,0x20,0x6A,0x70,0x20,0x02,0x0A,0x00,0x00,0x30,
+                0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x10,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+                0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF])
+            return {"t": "bt_ss_probe_r", "i": rid, "ok": True, "status": 0, "gate": 0, "ss": ss.hex()}
+        if verb == "bt_provision":
+            return {"t": "bt_provision_r", "i": rid, "ok": True, "status": 0, "gate": 0}
         return err("BAD_VERB", "unknown verb")
 
     def read_mon(self):
@@ -1006,6 +1017,71 @@ def cmd_hello(args, t=None):
                   f"the friendly-JSON codec assumes the v{PROFILE_VERSION} {PBYTES}-byte layout "
                   f"(use --target to write an older device's own format).")
         return r
+    finally:
+        if own:
+            t.close()
+
+
+# --- Q5 community radio provisioning verbs (firmware bt_provision.c) ---
+_BT_GATE = {0: "OK (matches the burner template)", 1: "SHORT (SS < 64 B)",
+            2: "HEADER_MISMATCH", 3: "BDADDR_INVALID (blank/zero BD_ADDR)",
+            4: "DSDESC_MISMATCH (different DS layout)", 5: "TAIL_NOT_FF (extra records)"}
+_BT_PROBE_ST = {0: "OK", 1: "UART_FAIL", 2: "NO_DOWNLOAD_MODE", 3: "MINIDRV_FAIL", 4: "SS_READ_FAIL"}
+_BT_FLASH_ST = {0: "OK", 1: "POWER_DEFER", 2: "UART_FAIL", 3: "NO_DOWNLOAD_MODE",
+                4: "MINIDRV_FAIL", 5: "SS_READ_FAIL", 6: "GATE_REFUSED", 7: "DS_BASE_MISMATCH",
+                8: "DS_WRITE_FAIL", 9: "DS_VERIFY_FAIL", 10: "SS_CHANGED", 11: "LAUNCH_FAIL"}
+
+
+def cmd_bt_probe(args, t=None):
+    """READ-ONLY: read the radio Static Section + run the template gate (fleet-uniformity check)."""
+    own = t is None
+    t = t or open_transport(args)
+    try:
+        r = t.request("bt_ss_probe")
+        st, gate, ss = r.get("status", -1), r.get("gate", -1), r.get("ss", "")
+        print("SP-1 radio SS probe (READ-ONLY, nothing is written)")
+        print(f"  probe status : {st} {_BT_PROBE_ST.get(st, '?')}")
+        if len(ss) >= 54:
+            b = bytes.fromhex(ss)
+            print(f"  SS[0:32]     : {' '.join(f'{x:02x}' for x in b[:32])}")
+            print(f"  BD_ADDR      : {':'.join(f'{x:02x}' for x in b[21:27])}")
+        print(f"  gate         : {gate} {_BT_GATE.get(gate, '?')}")
+        if st == 0 and gate == 0:
+            print("  => FLEET-UNIFORM: this radio matches the burner template. Safe to provision.")
+        elif st == 0:
+            print("  => MISMATCH: layout differs from the burner. DO NOT provision (the gate refuses it).")
+            print("     Save this SS for the design (references/15) before deciding anything.")
+        else:
+            print("  => probe did not complete; nothing written (read-only). See status above.")
+        return r
+    finally:
+        if own:
+            t.close()
+
+
+def cmd_bt_provision(args, t=None):
+    """DESTRUCTIVE: gate-gated DS-only radio reflash. Requires --yes + a long --timeout."""
+    if not getattr(args, "yes", False):
+        print("REFUSING: `bt-provision` PERMANENTLY reflashes this unit's radio (the destructive DS")
+        print("write). Do the READ-ONLY `bt-probe` first and confirm gate OK, validate on the SWD")
+        print("burner, satisfy the design Top-3 + firmware-audit + module-flash-audit, THEN re-run")
+        print("with --yes and a long timeout, e.g.:  sp1ctl.py --timeout 300 bt-provision --yes")
+        return 2
+    own = t is None
+    t = t or open_transport(args)
+    try:
+        print("bt-provision: flashing the radio DS. Keep USB connected; ~minutes. Do NOT unplug.")
+        r = t.request("bt_provision")
+        st = r.get("status", -1)
+        print(f"  flash status : {st} {_BT_FLASH_ST.get(st, '?')}")
+        print(f"  gate         : {r.get('gate', -1)} {_BT_GATE.get(r.get('gate', -1), '?')}")
+        if st == 0:
+            print("  => SUCCESS: DS flashed + verified, SS preserved, app booted.")
+        elif st == 10:
+            print("  => *** SS_CHANGED: CRITICAL. Stop, capture everything. ***")
+        else:
+            print("  => did not complete; SS untouched, a re-run is idempotent. See status above.")
+        return 0 if st == 0 else 1
     finally:
         if own:
             t.close()
@@ -1806,6 +1882,9 @@ def build_parser():
     a.add_argument("n", type=int, nargs="?", default=None)
 
     sub.add_parser("monitor", help="stream live mon frames until Ctrl-C")
+    sub.add_parser("bt-probe", help="READ-ONLY: read the radio Static Section + run the template gate (fleet-uniformity)")
+    bp = sub.add_parser("bt-provision", help="DESTRUCTIVE: gate-gated DS-only radio reflash (needs --yes + long --timeout)")
+    bp.add_argument("--yes", action="store_true", help="confirm the permanent radio reflash")
 
     e = sub.add_parser("export", help="read N, write friendly JSON to FILE")
     e.add_argument("n", type=int); e.add_argument("file")
@@ -1844,6 +1923,10 @@ def main(argv=None):
             return cmd_export(args)
         if args.cmd == "export-all":
             return cmd_export_all(args)
+        if args.cmd == "bt-probe":
+            cmd_bt_probe(args); return 0
+        if args.cmd == "bt-provision":
+            return cmd_bt_provision(args)
     except ProfileError as e:
         print(f"profile error: {e}", file=sys.stderr)
         return 2

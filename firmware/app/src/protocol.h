@@ -24,6 +24,21 @@ struct proto_store {
     uint8_t faders, buttons;
     const char *fw;
     const char *uid;   /* hex hardware id (hwinfo) for getPorts matching; "" if none */
+#ifdef CONFIG_FELDD_BT_PROVISION
+    /* Q5 P0 stage-1 READ-ONLY SS probe hook. Wired by config_cdc.c to
+     * bt_provision_probe_ss() in the FELDD_BT_PROVISION build only; NULL/absent otherwise.
+     * Keeps protocol.c pure (no hardware include) — the verb just calls this pointer.
+     * Fills ss_out[64] + *gate_out (enum bt_gate_result); returns enum bt_provision_status
+     * (0 == OK). #ifdef'd so the shipped/host protocol layer is byte-unchanged. */
+    int (*bt_ss_probe)(uint8_t ss_out[64], int *gate_out);
+    /* Q5 P0 stage-2 DS-WRITE provisioning hook. Wired by config_cdc.c to bt_provision_run()
+     * in the FELDD_BT_PROVISION build only; NULL/absent otherwise. Runs the power gate +
+     * the read+gate+DS-write+verify+SS-preserve+launch sequence; fills *gate_out (enum
+     * bt_gate_result) and returns an enum bt_provision_flash_status (0 == OK, includes
+     * POWER_DEFER, GATE_REFUSED, the DS-write codes, SS_CHANGED, LAUNCH_FAIL). #ifdef'd so
+     * the shipped/host protocol layer is byte-unchanged. */
+    int (*bt_provision)(int *gate_out);
+#endif
 };
 /* Side-channel result the caller may inspect after a successful dispatch.
    Currently carries the monitor on/off state parsed from a "monset" request,

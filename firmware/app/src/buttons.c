@@ -197,6 +197,20 @@ int buttons_scan_pure(struct buttons_state *s, int trk_raw, int vol_raw,
     return n;
 }
 
+/* Rail-load class from the two raw ladder reads: 0 idle, 1 loaded, 2 HEAVY. HEAVY =
+ * the pressed button sits on a ladder's TOP plateau (>=1500: PLAY ~1823 on tracks,
+ * VolUp ~1820 on vol). Rail current is ~proportional to the plateau raw
+ * (I = Vrail/(Rup+Rdown), raw = 4095*Rdown/(Rup+Rdown)), so PLAY sags the shared
+ * BTN_COM rail ~8.5x harder than Track1 and ~1.5x harder than Track4 — enough to
+ * cross a CC step on a high-riding fader. The fader deadband widens for this class
+ * (petercolombo fader jitter, 2026-07-12). Pure so it host-tests. */
+int buttons_rail_class_pure(int trk_raw, int vol_raw)
+{
+    if (trk_raw >= 1500 || vol_raw >= 1500) return 2;   /* PLAY / VolUp: heaviest sag */
+    if (trk_raw >= 110  || vol_raw >= 200)  return 1;   /* any other held button */
+    return 0;                                           /* idle */
+}
+
 /* --------------------------------------------------------------------------
  * Zephyr I/O shell. Compiled out for the host test (which drives the pure core
  * above directly). The shell is intentionally thin: it only wires
@@ -227,8 +241,22 @@ int buttons_scan(struct button_event *evt, int cap)
      * it skips the drooped fader read on the very first sagged tick instead of
      * ~24 ms later. Thresholds mirror the decode idle bands (<110 tracks, <200
      * vol = nothing held); the Track1+4 DFU band (>110) also loads the rail. */
-    g_rail_loaded = (trk_raw >= 110) || (vol_raw >= 200);
+    g_rail_loaded = buttons_rail_class_pure(trk_raw, vol_raw);   /* 0 idle / 1 loaded / 2 heavy; truthiness unchanged */
     return buttons_scan_pure(&g_state, trk_raw, vol_raw, evt, cap);
+}
+
+/* Fresh instantaneous rail-load class, re-read NOW (no debounce side effects).
+ * main.c calls this right before the fader reads to catch a press that landed
+ * AFTER buttons_scan() earlier in the same tick — otherwise the first (worst) sag
+ * transient reaches the fader path on the un-widened idle deadband, including the
+ * 0/127 rail-band bypass. Two ladder ADC reads, ~us-scale. */
+int buttons_rail_probe(void)
+{
+    int trk_raw = controls_read_raw(0);
+    int vol_raw = controls_read_raw(1);
+    if (trk_raw < 0) trk_raw = 0;
+    if (vol_raw < 0) vol_raw = 0;
+    return buttons_rail_class_pure(trk_raw, vol_raw);
 }
 
 int buttons_dfu_held(void)

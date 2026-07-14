@@ -130,6 +130,11 @@ static uint8_t        active_mode;               /* current device mode (fast pa
 static uint8_t        play_mode_cache;            /* Feature 4: 0 shift, 1 assignable */
 static uint8_t        brightness_cache;   /* Feature B: 0 dim (default), 1 full; persisted in LIB_ID_SETTINGS[1] */
 static uint8_t        bpm_cache;          /* clock: persisted global GEN tempo 40..240; LIB_ID_SETTINGS[2] */
+#ifdef CONFIG_FELDD_BT_PROVISION
+static uint8_t        provision_done_cache; /* Q5: radio provisioned flag; LIB_ID_SETTINGS[3] (bookkeeping only) */
+static uint8_t        provision_app_maj;    /* Q5: flashed app major;       LIB_ID_SETTINGS[4] */
+static uint8_t        provision_app_min;    /* Q5: flashed app minor;       LIB_ID_SETTINGS[5] */
+#endif
 
 /* Build slot `slot`'s default profile into *p.
  *
@@ -240,10 +245,13 @@ struct te_seed8 {
 static const struct te_seed8 SEED_OPXY8 = {
     .nlayers = 8,
     .fcc   = { 32, 33, 31, 38 },
-    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_CC_TOGGLE,
+    /* PLAY = CC104 play (0.27.3 PLAY rework: PLAY is a plain assignable button since
+     * 0.24). FWD moved to CC107 (view tempo page); RWD stays CC105 stop. Kept in sync
+     * with the opxy8Track web template (OPXY_BTN_VAL). */
+    .btype = { BTN_CC_MOMENTARY, BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_CC_TOGGLE,
                BTN_CC_MOMENTARY, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
                BTN_CC_MOMENTARY, BTN_CC_MOMENTARY },
-    .bval  = { 0, 9, 37, 29, 39, 83, 84, 104, 105 },
+    .bval  = { 104, 9, 37, 29, 39, 83, 84, 107, 105 },
 };
 
 /* Write layer L (0..NUM_LAYERS-1) with fader CCs / button types+values, ALL on MIDI
@@ -290,11 +298,13 @@ static const struct te_seed SEED_TX6 = {
     .fcc   = { 7, 7, 7, 7 },
     .fchan = { 0, 1, 2, 3 },
     .scc   = { 0, 0, 0, 0 },
-    .btype = { BTN_NONE, BTN_CC_TOGGLE, BTN_CC_TOGGLE, BTN_CC_TOGGLE,
+    /* PLAY = CC46 ch7 master start/stop (0.27.3 PLAY rework, moved off FWD). FWD freed
+     * (the TX-6 has no other transport CC). Kept in sync with the tx6Mixer web template. */
+    .btype = { BTN_CC_MOMENTARY, BTN_CC_TOGGLE, BTN_CC_TOGGLE, BTN_CC_TOGGLE,
                BTN_CC_TOGGLE, BTN_CC_TOGGLE, BTN_CC_TOGGLE,
-               BTN_CC_MOMENTARY, BTN_NONE },
-    .bval  = { 0, 120, 120, 120, 120, 120, 120, 46, 0 },
-    .bchan = { 0, 0, 1, 2, 3, 4, 5, 6, 0 },
+               BTN_NONE, BTN_NONE },
+    .bval  = { 46, 120, 120, 120, 120, 120, 120, 0, 0 },
+    .bchan = { 6, 0, 1, 2, 3, 4, 5, 0, 0 },
 };
 
 /* OP-1 field (ch1, fw 1.7.0+): faders synth params 1-4 (CC46-49); shift env ADSR
@@ -306,10 +316,12 @@ static const struct te_seed SEED_OP1 = {
     .fcc   = { 46, 47, 48, 49 },
     .fchan = { 0, 0, 0, 0 },
     .scc   = { 50, 51, 52, 53 },
-    .btype = { BTN_NONE, BTN_NOTE, BTN_NOTE, BTN_NOTE, BTN_NOTE,
+    /* PLAY = CC105 tape play (0.27.3 PLAY rework, moved off FWD). FWD = CC83 jump to next
+     * bar; RWD stays CC104 tape stop. Kept in sync with the op1Field web template. */
+    .btype = { BTN_CC_MOMENTARY, BTN_NOTE, BTN_NOTE, BTN_NOTE, BTN_NOTE,
                BTN_CC_TOGGLE, BTN_CC_MOMENTARY, BTN_CC_MOMENTARY,
                BTN_CC_MOMENTARY },
-    .bval  = { 0, 60, 64, 67, 72, 93, 64, 105, 104 },
+    .bval  = { 105, 60, 64, 67, 72, 93, 64, 83, 104 },
     .bchan = { 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
@@ -347,13 +359,14 @@ static void make_default(int slot, struct profile *p)
         for (int i = 0; i < NUM_BUTTONS; i++) {
             uint8_t bv = default_btn_value(within, L, i);
             if (L == 0) {
-                /* Feature 4: seed PLAY (idx 0) as silent BTN_NONE so an
-                 * un-reserved/promoted PLAY does not emit the CC#0 Bank-Select
-                 * placeholder that collides with fader[0]. default_btn_value(...,0)
-                 * already returns 0 for idx 0 and default_btn_channel(0)==0, so
-                 * PLAY stays fully silent until explicitly mapped. Matches what
-                 * SEED_OPXY8/SEED_TX6/SEED_OP1 already do for idx 0; BTN_NONE still
-                 * passes profile_validate. */
+                /* Feature 4: the GENERIC default keeps PLAY (idx 0) silent BTN_NONE so an
+                 * un-reserved/promoted PLAY does not emit the CC#0 Bank-Select placeholder
+                 * that collides with fader[0]. default_btn_value(...,0) already returns 0 for
+                 * idx 0 and default_btn_channel(0)==0, so PLAY stays fully silent until
+                 * explicitly mapped. (The TE starter seeds SEED_OPXY8/SEED_TX6/SEED_OP1 now DO
+                 * map PLAY to their device's transport per the 0.27.3 PLAY rework - PLAY is a
+                 * plain assignable button since 0.24 - which also passes profile_validate; only
+                 * this generic fallback leaves it silent.) */
                 p->button[i].type    = (i == 0) ? BTN_NONE : BTN_CC_MOMENTARY;
                 p->button[i].value   = bv;
                 p->button_channel[i] = default_btn_channel(i); /* faders ch1 / front ch2 / side ch3 */
@@ -609,11 +622,20 @@ int librarian_init(void)
      * the 4-byte header. A device that has never toggled it (-ENOENT) defaults to 0
      * (shift); a present-but-invalid byte also falls back to the default. This is a
      * pure ADD, so no existing device is short-read/reseeded. */
+#ifdef CONFIG_FELDD_BT_PROVISION
+    uint8_t st[6] = { 0, 0, 0, 0, 0, 0 };   /* Q5: record grew st[3]->st[6] */
+#else
     uint8_t st[3] = { 0, 0, 0 };
+#endif
     ssize_t rst = nvs_read(&fs, LIB_ID_SETTINGS, st, sizeof(st));
     play_mode_cache  = lib_playrole_load(rst >= 1, st[0]);
     brightness_cache = lib_brightness_load(rst >= 2, st[1]);
     bpm_cache        = lib_bpm_load(rst >= 3, st[2]);
+#ifdef CONFIG_FELDD_BT_PROVISION
+    provision_done_cache = (rst >= 4) ? st[3] : 0;   /* short-read older records to 0 */
+    provision_app_maj    = (rst >= 5) ? st[4] : 0;
+    provision_app_min    = (rst >= 6) ? st[5] : 0;
+#endif
 
     /* Load the active profile of the CURRENT mode into the RAM hot copy. The NVS
      * slot it addresses is the GLOBAL index lib_bank_global(mode, within) (0..15).
@@ -810,10 +832,35 @@ int librarian_set_mode(uint8_t m)
  * short-read reseed/wipe). */
 static int settings_write(void)
 {
+#ifdef CONFIG_FELDD_BT_PROVISION
+    /* Q5: the record grew st[3]->st[6]; older readers still short-read the leading
+     * 3 bytes with defaults, so this stays backward-compatible. */
+    uint8_t st[6] = { play_mode_cache, brightness_cache, bpm_cache,
+                      provision_done_cache, provision_app_maj, provision_app_min };
+#else
     uint8_t st[3] = { play_mode_cache, brightness_cache, bpm_cache };
+#endif
     ssize_t w = nvs_write(&fs, LIB_ID_SETTINGS, st, sizeof(st));
     return (w == (ssize_t)sizeof(st)) ? 0 : -1;
 }
+
+#ifdef CONFIG_FELDD_BT_PROVISION
+uint8_t librarian_provision_done(void)
+{
+    return provision_done_cache;   /* RAM copy */
+}
+
+int librarian_set_provision_done(uint8_t done, uint8_t app_maj, uint8_t app_min)
+{
+    if (!fs_ready) {
+        return -EINVAL;
+    }
+    provision_done_cache = done ? 1u : 0u;
+    provision_app_maj    = app_maj;
+    provision_app_min    = app_min;
+    return settings_write();
+}
+#endif
 
 uint8_t librarian_play_mode(void)
 {

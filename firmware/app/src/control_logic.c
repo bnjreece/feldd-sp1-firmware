@@ -5,6 +5,27 @@
 // for zero messages at rest.
 #define FADER_HYSTERESIS 16
 
+// Rail-sag COMPENSATION (0.26, petercolombo). The faders are powered by the same
+// BTN_COM rail every button sags on press, and the read is ratiometric against the
+// internal reference, so a held button drops every fader's raw PROPORTIONALLY to its
+// position and to that button's ladder current. Peter measured the dip at CC ~100
+// (raw ~2881): PLAY/VolUp (rail class 2) = -2 CC (~57 counts ~= 2.0%), the lighter
+// buttons (class 1) = -1 CC (~28 counts ~= 1.0%). We ADD that droop back on the fader
+// read while a button is held, so the CC never dips AND fine 1-CC moves still pass
+// (a deadband can't do both). Per-mille of the raw, indexed by rail class. TUNABLE:
+// if Peter still sees a residual after 0.26, nudge these (the model is pure-proportional).
+static const uint16_t FADER_RAIL_SAG_PERMILLE[3] = { 0, 10, 20 };
+
+uint16_t fader_rail_compensate(uint16_t raw12, int rail_class)
+{
+    if (raw12 > 4095) raw12 = 4095;
+    if (rail_class < 0) rail_class = 0;
+    if (rail_class > 2) rail_class = 2;
+    uint32_t comp = (uint32_t)raw12
+                  + ((uint32_t)raw12 * FADER_RAIL_SAG_PERMILLE[rail_class]) / 1000u;
+    return (comp > 4095u) ? 4095u : (uint16_t)comp;
+}
+
 // The SP-1 faders never reach the ADC rails: pot end-resistance + the internal
 // (non-ratiometric) SAADC reference mean full travel reads ~raw 0..3680, which a
 // plain raw>>5 caps at CC 115 (petercolombo + benjamin, real units, 2026-06-18:
@@ -35,10 +56,11 @@ int fader_update_rail(fader_t *f, uint16_t raw12, int rail_loaded)
         // require crossing into a new CC step AND clearing the jitter window
         if (new_cc == old_cc) return -1;
         if (rail_loaded) {
-            // a button is sagging the shared rail: keep the deadband EVERYWHERE,
-            // including the rail bands the idle path bypasses, so the persistent
-            // ~1-2 LSB droop can't leak a spurious 0/127. A genuine move is >>
-            // FADER_HYSTERESIS and still passes (BUG-5: track, don't freeze).
+            // a button is sagging the shared rail. 0.26 COMPENSATES the droop upstream
+            // (fader_rail_compensate, applied by the caller), so raw12 is already
+            // de-sagged here; keep the standard deadband EVERYWHERE (incl. the rail
+            // bands the idle path bypasses) purely as the residual net for any
+            // compensation error. A genuine move is >> FADER_HYSTERESIS and still passes.
             if (delta < FADER_HYSTERESIS) return -1;
         } else if (delta < FADER_HYSTERESIS && raw12 > FADER_RAW_MIN && raw12 < FADER_RAW_MAX) {
             // idle: readings in a rail band (<= MIN / >= MAX) bypass the jitter

@@ -36,6 +36,11 @@
 #include "control_logic.h"
 #include "profile.h"
 #include "mapping.h"
+#ifdef CONFIG_FELDD_BT_LINK
+#include "bt_link.h"
+#include "bt_gesture.h"
+#include "bt_led.h"
+#endif
 #include "btn_toggle.h"
 #include "cc_value.h"
 #include "transport.h"
@@ -70,6 +75,9 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
 #include "clock_timer.h"
 #include "clock_router.h"
 #include "clockgen.h"
+#include "bt_probe.h"   /* Phase-A BT bring-up probe (dev-only, CONFIG_FELDD_BT_PROBE) */
+#include "bt_download.h" /* module-download state machine (dev-only, CONFIG_FELDD_BT_DOWNLOAD) */
+#include "bt_provision.h" /* Q5 SS probe + DS-write provisioning (dev/canary, CONFIG_FELDD_BT_PROVISION) */
 
 /* Feature 4: PLAY is the shift/assignable control and •• is the Fn-modifier; the
  * behavior is now a RUNTIME branch on play_mode (librarian_play_mode()), not a
@@ -102,11 +110,9 @@ static int     g_transport_playing;
 /* Feature 4: dot-dot (••) Fn-modifier combo latch (per-index consume-both-edges,
  * mode.c combo_dispatch) + the per-button press-time layer latch (stuck-note-
  * across-springback fix: a NOTE pressed on shift-L2 releases its Note-Off on L2
- * even after PLAY springs back) + the previous-tick PLAY-held state (edge-arm the
- * fader soft-takeover on shift enter/exit so faders never jump). BSS zero-init. */
+ * even after PLAY springs back). BSS zero-init. */
 static combo_latch_t g_combo;
 static uint8_t       g_btn_press_layer[NUM_BUTTONS];
-static int           g_play_held_prev;
 
 /* v7 chord latch state. Per-button (NUM_BUTTONS) so the two-ladder case (a chord
  * held on EACH ladder) latches independently - do NOT use a single shared latch.
@@ -196,6 +202,9 @@ static void kbd_send_held(void)
     uint8_t rpt[KBD_REPORT_LEN];
     kbd_build_report(&g_kbd, rpt);
     usb_hid_send_report(rpt);
+#ifdef CONFIG_FELDD_BT_LINK
+    bt_link_send_hid(rpt);      /* BLE-HID mirror: same report, no-op unless HID-subscribed */
+#endif
 }
 
 /* Re-arm every fader's send-on-change state so the NEXT read re-emits its
@@ -263,6 +272,10 @@ static void enter_bootloader(void)
      * TRS-attached synth doesn't ring through SYSTEM_OFF. Idempotent + purges the
      * TX ring first (Fix 6). */
     chord_flush_all();
+
+#ifdef CONFIG_FELDD_BT_LINK
+    bt_link_suspend();  /* hold the module in reset before SYSTEM_OFF */
+#endif
 
     /* F6: SYSTEM_OFF on nRF52840 only wakes on a configured DETECT/sense, a
      * full reset, or USB. To return from power-off on a •• press we MUST arm a
@@ -548,10 +561,14 @@ static int route_midi_button(int idx, int pressed, int layer_now)
     switch (profile_layer_button_type(p, idx, layer_now)) {
     case BTN_CC_TOGGLE:
         if (pressed) {
+            uint8_t cc = profile_layer_button_value(p, idx, layer_now);
+            /* CC#0 = unbound sentinel (mirrors map_fader's cc==0 + map_button's CC_MOMENTARY
+             * guard): an unmapped toggle left on CC0 must NOT fire CC0 or flip its latch. */
+            if (cc == 0) return 0;
             uint8_t on = btn_toggle_flip(&g_btn_toggle, layer_now, idx);
             struct midi_msg m = {
                 .status = (uint8_t)(0xB0 | (profile_layer_button_channel(p, idx, layer_now) & 0x0F)),
-                .d1     = profile_layer_button_value(p, idx, layer_now),
+                .d1     = cc,
                 .d2     = on ? 127 : 0,
                 .len    = 3,
             };
@@ -619,12 +636,16 @@ static int route_midi_button(int idx, int pressed, int layer_now)
          * here (before BTN_CHORD) guarantees the CC-value bytes are NEVER fed to the
          * chord engine. cc_value_decide owns the 3 sub-modes and threads the shared
          * g_btn_toggle latch for the toggle sub-mode. The CC NUMBER rides `value`. */
+        uint8_t cc = profile_layer_button_value(p, idx, layer_now);
+        /* CC#0 = unbound sentinel (like the fader + CC_MOMENTARY/CC_TOGGLE): skip an unmapped
+         * cc-value button entirely - do not decide/latch or fire CC0. */
+        if (cc == 0) return 0;
         uint8_t sub, on, off, d2;
         if (profile_layer_ccval(p, idx, layer_now, &sub, &on, &off) != 0) return 0;
         if (!cc_value_decide(sub, pressed, on, off, &g_btn_toggle, layer_now, idx, &d2)) return 0;
         struct midi_msg m = {
             .status = (uint8_t)(0xB0 | (profile_layer_button_channel(p, idx, layer_now) & 0x0F)),
-            .d1     = profile_layer_button_value(p, idx, layer_now),   /* CC number stays in `value` */
+            .d1     = cc,   /* CC number stays in `value` */
             .d2     = d2,
             .len    = 3,
         };
@@ -656,11 +677,47 @@ int main(void)
     led_init();
     nrf_gpio_cfg_input(SP1_FUNC_BTN, NRF_GPIO_PIN_PULLUP);
 
+#if defined(CONFIG_FELDD_BT_LINK)
+    /* Hold the CYW20706 in reset (BT DEFAULT OFF) from the very first boot instant, BEFORE the
+     * charge-standby gate below can SYSTEM_OFF. The nRF52840 RETAINS driven GPIO state through
+     * SYSTEM_OFF, so this clamp survives a bare-charge session — the module never advertises while
+     * the device is "off and charging". Gated on CONFIG_FELDD_BT_LINK; the probe/download builds
+     * own P0.10 themselves and run before the gate. bt_link_init re-affirms this on the normal path. */
+    nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(0, 10));   /* module RST_N */
+    nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(0, 10));    /* HELD IN RESET = BT OFF */
+#endif
+
     charger_init();         /* enable battery charging ASAP so a low cell can't brown us out */
+
+#ifdef CONFIG_FELDD_BT_PROBE
+    /* Phase-A Bluetooth bring-up probe (dev-only). Runs HERE — before the
+     * charge-standby gate — so a plain SWD --reset (SREQ, which the gate would
+     * park) still runs it with NO •• wake needed on the USB-powered burner. The WDT
+     * is already started (above) and the probe feeds it; LEDs + charger are up. It
+     * never returns, so the gate + normal control loop below are skipped. The probe
+     * itself is a light load (one UART + a few GPIOs, no USB/SAADC/audio), so it
+     * does not reintroduce the flat-cell brown-out the gate guards against. */
+    bt_probe_run();
+#endif
+
+#ifdef CONFIG_FELDD_BT_DOWNLOAD
+    /* Module-download state machine (dev-only). Like the probe, runs HERE — before
+     * the charge-standby gate — so a plain SWD --reset drives it with NO •• press on
+     * the USB-powered burner. Same light load as the probe (one UART + a few GPIOs);
+     * it never returns. It is DS-only + SS-preserving: even a brown-out mid-write can
+     * only leave a re-flashable DS, and never touches the SS (which is never written).
+     * Mutually exclusive with the probe above. */
+    bt_download_run();
+#endif
+
     /* Park in low-power charge-standby unless this was a deliberate •• power-on
      * or a watchdog recovery, so a full boot can never brown-out-thrash a low
      * cell (the failure that wedged Unit A). Returns only on a real turn-on. */
+#ifndef CONFIG_FELDD_REMOTE_HID_TEST
     charge_standby_gate(wake_reas);
+#else
+    (void)wake_reas;        /* remote HID bench test: skip the park, always full-boot on an SWD reset */
+#endif
 
     boot_signature();       /* feldd boot animation: track-LED 1->2->3->4 sweep */
 
@@ -671,6 +728,13 @@ int main(void)
     clock_timer_init();     /* MIDI clock generator (GEN mode) */
     clock_router_init();    /* GEN/THRU selector: USB-in clock -> THRU, else GEN */
     usbdev_start();         /* enumerate the USB composite: CDC console + USB-MIDI */
+
+#ifdef CONFIG_FELDD_BT_LINK
+    bt_link_init();     /* PREPARE the runtime link only; module HELD IN RESET (BT default OFF) until •• + play */
+#ifdef CONFIG_FELDD_REMOTE_HID_TEST
+    bt_link_bt_on();    /* remote HID bench test: cold-boot the module + advertise NOW, no •• + play gesture */
+#endif
+#endif
 
     /* M5.2: mount NVS, lay down 8 default profiles on first boot, and load the
      * persisted active profile into the librarian's RAM hot copy. If NVS fails
@@ -730,6 +794,18 @@ int main(void)
      * (stuck, noisy, or brownout-glitched); without this guard that would count
      * straight toward the ~5 s power-off and kill the boot. */
     int func_armed = 0;
+#ifdef CONFIG_FELDD_BT_LINK
+    bt_gesture_t bt_gest; bt_gesture_init(&bt_gest);
+    int  bt_anim_pat       = BT_LED_NONE;  /* active momentary BT LED pattern */
+    int  bt_anim_tick      = 0;
+    int  bt_midi_ready_was = 0;            /* rising-edge latch for the CONNECTED double-flash */
+    /* NOTE: no func_combo / play_combo_consumed locals — the hand-rolled •• + play
+     * suppression that guarded the retired PLAY peek/dial FSM is gone. On 0.24 the
+     * •• + play co-hold reuses the combo engine's consume-both-edges + reset_hold
+     * (via g_combo's idx-0 arm in the evt loop below). No saved-brightness local
+     * either — the BT LED player is FRONT-ROW ON/OFF ONLY and never touches the GLOBAL
+     * led_set_brightness() (see (f)), so there is nothing to save/restore. */
+#endif
     /* Track the active profile index across ticks so we can re-arm the faders
      * uniformly on ANY active-slot change — a •• short-tap, or a host
      * setactive/write/reset that lands on a different slot — without each call
@@ -775,6 +851,20 @@ int main(void)
     static int    g_last_dtr = 0;
     for (;;) {
         feed_wdt();
+#ifdef CONFIG_FELDD_BT_LINK
+        bt_link_poll();
+#ifdef CONFIG_FELDD_REMOTE_HID_TEST
+        /* Remote HID bench test: once a host has subscribed (bit2 in g_status), emit a periodic
+         * 'x' keystroke over BLE-HID so the HOGP delivery path can be verified with no buttons.
+         * bt_link_send_hid() no-ops until HID-subscribed, so this stays silent until a host attaches. */
+        {
+            static uint32_t rht = 0;
+            if      ((rht % 250) == 0)  { uint8_t r[8] = {0,0,0x1B,0,0,0,0,0}; bt_link_send_hid(r); }  /* press 'x' (HID 0x1B) */
+            else if ((rht % 250) == 12) { uint8_t r[8] = {0,0,0,0,0,0,0,0};    bt_link_send_hid(r); }  /* key-up ~100 ms later */
+            rht++;
+        }
+#endif
+#endif
 
         /* Drain the chord TX ring FIRST (Note-Offs prioritized) under the per-tick
          * cap so a multi-chord burst clears deterministically across ticks without
@@ -817,7 +907,27 @@ int main(void)
         } else if (func_low) {
             /* Accumulate the hold. Only a BARE hold reaches 625: a consumed combo
              * press resets `held` to 0 in the evt loop below, so ••+combo never
-             * crosses the power-off threshold. */
+             * crosses the power-off threshold. On the BT build the •• + play co-hold
+             * is one such consumed combo (idx-0 arm in the evt loop), so it likewise
+             * voids the power-off — replacing the retired hand-rolled func_combo freeze. */
+#ifdef CONFIG_FELDD_BT_LINK
+            /* •• + play co-hold: freeze the power-off counter EVERY tick it is active.
+             * The evt-loop idx-0 arm resets `held` only at the PLAY edge, so a sustained
+             * hold (e.g. past the 2.4 s fill-to-confirm FORGET) would otherwise re-accumulate
+             * to 625 and power off. bt_gesture_active() (co_ticks>0) guarantees •• + play never
+             * powers off regardless of hold length. */
+            if (bt_gesture_active(&bt_gest)) {
+                held = 0;
+            } else
+#endif
+#ifdef CONFIG_FELDD_BT_PROVISION
+            /* Never SYSTEM_OFF mid-radio-provision: a •• power-off during the ~minutes DS
+             * write would kill the module mid-flash. The blocking flash already stalls this
+             * whole scan, so this is belt-and-suspenders + refactor-proof. */
+            if (bt_provision_is_active()) {
+                held = 0;
+            } else
+#endif
             if (++held >= 625) {
                 enter_bootloader();   /* never returns (SYSTEM_OFF) */
             }
@@ -879,33 +989,110 @@ int main(void)
          * buttons_track_committed()==0 (the tracks ladder reports one button at a time;
          * 0 = PLAY held, 1..4 = a Track button, -1 = none). Using the committed state
          * (not the raw press) means a momentary glitch can't spuriously flip the mode. */
+#ifdef CONFIG_FELDD_BT_LINK
+        /* PLAY-held is now used ONLY by the •• + play BT gesture (idx 0 on the tracks
+         * ladder). PLAY no longer shifts layers or re-arms faders, so it lives inside
+         * the BT guard — the shipped no-BT build doesn't compute it at all. */
         int play_held = (buttons_track_committed() == 0);
+        /* Feed the DEBOUNCED/armed •• level (func_down), not the raw func_low, so this
+         * detector agrees with the idx-0 combo arm below (which also gates on func_down).
+         * A single-scan •• glitch during a committed PLAY hold no longer starts/ends a
+         * co-hold here and can't fire a spurious BT TOGGLE. func_down is func_low gated on
+         * func_armed + held<625; during an active co-hold `held` is frozen to 0 (above), so
+         * func_down tracks the physical •• hold for the whole gesture. */
+        int bt_ev = bt_gesture_step(&bt_gest, func_down, play_held);
+#ifndef CONFIG_FELDD_BT_LINK_HID
+        /* PHASE-1 DEAD-BAND FIX: with no HID there are no bonds to forget, so an over-long (>= ~2.4 s)
+         * •• + play hold returns BT_GESTURE_FORGET — which Phase 1 would otherwise DROP, giving no
+         * toggle and no LED feedback (a UX dead band). Remap it to a plain TOGGLE so a long hold still
+         * switches BT power. Phase 2 (CONFIG_FELDD_BT_LINK_HID, Task 12A) compiles this out and wires
+         * the real fill-to-confirm forget instead. */
+        if (bt_ev == BT_GESTURE_FORGET) { bt_ev = BT_GESTURE_TOGGLE; }
+#endif
+#ifdef CONFIG_FELDD_BT_LINK_HID
+        /* Task 12A (a): while •• + play is held, show the progressive L->R fill-to-confirm. The LED
+         * player below reads bt_gesture_fill() each tick (BT_LED_FORGET_FILL is progress-, not time-
+         * driven), so the fill tracks the hold and doubles as the abort cue: release before full = the
+         * SHORT toggle (BT_GESTURE_TOGGLE, handled just below), hold to full = FORGET (handled after). */
+        if (bt_gesture_active(&bt_gest) && bt_anim_pat != BT_LED_FORGET_DONE) {
+            bt_anim_pat = BT_LED_FORGET_FILL; bt_anim_tick = 0;
+        } else if (bt_anim_pat == BT_LED_FORGET_FILL && !bt_gesture_active(&bt_gest)) {
+            bt_anim_pat = BT_LED_NONE;   /* released before full: fill ends; the toggle below plays */
+        }
+#endif
+        if (bt_ev == BT_GESTURE_TOGGLE) {
+            if (!bt_link_bt_is_on()) {
+                /* off->on: cold-boot the module + await READY. NOTE: bt_link_bt_on() BLOCKS the control
+                 * loop up to ~1.5 s (WDT-fed poll for READY), so buttons/LEDs freeze for that window.
+                 * Acceptable — this is a deliberate user gesture, and the momentary ON LED sweep queued
+                 * below plays immediately after to confirm the power-on. */
+                int rc = bt_link_bt_on();
+                bt_anim_pat = (rc == 0) ? BT_LED_ON : BT_LED_UNAVAIL;   /* came up vs booted-silent */
+            } else {
+                bt_link_bt_off();                               /* on->off: hold module in reset */
+                bt_anim_pat = BT_LED_OFF;
+            }
+            bt_anim_tick = 0;
+            bt_midi_ready_was = 0;                              /* re-arm the connected edge */
+        }
+#ifdef CONFIG_FELDD_BT_LINK_HID
+        /* Task 12A (b): full-hold forget commit. In Phase-1 builds BT_GESTURE_FORGET was remapped to
+         * TOGGLE above (the #ifndef CONFIG_FELDD_BT_LINK_HID block) so it never reaches here; only the
+         * HID build, where bonds actually exist, forgets for real. The remap and this branch are
+         * mutually exclusive by construction. */
+        else if (bt_ev == BT_GESTURE_FORGET) {
+            bt_link_clear_bonds();                             /* FELDD_CMD_CLEAR_BONDS -> module forget + re-adv */
+            bt_anim_pat = BT_LED_FORGET_DONE; bt_anim_tick = 0;   /* 3x blink commit (front-row on/off only) */
+        }
+#endif
+#endif
         /* Device mode for THIS tick's routing + the mode-LED render below. Read the
          * RAM hot copy once; a flip in this scan updates it locally so the same-tick
          * render + any later edge already see the new mode. */
         int mode_now = librarian_mode();
-        /* Feature 4: PLAY role + the effective routing layer for THIS tick. In
-         * shift mode (play_mode 0) a held PLAY momentarily shifts routing to the
-         * profile's configurable shift target (0.22 Feature 1, profile_shift_target;
-         * legacy profiles resolve to L2); assignable mode (play_mode 1) never
-         * shifts. The side-row LED now FOLLOWS this effective layer (0.22 Feature 2),
-         * reversing the old spec (d); see the side-row render below. */
-        int play_mode = librarian_play_mode();
-        int layer_now = effective_layer(play_mode, play_held,
-                                        gesture_layer(&shift_gesture),
-                                        profile_shift_target(librarian_active()));
-        /* Edge-arm fader soft-takeover on shift enter/exit so faders never jump as
-         * PLAY momentarily shifts to/from L2 (shift mode only). */
-        if (play_mode == 0 && play_held != g_play_held_prev) {
-            for (int i = 0; i < NUM_FADERS; i++) {
-                g_takeover_arm[i] = 1;
-            }
-        }
-        g_play_held_prev = play_held;
+        /* PLAY is a PLAIN assignable button (chord/note/CC per the profile). Since 0.24
+         * (f821ae1) librarian_play_mode() is hardcoded to 1 = always-assignable, so PLAY
+         * NEVER shifts the routing layer: layer_now is ALWAYS the ••+FWD/RWD engaged
+         * layer. This retires the dormant play_mode==0 path (effective_layer + the
+         * soft-takeover re-arm) that used to force-re-emit all four faders at the
+         * PLAY-sagged rail value on every PLAY press/release edge (petercolombo fader
+         * jitter, 2026-07-12). The side-row LED still FOLLOWS layer_now (0.22 Feature 2). */
+        int layer_now = gesture_layer(&shift_gesture);
 
         for (int i = 0; i < ne; i++) {
             uint8_t idx = evt[i].idx;
             int pressed = evt[i].pressed;
+
+#ifdef CONFIG_FELDD_BT_LINK
+            /* •• + play (BT gesture) reuses the combo engine's consume-both-edges +
+             * reset_hold on PLAY (idx 0). combo_dispatch keeps PLAY OUT of range by
+             * design (mode.c; host-tested test_mode.c pins "PLAY out of range"), so the
+             * idx-0 arm lives HERE behind CONFIG_FELDD_BT_LINK — the shipped build never
+             * consumes PLAY as a combo. It mirrors the engine using g_combo's otherwise-
+             * unused bit 0 (combo_dispatch only ever touches idx 1..8): a PLAY press while
+             * •• is the Fn modifier (func_down) is consumed and voids the •• power-off
+             * hold (reset_hold), and the matching release is swallowed off the latch on
+             * either crossing order. The BT action itself (toggle vs forget, short vs
+             * long) is classified by bt_gesture_step() above; this arm only suppresses
+             * PLAY's shift-emit + the power-off, replacing the retired func_combo /
+             * play_combo_consumed freeze that once guarded the deleted PLAY peek FSM. A
+             * plain PLAY (•• not down) is NOT consumed here — it falls through to the
+             * combo_dispatch passthrough + the play_mode shift handling below. */
+            if (idx == 0) {
+                const uint16_t play_bit = 1u;   /* g_combo bit 0; combo_dispatch uses idx 1..8 only */
+                if (pressed && func_down) {
+                    g_combo.latched |= play_bit;
+                    held = 0;                              /* reset_hold: void the •• power-off */
+                    config_cdc_monitor_button(0, pressed);
+                    continue;                              /* consumed: no shift-emit */
+                }
+                if (!pressed && (g_combo.latched & play_bit)) {
+                    g_combo.latched &= (uint16_t)~play_bit;
+                    config_cdc_monitor_button(0, pressed);
+                    continue;                              /* release swallowed off the latch */
+                }
+            }
+#endif
 
             /* dot-dot (••) Fn-modifier combo (spec (a),(b)2): while •• is held, T4
              * flips MODE, Vol+/- cycle the profile, FWD/RWD step the layer. The
@@ -1034,14 +1221,11 @@ int main(void)
                 continue;
             }
 
-            /* PLAY (idx 0): the shift trigger by DEFAULT (play_mode 0) — a momentary
-             * L2 shift, no MIDI/keyboard emit. An ASSIGNABLE button when play_mode 1:
-             * fall through to normal routing (make_default seeds button[0] BTN_NONE =
-             * silent until the user maps it, so no CC#0/fader0 collision, spec (c)). */
-            if (idx == 0 && play_mode == 0) {
-                config_cdc_monitor_button(0, pressed);   /* momentary shift; no emit */
-                continue;
-            }
+            /* PLAY (idx 0) is a PLAIN assignable button (librarian_play_mode() is
+             * hardcoded to 1 since 0.24). It falls straight through to normal routing;
+             * make_default seeds button[0] = BTN_NONE (silent) until the user maps it,
+             * so there is no CC#0/fader0 collision (spec (c)). The dormant play_mode==0
+             * momentary-shift swallow is retired here. */
 
             /* Normal routing on the EFFECTIVE layer. KEYBOARD holds the per-button
              * HID key while pressed (kbd_state latches (mod,key) at the press edge,
@@ -1217,6 +1401,34 @@ int main(void)
             }
         }
 
+#ifdef CONFIG_FELDD_BT_LINK
+        /* Connected (host subscribed) rising edge -> double-flash, unless an on/off/unavail
+         * animation is already playing (don't stomp it). */
+        {
+            int ready = bt_link_midi_ready() ? 1 : 0;
+            if (ready && !bt_midi_ready_was && bt_anim_pat == BT_LED_NONE) {
+                bt_anim_pat = BT_LED_CONNECTED; bt_anim_tick = 0;
+            }
+            bt_midi_ready_was = ready;
+        }
+        /* Momentary player: while active it OWNS the 4 FRONT track LEDs (idx 0-3) ONLY, overriding
+         * this tick's normal track render, then hands back (design: momentary). FRONT-ROW ON/OFF
+         * ONLY — it deliberately does NOT call led_set_brightness(): that control is GLOBAL (led.h,
+         * all 8 LEDs), so modulating it here would momentarily disturb the side/play LEDs (idx 4-7),
+         * which are meaningful (project_feldd_led_status_language). The frame's on/off bits render at
+         * the ambient global brightness; the brightness bt_led returns is advisory and intentionally
+         * NOT applied. (Runs BEFORE the host-LED console override below, which stays the highest-
+         * priority writer when a host owns the LEDs.) */
+        if (bt_anim_pat != BT_LED_NONE) {
+            uint8_t f[4];
+            (void)bt_led_pattern_frame(bt_anim_pat, bt_anim_tick, bt_gesture_fill(&bt_gest), f);
+            for (int i = 0; i < 4; i++) { led_idx(i, f[i]); }   /* FRONT row only; side row untouched */
+            if (++bt_anim_tick >= bt_led_pattern_len(bt_anim_pat)) {
+                bt_anim_pat = BT_LED_NONE;                      /* next tick normal render resumes */
+            }
+        }
+#endif
+
         /* Faders -> CC, AFTER the buttons. A held button sags the shared BTN_COM
          * rail, and because the SAADC ref is internal (not ratiometric) every fader
          * ADC read drops ~1-2 LSB. We gate on buttons_rail_loaded() — the
@@ -1236,7 +1448,17 @@ int main(void)
         static uint8_t fader_settle;
         static int     fader_rail_prev;
         int rail_loaded = buttons_rail_loaded();
-        fader_settle = fader_settle_step(rail_loaded, fader_rail_prev, fader_settle);
+        {   /* Close the intra-tick press race: buttons_scan() sampled the ladders at the
+             * TOP of this tick, but a press that landed since then sags the rail unseen,
+             * so the worst transient would otherwise hit the fader read on the un-widened
+             * idle path (incl. the 0/127 rail-band bypass). Re-probe NOW and take the
+             * heavier class. (petercolombo jitter, 2026-07-12.) */
+            int probe = buttons_rail_probe();
+            if (probe > rail_loaded) rail_loaded = probe;
+        }
+        /* fader_settle_step edge-detects the rising rail load; feed it booleans so the
+         * new 0/1/2 class collapses to loaded/idle exactly as before. */
+        fader_settle = fader_settle_step(rail_loaded != 0, fader_rail_prev != 0, fader_settle);
         fader_rail_prev = rail_loaded;
         if (fader_settle == 0) {
             for (int idx = 0; idx < NUM_FADERS; idx++) {
@@ -1244,7 +1466,11 @@ int main(void)
                 if (raw < 0) {
                     continue;   /* read error this tick; try again next loop */
                 }
-                uint8_t phys_cc = fader_raw_to_cc((uint16_t)raw);
+                /* 0.26: undo the BTN_COM rail droop a held button induces on this fader
+                 * (proportional to position + the button's rail class) so a button press
+                 * never dips the CC, while fine 1-CC moves still track (petercolombo). */
+                uint16_t raw_c = fader_rail_compensate((uint16_t)raw, rail_loaded);
+                uint8_t phys_cc = fader_raw_to_cc(raw_c);
 
                 /* Soft-takeover: a pending arm from a shift toggle sets up the
                  * catch against the new bank's last value (or seeds if this bank
@@ -1266,7 +1492,7 @@ int main(void)
                     continue;
                 }
 
-                int cc = fader_update_rail(&g_fader[idx], (uint16_t)raw, rail_loaded);
+                int cc = fader_update_rail(&g_fader[idx], raw_c, rail_loaded);
                 if (cc >= 0) {
                     /* BPM fader: when the active profile's clock is on and this is its
                      * assigned BPM fader, the fader sets the TEMPO instead of sending

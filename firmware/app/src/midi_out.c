@@ -24,6 +24,10 @@
 #include "midi_out.h"
 #include <errno.h>
 
+#ifdef CONFIG_FELDD_BT_LINK
+#include "bt_link.h"
+#endif
+
 #ifndef MIDI_OUT_HOST_TEST
 
 #include "usb_midi1.h"
@@ -107,10 +111,22 @@ static void trs_send(const struct midi_msg *m)
 
 /* Real-time byte (clock 0xF8 / transport 0xFA/FB/FC) to the TRS PRIORITY tier.
  * Safe to call from ISR context (irq_lock'd ring op + a register write to enable
- * the TX IRQ). USB clock-out is added later. */
+ * the TX IRQ). USB clock-out is added later.
+ *
+ * Mirror the FULL MIDI-out: also fan the real-time byte onto the BLE sink so a
+ * BLE-slaved host receives clock/transport ticks, not just the button-driven
+ * Start/Stop edges that flow through midi_out_send. Encode as a 1-byte system
+ * real-time midi_msg (len=1); bt_link_send_midi is a no-op unless a BLE host is
+ * connected+MIDI-subscribed, and bt_link_core's >=0xF8 never-drop headroom keeps
+ * these from being starved by droppable CC. The BLE tx-ring producer is irq_lock'd
+ * inside bt_link (like the TRS ring here), so this is ISR/thread-safe. */
 void midi_out_rt(uint8_t status)
 {
     trs_enqueue(status, true);
+#ifdef CONFIG_FELDD_BT_LINK
+    struct midi_msg m = { .status = status, .d1 = 0, .d2 = 0, .len = 1 };
+    bt_link_send_midi(&m);   /* no-op unless a BLE host is MIDI-subscribed */
+#endif
 }
 
 /* USB-MIDI 1.0 sink: encode the channel-voice message as a 4-byte event and queue
@@ -143,4 +159,7 @@ void midi_out_send(const struct midi_msg *m, void *ctx)
     ARG_UNUSED(ctx);
     trs_send(m);
     midi1_send(m);
+#ifdef CONFIG_FELDD_BT_LINK
+    bt_link_send_midi(m);   /* BLE sink: no-op unless a BLE host is connected+subscribed */
+#endif
 }

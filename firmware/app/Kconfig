@@ -6,4 +6,118 @@
 
 source "samples/subsys/usb/common/Kconfig.sample_usbd"
 
+config FELDD_BT_PROBE
+	bool "Phase-A CYBT-353027-02 Bluetooth module bring-up probe (DEV-ONLY)"
+	default n
+	help
+	  Build the NON-DESTRUCTIVE Phase-A Bluetooth bring-up probe (bt_probe.c)
+	  instead of running feldd's normal control loop. The probe takes over right
+	  after the charge-standby gate + boot animation: it opens UART0 to the onboard
+	  CYBT-353027-02 (CYW20706) module, RTT-logs every byte in and out, resets the
+	  module and logs its boot output, then enters the boot-ROM's UART download mode
+	  (Recovery Reset) and sends HCI_RESET, watching for the ROM's command-complete
+	  ack. It NEVER downloads firmware, so it erases nothing and is fully reversible
+	  (reset again and the module's factory app boots). This is a debugger-only dev
+	  build (needs CONFIG_RTT_CONSOLE); it must never be shipped. Leave n for release
+	  builds.
+
+config FELDD_BT_DOWNLOAD
+	bool "Module-download state machine: flash the CYW20706 with our BLE-MIDI DS (DEV-ONLY)"
+	depends on !FELDD_BT_PROBE
+	default n
+	help
+	  Build the module-download state machine (bt_download.c) instead of feldd's
+	  normal control loop. It reuses the probe's proven Recovery-Reset + CTS-low
+	  autobaud + READ_RAM, then loads the minidriver into module RAM and streams our
+	  embedded BLE-MIDI DS to the module's off-chip flash, DS-only and Static-Section-
+	  preserving (NO CHIP_ERASE; DS_FLOOR 0xFF003000 unconditional guard; identity gate
+	  on the burner BD_ADDR; SS snapshot + re-check). Every non-destructive step + a DS
+	  dry-run runs UNLESS FELDD_BT_DOWNLOAD_ARM is set. Debugger-only dev build (needs
+	  CONFIG_RTT_CONSOLE); never ship. Mutually exclusive with FELDD_BT_PROBE.
+
+config FELDD_BT_DOWNLOAD_ARM
+	bool "Arm the DESTRUCTIVE flash write in the module-download state machine"
+	depends on FELDD_BT_DOWNLOAD
+	default n
+	help
+	  When unset (default), bt_download runs every non-destructive step and a DS
+	  dry-run, then STOPS before emitting the first WRITE_RAM-to-flash byte. Set this
+	  ONLY to perform the real DS flash write. The DS-only / DS_FLOOR / no-CHIP_ERASE /
+	  identity-gate / SS-snapshot guards remain active either way; this switch only
+	  enables the write path. This is the explicit human-arm gate for the first
+	  destructive touch of the irreplaceable burner module.
+
+config FELDD_BT_DOWNLOAD_CHIPERASE
+	bool "Full Download: CHIP_ERASE + rewrite the SS (makes the app cold-bootable)"
+	depends on FELDD_BT_DOWNLOAD_ARM
+	default n
+	help
+	  Switch bt_download from the SS-preserving DS-only Upgrade to a Full Download:
+	  CHIP_ERASE the module flash, rewrite the Static Section with the burner's own
+	  BD_ADDR preserved but the DS-descriptor byte flipped 0x30->0x40 (so the boot ROM
+	  cold-boots the NEW app and it advertises), then write the DS. This is the ONLY path
+	  that issues CHIP_ERASE (the one command that wipes the un-restorable BD_ADDR), gated
+	  behind a pre-erase cross-check and recoverable from the 40-byte SS backup. TRIPLE
+	  GATE (needs DOWNLOAD + ARM + this). Do NOT set until the whole sequence is rehearsed
+	  + proven to advertise on the DISPOSABLE eval board. Never in a shipped build.
+
+config FELDD_BT_LINK
+	bool "Runtime BLE link to the CYW20706 module (BLE-MIDI sink + optional BLE-HID)"
+	depends on !FELDD_BT_PROBE && !FELDD_BT_DOWNLOAD
+	default n
+	help
+	  Build the runtime module link driver (bt_link.c): feldd opens UART0 to the
+	  onboard CYW20706 in NORMAL (non-download) mode, mirrors its MIDI-out to the
+	  module's BLE-MIDI notify characteristic, and (with FELDD_BT_LINK_HID) mirrors
+	  its USB-HID boot-keyboard reports over BLE-HID. Sends are gated on live BLE
+	  connection state learned from the module via FELDD-group WICED events. Unlike
+	  FELDD_BT_PROBE/DOWNLOAD this RETURNS and runs alongside the control loop.
+	  REQUIRES the bt_link-only DT overlay (EXTRA_DTC_OVERLAY_FILE=bt_link.overlay)
+	  for CTS-only hw-flow-control; NEVER psel UART_RTS (P1.01 = download strap).
+
+config FELDD_BT_LINK_HID
+	bool "Mirror the USB-HID boot keyboard over BLE-HID (Phase 2)"
+	depends on FELDD_BT_LINK
+	default n
+	help
+	  Gate the Phase-2 BLE-HID keyboard mirror: feldd sends the same 8-byte boot-
+	  keyboard reports it sends over USB-HID to the module, which forwards them as
+	  HOGP input reports. Leave n to ship Phase 1 (wireless MIDI) with no HID code.
+
+config FELDD_REMOTE_HID_TEST
+	bool "Remote HID bench test: auto full-boot + BT on + periodic keystroke (DEV ONLY)"
+	depends on FELDD_BT_LINK_HID
+	default n
+	help
+	  DEV/BENCH ONLY, never ship. Skips the charge-standby gate (full boot on an
+	  SWD reset), turns BT on at boot (no •• + play needed), and emits a periodic
+	  'x' keystroke over BLE-HID once a host subscribes. Lets the whole HOGP path
+	  be exercised remotely from a Mac over SWD with no physical button presses.
+
+config FELDD_BT_PROVISION
+	bool "Q5 on-device radio provisioning: read-only SS probe + gate-gated DS-only flasher for the CYW20706"
+	depends on FELDD_BT_LINK && !FELDD_BT_DOWNLOAD
+	default n
+	help
+	  Build the Q5 community radio-provisioning path (bt_provision.c) alongside the runtime
+	  BLE link. It adds two configurator verbs on the onboard CYW20706:
+	    {"t":"bt_ss_probe"}  READ-ONLY: download-mode -> minidriver (module RAM) -> READ_RAM
+	      the 64-byte Static Section (per-unit BD_ADDR + RF cal + keys) -> template gate ->
+	      reply with the SS + verdict. Flash this to a SPARE SP-1 to SAMPLE fleet uniformity
+	      (design references/15, Top-3 item 1) BEFORE any community radio is ever written.
+	    {"t":"bt_provision"} the gate-gated DS-only FLASHER: on GATE_OK it writes the DS (app)
+	      region to convert the factory BT-Classic app to our BLE app.
+
+	  FLASH-SAFETY: structurally incapable of a CHIP_ERASE or an SS write. The ONLY flash
+	  write is the DS region at the compile-time constant CYBT_DS_BASE_ADDR, gate-gated and
+	  floor/window-parked per chunk; the SS is read-only and re-verified byte-identical after
+	  the write. No CHIP_ERASE / SS-write builder is compiled (those live only in
+	  bt_download.c, which this `depends on !FELDD_BT_DOWNLOAD` makes mutually exclusive), and
+	  bt_provision.c #errors the build if a chip-erase option is defined. Requires
+	  FELDD_BT_LINK (a strict UART handoff from the runtime link, never concurrent). Build the
+	  TX/RX-only bt_uart0.overlay (NOT bt_link.overlay's hw-flow-control) so it reproduces the
+	  burner-proven flow_ctrl=none (design R14). NOT hardware-validated: gate a community
+	  release on the design Top-3 + the module-flash-audit skill. Dev/canary build; the
+	  default community download image leaves this n.
+
 source "Kconfig.zephyr"

@@ -19,6 +19,12 @@ int fader_update(fader_t *f, uint16_t raw12);
 // button no longer freezes the faders, so there is no snap-to-hardware on release.)
 int fader_update_rail(fader_t *f, uint16_t raw12, int rail_loaded);
 
+// 0.26 rail-sag COMPENSATION. A held button sags BTN_COM, dropping every fader's raw
+// PROPORTIONALLY to its position and the button's ladder current (rail_class 0/1/2 from
+// buttons_rail_class_pure). Add that droop back so a button press never dips the fader
+// CC while fine 1-CC moves still track. Apply to the raw BEFORE fader_update_rail.
+uint16_t fader_rail_compensate(uint16_t raw12, int rail_class);
+
 // Edge-triggered droop-settle counter for the fader read gate. A button press
 // sags the rail and the first couple of fader reads droop ~1-2 LSB, so the caller
 // skips fader reads while the returned counter is > 0. The skip re-arms ONLY on a

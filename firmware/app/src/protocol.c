@@ -400,6 +400,48 @@ int proto_handle(const struct proto_store *s, const char *line,
             id, host_led_active() ? "true" : "false", (unsigned)host_led_get_mask());
     }
 
+#ifdef CONFIG_FELDD_BT_PROVISION
+    /* ---- bt_ss_probe (Q5 P0 stage 1, READ-ONLY) ---- */
+    /* {"t":"bt_ss_probe"} -> drive the onboard CYW20706 into download mode, READ its 64-byte
+     * Static Section (NO flash write, ever), run the template gate, and report. The hardware
+     * work is done by s->bt_ss_probe (wired to bt_provision_probe_ss in config_cdc.c); this
+     * layer only formats the JSON reply, so protocol.c stays hardware-free + host-testable.
+     * status 0 == OK; ss is 128 hex chars (the 64 SS bytes). */
+    if (strcmp(verb, "bt_ss_probe") == 0) {
+        if (!s->bt_ss_probe)
+            return emit_err(out, outcap, id, "NO_PROVISION", "ss probe unavailable");
+        uint8_t ss[64] = {0};
+        int gate = -1;
+        int st = s->bt_ss_probe(ss, &gate);
+        char hex[129];
+        static const char H[] = "0123456789abcdef";
+        for (int k = 0; k < 64; k++) {
+            hex[2 * k]     = H[(ss[k] >> 4) & 0x0F];
+            hex[2 * k + 1] = H[ss[k] & 0x0F];
+        }
+        hex[128] = '\0';
+        return emit(out, outcap,
+            "{\"t\":\"bt_ss_probe_r\",\"i\":%u,\"ok\":%s,\"status\":%d,\"gate\":%d,\"ss\":\"%s\"}",
+            id, (st == 0) ? "true" : "false", st, gate, hex);
+    }
+
+    /* ---- bt_provision (Q5 P0 stage 2, DS FLASH WRITE) ---- */
+    /* {"t":"bt_provision"} -> power-gate, then (only on GATE_OK + the ds_base assert) DS-only
+     * write our BLE-MIDI app to the compile-time CYBT_DS_BASE_ADDR, verify, prove the SS is
+     * untouched, cold-boot the new app. The hardware work + all safety gating is done by
+     * s->bt_provision (wired to bt_provision_run in config_cdc.c); this layer only formats
+     * the JSON reply, so protocol.c stays hardware-free + host-testable. status 0 == OK. */
+    if (strcmp(verb, "bt_provision") == 0) {
+        if (!s->bt_provision)
+            return emit_err(out, outcap, id, "NO_PROVISION", "provision unavailable");
+        int gate = -1;
+        int st = s->bt_provision(&gate);
+        return emit(out, outcap,
+            "{\"t\":\"bt_provision_r\",\"i\":%u,\"ok\":%s,\"status\":%d,\"gate\":%d}",
+            id, (st == 0) ? "true" : "false", st, gate);
+    }
+#endif
+
     /* ---- unknown verb ---- */
     return emit_err(out, outcap, id, "BAD_VERB", "unknown verb");
 }

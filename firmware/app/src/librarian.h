@@ -36,4 +36,15 @@ int     librarian_set_brightness(uint8_t v);
 uint8_t librarian_bpm(void);               /* clock: persisted global GEN tempo 40..240 */
 int     librarian_set_bpm(uint8_t v);      /* validate/cache/persist; no-op if unchanged */
 
+#ifdef CONFIG_FELDD_BT_PROVISION
+/* Q5 community-provisioning bookkeeping. Grows the LIB_ID_SETTINGS record st[3]->st[6]:
+ * st[3] = provision-done flag, st[4]/st[5] = the flashed app major/minor. Compiled ONLY
+ * into the FELDD_BT_PROVISION build (the shipped image's 3-byte record is byte-unchanged),
+ * and every reader short-reads defensively (rst >= N) so an older 3-byte record still
+ * decodes. This flag records INTENT/version only — it NEVER authorizes a flash; the live
+ * app-mode READY probe is the sole authority (design references/15 §49). */
+uint8_t librarian_provision_done(void);
+int     librarian_set_provision_done(uint8_t done, uint8_t app_maj, uint8_t app_min);
+#endif
+
 #endif

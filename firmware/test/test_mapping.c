@@ -87,11 +87,26 @@ static void t_fader_four_layers(void){
 static void t_button_four_layers(void){
     struct profile p=P();
     p.button[1]=(struct button_map){.type=BTN_CC_MOMENTARY,.value=64};
+    p.shift.button_value[1]=65;   /* bind the shift button to a nonzero CC: P() zeroes it, and
+                                   * the 0.27.3 CC0 guard silences value-0 buttons (unbound), so this
+                                   * layer must carry a real value to exercise L2 VALUE selection. */
     for(int L=0;L<NUM_LAYERS-1;L++) p.ext[L].button_type[1]=BTN_CC_MOMENTARY;
     ncap=0; map_button(&p,1,1,0,sink,0); assert(cap[0].d1==64);   /* L1 inline */
     ncap=0; map_button(&p,1,1,1,sink,0); assert(cap[0].d1==p.shift.button_value[1]); /* L2 */
     ncap=0; map_button(&p,1,1,2,sink,0); assert(cap[0].d1==61);   /* L3 layer[0] */
     ncap=0; map_button(&p,1,1,3,sink,0); assert(cap[0].d1==71);   /* L4 layer[1] */
+}
+/* 0.27.3 (petercolombo's bug): a CC button left on value 0 is UNBOUND and must stay
+ * SILENT, not fire CC0 (Bank Select) and collide with fader 0. Mirrors map_fader's
+ * cc==0 guard. Loading the TX-6 profile + reloading old presets on 0.27.2 left upper-
+ * layer PLAY buttons as cc_momentary CC0; they must emit nothing. */
+static void t_button_cc0_unbound_silent(void){
+    struct profile p=P();
+    p.button[2]=(struct button_map){.type=BTN_CC_MOMENTARY,.value=0};   /* value 0 = unbound */
+    ncap=0; map_button(&p,2,1,0,sink,0); assert(ncap==0);   /* press:   nothing */
+    ncap=0; map_button(&p,2,0,0,sink,0); assert(ncap==0);   /* release: nothing */
+    p.button[2].value=64;                                   /* sanity: a real CC on the same button fires */
+    ncap=0; map_button(&p,2,1,0,sink,0); assert(ncap==1 && cap[0].d1==64);
 }
 /* v9: the four per-layer SELECT accessors resolve L5..L8 (layers 4..7) to
  * layer[layer-2] (layer[2..5]), NOT the L1 inline default. Before the widen a
@@ -221,6 +236,7 @@ static void t_button_per_layer_channel(void){
     struct profile p=P();
     p.button[1]=(struct button_map){.type=BTN_CC_MOMENTARY,.value=64};
     p.button_channel[1]=2;            /* L1 */
+    p.shift.button_value[1]=64;       /* bind the shift button (P() zeroes it); 0.27.3 guard silences value-0 */
     /* keep the type CC_MOMENTARY on every layer so the channel is the only var */
     p.ext[0].button_type[1]=BTN_CC_MOMENTARY; p.ext[0].button_channel[1]=4;
     p.ext[1].button_type[1]=BTN_CC_MOMENTARY; p.ext[1].button_channel[1]=7;
@@ -369,7 +385,7 @@ int main(void){ t_fader_cc();t_fader_invert();t_fader_range();t_fader_shift_bank
     t_button_note();t_button_cc_momentary();t_button_none_silent();
     t_fader_curve_log();t_fader_curve_exp();t_button_toggle_engine_silent();
     t_fader_per_channel();t_button_per_channel();
-    t_fader_four_layers();t_button_four_layers();t_select_accessors_layers_5_8();
+    t_fader_four_layers();t_button_four_layers();t_button_cc0_unbound_silent();t_select_accessors_layers_5_8();
     t_ext_accessors_per_layer();
     t_fader_per_layer_range();t_fader_per_layer_curve();
     t_fader_per_layer_invert();t_fader_per_layer_channel();t_fader_layer5_rides_own_channel();
