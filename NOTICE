@@ -1,0 +1,59 @@
+feldd - third-party components NOTICE
+=====================================
+
+feldd is unofficial community firmware for the Teenage Engineering SP-1 /
+Stem Player. The original feldd code in this repository is licensed under the
+MIT License (see LICENSE), which applies ONLY to the original feldd code
+authored by Benjamin Reece. The components listed below are owned by third
+parties and are covered by their own licenses, NOT by feldd's MIT license.
+Where a component is redistributed in compiled form inside the flashable
+binary (feldd.bin), it remains subject to its owner's license terms.
+
+feldd is not affiliated with, authorized by, or endorsed by Teenage
+Engineering. "SP-1" and "Stem Player" are used nominatively to identify the
+hardware feldd runs on and are trademarks of their respective owner.
+
+------------------------------------------------------------------------------
+Redistributed in compiled form inside the flashable binary (feldd.bin)
+------------------------------------------------------------------------------
+
+1. Infineon CYW20706 Bluetooth controller firmware   [PROPRIETARY]
+   - Owner:   Infineon Technologies AG (formerly Cypress Semiconductor)
+   - What:    the compiled radio download-minidriver and the Bluetooth LE
+              Downloadable Section (DS) image for the on-board
+              CYBT-353027-02 (CYW20706) module, embedded by the build from
+              Infineon ModusToolbox / AIROC BTSDK artifacts.
+   - License: Infineon / Cypress proprietary software license (ModusToolbox /
+              AIROC / WICED terms plus the CYBT-353027 module terms). This
+              image is NOT open source and is NOT licensed under feldd's MIT
+              license. All rights in it are reserved by Infineon. Its source
+              is not included in this repository, and it is redistributed only
+              to the extent Infineon's terms permit. If you redistribute
+              feldd.bin you are responsible for complying with those terms.
+
+2. Zephyr RTOS
+   - Owner:   The Zephyr Project and contributors
+   - License: Apache-2.0
+
+3. nRF Connect SDK (nrf) and nrfxlib
+   - Owner:   Nordic Semiconductor ASA
+   - License: LicenseRef-Nordic-5-Clause (portions Apache-2.0; the nrfxlib
+              binary libraries are proprietary to Nordic Semiconductor)
+
+4. MCUboot
+   - Owner:   Linaro and the MCUboot project
+   - License: Apache-2.0
+
+------------------------------------------------------------------------------
+Not included or redistributed by feldd (listed for clarity)
+------------------------------------------------------------------------------
+
+The Teenage Engineering bootloader that owns device flash 0x0-0x20000 is
+Teenage Engineering's property. feldd does not include, redistribute, or
+modify it. feldd links its own application above it at 0x20000 and never
+writes below that address.
+
+------------------------------------------------------------------------------
+This NOTICE is provided for attribution and licensing clarity. It is not legal
+advice. If you redistribute feldd.bin, you are responsible for complying with
+each third-party component's own license.

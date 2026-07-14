@@ -1,3 +1,18 @@
+feldd is licensed under the MIT License, reproduced below, which covers ONLY
+the original feldd code authored by Benjamin Reece.
+
+The flashable firmware image (feldd.bin) and this repository also incorporate
+third-party components that are NOT covered by this MIT License and remain
+subject to their own licenses and their owners' rights. These include, without
+limitation, the Infineon / Cypress CYW20706 radio firmware image and download
+minidriver (Infineon proprietary), Zephyr RTOS (Apache-2.0), the Nordic nRF
+Connect SDK and nrfxlib (LicenseRef-Nordic-5-Clause / Apache-2.0), and MCUboot
+(Apache-2.0). See the NOTICE file for the full list. The grant below does not
+convey any rights in those third-party components; nothing here permits you to
+use, copy, sublicense, or sell them beyond what their own licenses allow.
+
+------------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 Benjamin Reece
