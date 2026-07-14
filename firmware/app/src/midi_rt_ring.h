@@ -18,6 +18,12 @@ struct midi_rt_ring {
 void midi_rt_ring_init(struct midi_rt_ring *r);
 bool midi_rt_put_rt(struct midi_rt_ring *r, uint8_t b);  // enqueue a PRIORITY byte
 bool midi_rt_put(struct midi_rt_ring *r, uint8_t b);     // enqueue a NORMAL byte
+/* Enqueue a whole message (len bytes) to the NORMAL ring ATOMICALLY: if fewer
+ * than len slots are free, admit NOTHING and return false, so a near-full ring
+ * never emits a truncated message (which corrupts the stream under running
+ * status). Returns true when all len bytes are admitted (len==0 is a trivial
+ * true). Callers hold the producer lock across this; pure + host-testable. */
+bool midi_rt_put_msg(struct midi_rt_ring *r, const uint8_t *b, uint8_t len);
 /* Dequeue next byte to transmit: real-time ring first (FIFO), then normal
  * (FIFO). Returns false (leaves *out untouched) if both are empty. */
 bool midi_rt_next(struct midi_rt_ring *r, uint8_t *out);

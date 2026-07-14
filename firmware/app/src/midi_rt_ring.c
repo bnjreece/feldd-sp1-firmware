@@ -32,6 +32,21 @@ bool midi_rt_put(struct midi_rt_ring *r, uint8_t b)
     return true;
 }
 
+bool midi_rt_put_msg(struct midi_rt_ring *r, const uint8_t *b, uint8_t len)
+{
+    // Free slots in the normal ring = (head - tail - 1) & mask (one slot kept
+    // open). All-or-nothing: reject the whole message if it won't fit, so a
+    // near-full ring never emits a truncated (running-status-corrupting) message.
+    uint8_t freeslots = (uint8_t)((r->nb_h - r->nb_t - 1) & NB_MASK);
+    if (freeslots < len) {
+        return false;
+    }
+    for (uint8_t i = 0; i < len; i++) {
+        (void)midi_rt_put(r, b[i]);   // guaranteed to fit
+    }
+    return true;
+}
+
 bool midi_rt_next(struct midi_rt_ring *r, uint8_t *out)
 {
     if (r->rt_h != r->rt_t) {       // real-time ring first

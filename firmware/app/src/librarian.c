@@ -117,6 +117,7 @@ BUILD_ASSERT(DIV_ROUND_UP(NUM_PROFILES, SP1_NVS_ENTRIES_PER_SECTOR)
  * they never collide with the header or any future small bookkeeping ids. */
 #define LIB_ID_HEADER        1u
 #define LIB_ID_SETTINGS      2u   /* future-bookkeeping band 2..0xFF; holds play_mode */
+#define LIB_ID_MIDI_THRU     3u   /* own 1-byte record: MIDI thru USB->TRS, 0 off / 1 on */
 #define LIB_ID_PROFILE_BASE  0x100u
 
 static struct nvs_fs fs;
@@ -130,6 +131,7 @@ static uint8_t        active_mode;               /* current device mode (fast pa
 static uint8_t        play_mode_cache;            /* Feature 4: 0 shift, 1 assignable */
 static uint8_t        brightness_cache;   /* Feature B: 0 dim (default), 1 full; persisted in LIB_ID_SETTINGS[1] */
 static uint8_t        bpm_cache;          /* clock: persisted global GEN tempo 40..240; LIB_ID_SETTINGS[2] */
+static volatile uint8_t midi_thru_cache;  /* MIDI thru USB->TRS: 0 off (default)/1 on; own record LIB_ID_MIDI_THRU. volatile: usbd-thread reader (usb_midi1 OUT cb) + config-thread writer, like clock_on */
 #ifdef CONFIG_FELDD_BT_PROVISION
 static uint8_t        provision_done_cache; /* Q5: radio provisioned flag; LIB_ID_SETTINGS[3] (bookkeeping only) */
 static uint8_t        provision_app_maj;    /* Q5: flashed app major;       LIB_ID_SETTINGS[4] */
@@ -637,6 +639,13 @@ int librarian_init(void)
     provision_app_min    = (rst >= 6) ? st[5] : 0;
 #endif
 
+    /* MIDI thru (USB-in -> TRS-out) lives in its OWN 1-byte record, default OFF.
+     * Absent (-ENOENT on any device that never toggled it) or out-of-range -> 0.
+     * A pure ADD: no existing record is short-read or reseeded. */
+    uint8_t mt = 0;
+    ssize_t rmt = nvs_read(&fs, LIB_ID_MIDI_THRU, &mt, sizeof(mt));
+    midi_thru_cache = lib_midithru_load(rmt == (ssize_t)sizeof(mt), mt);
+
     /* Load the active profile of the CURRENT mode into the RAM hot copy. The NVS
      * slot it addresses is the GLOBAL index lib_bank_global(mode, within) (0..15).
      * A reserved personality (active_mode >= NUM_MODES) has no bank yet, so it
@@ -902,6 +911,30 @@ int librarian_set_brightness(uint8_t v)
     if (v == brightness_cache) return 0;
     brightness_cache = v;
     return settings_write();
+}
+
+uint8_t librarian_midi_thru(void)
+{
+    return midi_thru_cache;   /* RAM copy */
+}
+
+int librarian_set_midi_thru(uint8_t v)
+{
+    /* MIDI thru lives in its OWN NVS record (LIB_ID_MIDI_THRU), never the settings
+     * record or the 4-byte header, so no short-read reseed/wipe. Range-checked to
+     * 0/1; a no-op same-value set does not burn an NVS write. */
+    if (!fs_ready) {
+        return -EINVAL;
+    }
+    if (!lib_midithru_valid(v)) {
+        return -EINVAL;
+    }
+    if (v == midi_thru_cache) {
+        return 0;             /* no-op: don't burn an NVS write */
+    }
+    midi_thru_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_MIDI_THRU, &midi_thru_cache, sizeof(midi_thru_cache));
+    return (w == (ssize_t)sizeof(midi_thru_cache)) ? 0 : -1;
 }
 
 uint8_t librarian_bpm(void)

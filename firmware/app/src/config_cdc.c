@@ -48,11 +48,13 @@ static const struct proto_store g_store = {
     .set_mode   = librarian_set_mode,
     .get_playrole = librarian_play_mode,
     .set_playrole = librarian_set_play_mode,
+    .get_midithru = librarian_midi_thru,
+    .set_midithru = librarian_set_midi_thru,
     .profiles      = NUM_PROFILES,        /* GLOBAL slots 0..15 (read/write/reset) */
     .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.27.3-beta",
+    .fw         = "0.28.0-beta",
     .uid        = g_uid,
 #ifdef CONFIG_FELDD_BT_PROVISION
     /* Q5 P0 stage-1 READ-ONLY SS probe. proto_handle's bt_ss_probe verb calls this; it does

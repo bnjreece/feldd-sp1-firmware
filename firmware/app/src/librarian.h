@@ -33,6 +33,8 @@ uint8_t librarian_play_mode(void);                         /* Feature 4: PLAY ro
 int  librarian_set_play_mode(uint8_t v);                   /* persist PLAY role to the id-2 record ONLY (no header write, no wipe); range 0/1, -EINVAL out of range; same-value set is a no-op */
 uint8_t librarian_brightness(void);        /* Feature B: 0 dim, 1 full */
 int     librarian_set_brightness(uint8_t v);
+uint8_t librarian_midi_thru(void);         /* MIDI thru USB->TRS: 0 off (default), 1 on; own record LIB_ID_MIDI_THRU */
+int     librarian_set_midi_thru(uint8_t v);
 uint8_t librarian_bpm(void);               /* clock: persisted global GEN tempo 40..240 */
 int     librarian_set_bpm(uint8_t v);      /* validate/cache/persist; no-op if unchanged */
 

@@ -80,6 +80,19 @@ static void trs_enqueue(uint8_t b, bool rt)
     uart_irq_tx_enable(trs);
 }
 
+/* Enqueue a whole NORMAL-tier message under ONE irq_lock so the two producers --
+ * the main-loop controller path (trs_send) and the usbd-thread MIDI-thru path
+ * (midi_out_thru) -- can never interleave byte-wise on the TRS wire. Uses the
+ * ring's all-or-nothing admission, so a near-full ring drops the whole message
+ * rather than emitting a truncated (running-status-corrupting) one. */
+static void trs_enqueue_msg(const uint8_t *b, uint8_t len)
+{
+    unsigned int key = irq_lock();
+    (void)midi_rt_put_msg(&trs_ring, b, len);
+    irq_unlock(key);
+    uart_irq_tx_enable(trs);
+}
+
 int midi_out_init(void)
 {
     if (!device_is_ready(trs)) {
@@ -100,13 +113,8 @@ int midi_out_init(void)
  * 1-byte system real-time message emits ONLY its status byte. */
 static void trs_send(const struct midi_msg *m)
 {
-    trs_enqueue(m->status, false);
-    if (m->len >= 2) {
-        trs_enqueue(m->d1, false);
-    }
-    if (m->len == 3) {
-        trs_enqueue(m->d2, false);
-    }
+    uint8_t b[3] = { m->status, m->d1, m->d2 };
+    trs_enqueue_msg(b, m->len);   /* atomic: never interleaves with a thru message */
 }
 
 /* Real-time byte (clock 0xF8 / transport 0xFA/FB/FC) to the TRS PRIORITY tier.
@@ -127,6 +135,15 @@ void midi_out_rt(uint8_t status)
     struct midi_msg m = { .status = status, .d1 = 0, .d2 = 0, .len = 1 };
     bt_link_send_midi(&m);   /* no-op unless a BLE host is MIDI-subscribed */
 #endif
+}
+
+/* MIDI-thru: forward `len` raw channel-voice bytes to the TRS jack ONLY (normal
+ * tier), never USB or BLE, so a host->device stream cannot echo back to the host.
+ * Called from the USB class OUT completion (usbd thread) when the global thru
+ * switch is on. */
+void midi_out_thru(const uint8_t *bytes, uint8_t len)
+{
+    trs_enqueue_msg(bytes, len);   /* normal tier, atomic + all-or-nothing */
 }
 
 /* USB-MIDI 1.0 sink: encode the channel-voice message as a 4-byte event and queue
@@ -151,6 +168,7 @@ static void midi1_send(const struct midi_msg *m) { (void)m; }
 
 int  midi_out_init(void) { return 0; }
 void midi_out_rt(uint8_t status) { (void)status; }
+void midi_out_thru(const uint8_t *bytes, uint8_t len) { (void)bytes; (void)len; }
 
 #endif /* MIDI_OUT_HOST_TEST */
 

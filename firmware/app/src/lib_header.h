@@ -91,4 +91,15 @@ static inline uint8_t lib_bpm_load(int present, uint8_t stored){
     return (present && lib_bpm_valid(stored)) ? stored : LIB_BPM_DEFAULT;
 }
 
+/* MIDI-thru feature: forward host->device USB-in channel-voice out the TRS jack.
+ * 0 = off (default), 1 = on. Stored in its OWN 1-byte NVS record (LIB_ID_MIDI_THRU),
+ * separate from the settings record, so it never reindexes the play_mode/brightness/
+ * bpm/provision bytes. An absent record (present=0) or an out-of-range byte decodes
+ * as off, so no existing device is reseeded. */
+#define LIB_MIDITHRU_DEFAULT 0u
+static inline int     lib_midithru_valid(uint8_t v){ return v <= 1u; }
+static inline uint8_t lib_midithru_load(int present, uint8_t stored){
+    return (present && lib_midithru_valid(stored)) ? stored : LIB_MIDITHRU_DEFAULT;
+}
+
 #endif /* LIB_HEADER_H */

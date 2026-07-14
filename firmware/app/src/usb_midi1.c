@@ -46,6 +46,8 @@ LOG_MODULE_REGISTER(usb_midi1, LOG_LEVEL_INF);
  * router (forward to TRS + external-master detection for the GEN/THRU selector). */
 #include "usb_rt_parse.h"
 #include "clock_router.h"
+#include "librarian.h"   /* librarian_midi_thru(): global MIDI-thru switch */
+#include "midi_out.h"    /* midi_out_thru(): forward voice to the TRS jack */
 
 /* USB Device Class Definition for MIDI Devices 1.0 constants. */
 /* B.4.1 MS Class-Specific Interface Descriptor Subtypes */
@@ -455,20 +457,31 @@ static int usb_midi1_request(struct usbd_class_data *const class_data,
 	}
 
 	if (USB_EP_DIR_IS_OUT(bi->ep)) {
-		/* Host->device MIDI: scan the 4-byte USB-MIDI events for system
-		 * real-time clock/transport bytes and hand each to the clock router
-		 * (THRU forward + external-master detection). Everything else (notes,
-		 * CC, sysex) is still dropped - feldd is a control surface, not a sink.
-		 * Then re-arm the read (unless aborted on disable/suspend). */
+		/* Host->device MIDI: scan the 4-byte USB-MIDI events. System real-time
+		 * clock/transport bytes go to the clock router (THRU forward + external-
+		 * master detection). When the global MIDI-thru switch is ON, channel-voice
+		 * (notes, CC, pitch-bend, PC, aftertouch) is forwarded out the TRS jack so
+		 * the SP-1 doubles as a USB->TRS bridge; when OFF it is dropped (the
+		 * default - feldd is a control surface, not a sink). SysEx is always
+		 * dropped. Then re-arm the read (unless aborted on disable/suspend). */
 		if (err != -ECONNABORTED) {
 			const uint8_t *d = buf->data;
 			/* Bound the scan to the pooled buffer (MPS 64 -> <=16 events), so a
 			 * future net_buf resize can never widen the parse past the payload. */
 			size_t n = MIN(buf->len, buf->size);
+			/* Read the global thru switch once for this buffer (a single-byte
+			 * RAM copy; the config thread's writer is atomic on Cortex-M). */
+			bool thru = librarian_midi_thru();
 			for (size_t i = 0; i + 4 <= n; i += 4) {
 				uint8_t rt = usb_midi_extract_rt(&d[i]);
 				if (rt) {
 					clock_router_ext_rt(rt);
+				} else if (thru) {
+					uint8_t vb[3];
+					uint8_t vlen = usb_midi_extract_voice(&d[i], vb);
+					if (vlen) {
+						midi_out_thru(vb, vlen);
+					}
 				}
 			}
 		}

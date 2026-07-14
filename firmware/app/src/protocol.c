@@ -302,6 +302,22 @@ int proto_handle(const struct proto_store *s, const char *line,
             id, (unsigned)s->get_playrole());
     }
 
+    /* ---- midithru ---- */
+    /* {"t":"midithru"} reads; {"t":"midithru","v":0|1} sets the global MIDI-thru
+     * switch (forward host->device USB-in channel-voice out the TRS jack). */
+    if (strcmp(verb, "midithru") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v > 1)
+                return emit_err(out, outcap, id, "BAD_VALUE", "midithru must be 0 or 1");
+            if (s->set_midithru((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_midithru failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"midithru_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_midithru());
+    }
+
     /* ---- list ---- */
     /* list_r{mode,active,profiles:[{n,bank,name,ver}]}. We read each slot's
      * profile and emit only its GLOBAL index, bank, name, and version (NOT the
