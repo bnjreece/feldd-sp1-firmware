@@ -29,6 +29,8 @@ def led(mask: int, bri: Optional[list] = None,
     """LED mask command. `bri`/`blink`/`ms` are the v1 per-LED-duty + breathe
     extensions; omit them and the object is byte-identical to today's verb, so a
     v1-only device and a breathe-capable host stay compatible both ways."""
+    if ms is not None and blink is None:
+        raise ValueError("led(): ms requires blink (ms is the blink period)")
     obj: dict = {"t": "led", "mask": mask}
     if bri is not None:
         obj["bri"] = list(bri)
@@ -82,6 +84,13 @@ class FrameReassembler:
     `feed()` yields each complete JSON object as it closes.
     """
 
+    # Bound the buffer + guarantee resync, exactly like the firmware's feed_byte
+    # LINE_CAP: the SP-1 CDC TX discards bytes when its FIFO is full, so a
+    # congestion-truncated frame (dropped closing quote/brace) is a designed
+    # reality. Without a cap such a frame would grow _buf unbounded and wedge the
+    # framer until the link drops.
+    _CAP = 1024
+
     def __init__(self) -> None:
         self._buf = bytearray()
         self._depth = 0
@@ -92,6 +101,12 @@ class FrameReassembler:
         for b in data:
             c = chr(b)
             self._buf.append(b)
+            if len(self._buf) > self._CAP:
+                self._buf.clear()          # drop-and-resync (mirrors firmware LINE_CAP)
+                self._depth = 0
+                self._instr = False
+                self._esc = False
+                continue
             if self._instr:
                 if self._esc:
                     self._esc = False
@@ -101,7 +116,8 @@ class FrameReassembler:
                     self._instr = False
                 continue
             if c == '"':
-                self._instr = True
+                if self._depth > 0:        # a bare quote at depth 0 is junk, not a string
+                    self._instr = True
             elif c == "{":
                 self._depth += 1
             elif c == "}":

@@ -112,3 +112,38 @@ def test_close_closes_the_port():
     t.connect()
     t.close()
     assert fs.closed is True
+
+
+# --- reconnect path + fd hygiene (Fable/opus #6, missed-3) ---------------------
+
+def test_read_exception_drops_the_port_so_the_reader_reconnects():
+    class DyingSerial(FakeSerial):
+        def read(self, n):
+            raise OSError("dead fd")
+    fs = DyingSerial()
+    t = _st(fs)
+    t.connect()
+    assert t._ser is fs
+    assert t._pump_once() is False
+    assert t._ser is None                       # dropped -> reconnect branch taken
+
+
+def test_reopen_closes_the_old_handle_and_rearms_mon():
+    opens = [FakeSerial(), FakeSerial()]
+    fs1 = opens[0]
+    t = SerialTransport("glob", glob_fn=lambda p: ["/dev/cu.A"],
+                        open_fn=lambda port: opens.pop(0), autostart_reader=False)
+    t.connect()                                 # opens fs1
+    assert t._ser is fs1
+    t._open_port()                              # reconnect -> opens fs2, closes fs1
+    assert fs1.closed is True                   # no fd leak
+    assert b'{"t":"monset","on":true}' in bytes(t._ser.written)   # re-armed
+
+
+def test_link_down_is_edge_only_not_spammed_on_each_failed_connect():
+    seen = []
+    t = SerialTransport("glob", glob_fn=lambda p: [], open_fn=lambda port: None,
+                        autostart_reader=False)
+    t.on_link(seen.append)
+    t.connect(); t.connect(); t.connect()       # three failed connects
+    assert seen == ["down"]                      # one down, not three

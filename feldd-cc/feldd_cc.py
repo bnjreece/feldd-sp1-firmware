@@ -935,11 +935,21 @@ class Device:
         if self.dry or self._t is None:
             return
         self._t.on_event(lambda obj: self._dispatch(obj, state))
-        self._t.on_link(lambda s: log("SP-1 link", s))
+        self._t.on_link(self._on_link)
         delay = 0.5
         while not self._t.connect():
             time.sleep(delay)
             delay = min(delay * 2, 10.0)
+
+    def _on_link(self, state_str):
+        log("SP-1 link", state_str)
+        if state_str == "up":
+            # the device forgot our LED override across the drop (a fresh USB link,
+            # or the firmware's bit4-fall auto-release over BLE), so force a full
+            # re-render: reset the dedupe baseline and un-latch release. int assign
+            # is atomic enough for the reader-thread -> render-thread handoff.
+            self.last_mask = -1
+            self.released = False
 
 
 # --------------------------------------------------------------------------- HTTP hook server

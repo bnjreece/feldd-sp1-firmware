@@ -32,6 +32,7 @@ class Transport(abc.ABC):
         self._event_cb: Callable[[dict], None] = lambda o: None
         self._link_cb: Callable[[str], None] = lambda s: None
         self._reasm = protocol.FrameReassembler()
+        self._last_link: Optional[str] = None
 
     # registration --------------------------------------------------------------
     def on_event(self, cb: Callable[[dict], None]) -> "Transport":
@@ -56,6 +57,9 @@ class Transport(abc.ABC):
         self._reasm = protocol.FrameReassembler()
 
     def _emit_link(self, state: str) -> None:
+        if state == self._last_link:
+            return                      # edge-only: no "down" spam on each failed poll
+        self._last_link = state
         self._link_cb(state)
 
     def send(self, obj: dict) -> None:
@@ -89,38 +93,57 @@ class SerialTransport(Transport):
         self._autostart = autostart_reader
         self._reconnect = reconnect
         self._ser = None
+        self._wlock = threading.Lock()   # serialize writes: reconnect-monset (reader
+                                         # thread) vs push_mask (render thread)
         self._stop = threading.Event()
         self._reader: threading.Thread | None = None
 
     # link ----------------------------------------------------------------------
     def connect(self) -> bool:
+        if not self._open_port():
+            self._emit_link("down")
+            return False
+        if self._autostart:
+            self._start_reader()
+        return True
+
+    def _close_ser(self) -> None:
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            except Exception:
+                pass
+            self._ser = None
+
+    def _open_port(self) -> bool:
+        """Open the first matching port (no thread). Emits link-up + arms mon on
+        success. Shared by connect() and the in-thread reconnect so a reconnect
+        never spawns a second reader thread."""
         ports: List[str] = sorted(self._glob_fn(self._port_glob))
         if not ports:
             log.info("no SP-1 serial port matching %s", self._port_glob)
-            self._emit_link("down")
             return False
+        self._close_ser()              # never leak a prior handle on reconnect
         try:
             self._ser = self._open_fn(ports[0])
         except Exception as e:
             log.warning("serial open failed: %s", e)
-            self._emit_link("down")
             return False
         if self._ser is None:
-            self._emit_link("down")
             return False
         log.info("opened SP-1 at %s", ports[0])
         self._reset_frames()               # fresh boundary per link
         self._emit_link("up")
         self.send(protocol.monset(True))   # ask feldd for control events
-        if self._autostart:
-            self._start_reader()
         return True
 
     def _write(self, data: bytes) -> None:
-        if self._ser is None:
+        ser = self._ser
+        if ser is None:
             return
         try:
-            self._ser.write(data)
+            with self._wlock:          # one whole frame per write, never interleaved
+                ser.write(data)
         except Exception as e:
             log.warning("serial write error: %s", e)
 
@@ -134,6 +157,7 @@ class SerialTransport(Transport):
             data = self._ser.read(64)
         except Exception as e:
             log.warning("serial read error: %s", e)
+            self._close_ser()          # dead fd: drop it so _reader_loop reconnects
             return False
         if data:
             self._ingest(data)
@@ -169,7 +193,7 @@ class SerialTransport(Transport):
     def _reopen_with_backoff(self) -> None:
         delay = 0.5
         while not self._stop.is_set():
-            if self.connect():   # re-arms link up + monset + fresh frames
+            if self._open_port():   # reuses THIS reader thread; no new thread
                 return
             time.sleep(delay)
             delay = min(delay * 2, 30.0)

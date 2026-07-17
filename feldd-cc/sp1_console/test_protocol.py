@@ -112,3 +112,62 @@ def test_device_shape_constants():
     assert P.NUM_BUTTONS == 9   # PLAY, T1-T4, VolUp, VolDn, FWD, RWD (no dot-dot: reserved)
     assert P.NUM_FADERS == 4    # no scrubber
     assert P.NUM_LEDS == 8
+
+
+# --- framer robustness (Fable+opus review: buffer cap + depth-0 quote resync) --
+
+def test_framer_recovers_after_a_truncated_frame_via_overflow_cap():
+    # a congestion-dropped closing quote (firmware CDC discards bytes when full)
+    r = P.FrameReassembler()
+    list(r.feed(b'{"t":"x","s":"' + b"A" * 3000))     # never-closed string
+    got = list(r.feed(b'{"t":"mon","k":"b","ix":1,"s":1}'))
+    assert got == [{"t": "mon", "k": "b", "ix": 1, "s": 1}]
+
+
+def test_framer_buffer_is_bounded_on_never_closing_input():
+    r = P.FrameReassembler()
+    list(r.feed(b"{" + b"x" * 100000))
+    assert len(r._buf) <= 1100                          # capped, not 100k
+
+
+def test_depth0_quote_junk_does_not_swallow_following_objects():
+    r = P.FrameReassembler()
+    got = list(r.feed(b'boot "banner\n{"t":"a"}{"t":"b"}'))
+    assert got == [{"t": "a"}, {"t": "b"}]
+
+
+def test_split_mid_escape_across_feeds():
+    r = P.FrameReassembler()
+    got = []
+    got += r.feed(b'{"t":"x","s":"a\\')                 # ends mid-escape (one backslash)
+    got += r.feed(b'"b"}')                              # -> escaped quote, then close
+    assert got == [{"t": "x", "s": 'a"b'}]
+
+
+def test_nested_object_frames():
+    r = P.FrameReassembler()
+    assert list(r.feed(b'{"t":"status","cfg":{"bpm":120}}')) == [
+        {"t": "status", "cfg": {"bpm": 120}}]
+
+
+def test_stray_close_brace_at_depth0_then_clean_object():
+    r = P.FrameReassembler()
+    assert list(r.feed(b'}{"t":"led_r","mask":1}')) == [{"t": "led_r", "mask": 1}]
+
+
+def test_loopback_no_newline_out_reassembles_in():
+    # locks the cross-side framing contract before the M1 firmware RX assembler
+    # exists: serialize adds NO trailing newline; chunk to 20; a fresh framer
+    # (stand-in for the firmware assembler) recovers the exact object.
+    obj = P.led(mask=0xAA, bri=[10, 20, 30, 40, 50, 60, 70, 80], blink=0x0F, ms=500)
+    r = P.FrameReassembler()
+    got = []
+    for chunk in P.chunks(P.serialize(obj), 20):
+        got += r.feed(chunk)
+    assert got == [obj]
+
+
+def test_ms_without_blink_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        P.led(mask=1, ms=500)
