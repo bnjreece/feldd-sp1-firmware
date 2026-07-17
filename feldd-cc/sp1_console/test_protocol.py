@@ -99,7 +99,8 @@ def test_parse_fader_event():
     assert isinstance(ev, P.FaderEvent) and ev.ix == 2 and ev.value == 96
 
 def test_parse_mode_event():
-    ev = P.parse_event({"t": "mon", "k": "m", "v": 1})
+    # firmware emits k="mode" (config_cdc_fmt.c), matched verbatim by the host
+    ev = P.parse_event({"t": "mon", "k": "mode", "v": 1})
     assert isinstance(ev, P.ModeEvent) and ev.value == 1
 
 def test_parse_non_event_returns_none():

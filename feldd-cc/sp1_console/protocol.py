@@ -166,6 +166,6 @@ def parse_event(obj: dict) -> Optional[Event]:
         return ButtonEvent(ix=int(obj.get("ix", -1)), pressed=obj.get("s") == 1)
     if k == "f":
         return FaderEvent(ix=int(obj.get("ix", -1)), value=int(obj.get("v", 0)))
-    if k == "m":
+    if k == "mode":            # firmware emits k="mode" (config_cdc_fmt.c), not "m"
         return ModeEvent(value=int(obj.get("v", 0)))
     return None
