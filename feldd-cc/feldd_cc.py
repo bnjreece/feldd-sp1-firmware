@@ -883,84 +883,63 @@ def fader_assign(state, v):
         fader_custom(state, v, a.get("action"))
 
 
-# --------------------------------------------------------------------------- SP-1 CDC link
+# --------------------------------------------------------------------------- SP-1 link
+# The daemon talks to the SP-1 only through the sp1_console transport seam, so the
+# same code runs over USB (SerialTransport, today) or BLE (BleTransport, wireless).
+from sp1_console import protocol as _proto
+from sp1_console.transport import SerialTransport
+
+
 class Device:
-    def __init__(self, port_glob, dry):
+    """Thin adapter over a Transport, preserving the daemon's push_mask / release /
+    read_loop / released surface. Everything above the seam is unchanged."""
+
+    def __init__(self, port_glob, dry, transport=None):
         self.dry = dry
-        self.ser = None
         self.last_mask = -1
         self.released = False
+        self._t = None
         if dry:
-            log("dry-run: not opening a serial port")
+            log("dry-run: not opening a transport")
             return
-        if serial is None:
-            log("pyserial not installed (pip install pyserial); falling back to dry-run")
-            self.dry = True
-            return
-        ports = sorted(glob.glob(port_glob))
-        if not ports:
-            log("no SP-1 serial port matching %s; falling back to dry-run" % port_glob)
-            self.dry = True
-            return
-        self.ser = serial.Serial(ports[0], 115200, timeout=0.1)
-        log("opened SP-1 at", ports[0])
-        self.write({"t": "monset", "on": True})   # ask feldd for control events
+        self._t = transport or SerialTransport(port_glob)
 
     def write(self, obj):
-        line = json.dumps(obj, separators=(",", ":"))
-        if self.dry:
-            log("DEV<-", line)
+        if self.dry or self._t is None:
+            log("DEV<-", _proto.serialize(obj).decode())
             return
-        try:
-            self.ser.write(line.encode())
-        except Exception as e:
-            log("serial write error:", e)
+        self._t.send(obj)
 
     def push_mask(self, mask):
         if mask == self.last_mask:
             return
         self.last_mask = mask
-        self.write({"t": "led", "mask": mask})
+        self.write(_proto.led(mask))
 
     def release(self):
         if not self.released:
-            self.write({"t": "led", "release": True})
+            self.write(_proto.led_release())
             self.released, self.last_mask = True, -1
 
+    def _dispatch(self, obj, state):
+        ev = _proto.parse_event(obj)
+        if isinstance(ev, _proto.ButtonEvent):
+            handle_button(state, ev.ix, ev.pressed)
+        elif isinstance(ev, _proto.FaderEvent):
+            handle_fader(state, ev.ix, ev.value)
+
     def read_loop(self, state):
-        """Brace-frame JSON objects off the CDC stream and dispatch button events."""
-        if self.dry or self.ser is None:
+        """Register the inbound dispatch and bring the link up. The transport owns
+        framing + its own reader/reconnect thread, so this returns once connected;
+        the initial open is retried so a later plug-in comes online."""
+        if self.dry or self._t is None:
             return
-        buf, depth, instr, esc = bytearray(), 0, False, False
-        while True:
-            try:
-                chunk = self.ser.read(64)
-            except Exception as e:
-                log("serial read error:", e); time.sleep(0.5); continue
-            for b in chunk:
-                c = chr(b)
-                buf.append(b)
-                if instr:
-                    if esc: esc = False
-                    elif c == "\\": esc = True
-                    elif c == '"': instr = False
-                    continue
-                if c == '"': instr = True
-                elif c == "{": depth += 1
-                elif c == "}":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            obj = json.loads(bytes(buf).decode("utf-8", "ignore"))
-                            if obj.get("t") == "mon" and obj.get("k") == "b":
-                                handle_button(state, int(obj.get("ix", -1)), obj.get("s") == 1)
-                            elif obj.get("t") == "mon" and obj.get("k") == "f":
-                                handle_fader(state, int(obj.get("ix", -1)), int(obj.get("v", 0)))
-                        except Exception:
-                            pass
-                        buf.clear()
-                if depth == 0 and c not in "{} \r\n\t":
-                    buf.clear()           # resync on junk between objects
+        self._t.on_event(lambda obj: self._dispatch(obj, state))
+        self._t.on_link(lambda s: log("SP-1 link", s))
+        delay = 0.5
+        while not self._t.connect():
+            time.sleep(delay)
+            delay = min(delay * 2, 10.0)
 
 
 # --------------------------------------------------------------------------- HTTP hook server
