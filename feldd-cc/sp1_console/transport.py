@@ -11,6 +11,7 @@ import abc
 import asyncio
 import glob as _glob
 import logging
+import queue as _queue
 import threading
 import time
 from typing import Callable, List, Optional
@@ -218,7 +219,7 @@ class BleTransport(Transport):
 
     def __init__(self, *, service_uuid: str, rx_uuid: str, tx_uuid: str,
                  name: Optional[str] = None, address: Optional[str] = None,
-                 writer: Optional[Callable[[bytes], None]] = None,
+                 sink: Optional[Callable[[bytes], None]] = None,
                  autostart_loop: bool = True, reconnect_max_s: float = 30.0) -> None:
         super().__init__()
         self._service_uuid = service_uuid
@@ -226,23 +227,25 @@ class BleTransport(Transport):
         self._tx = tx_uuid
         self._name = name
         self._address = address
-        self._writer = writer          # per-chunk sink; set by the session in prod
+        self._sink = sink              # callable(bytes): WHOLE outbound frame
         self._autostart_loop = autostart_loop
         self._reconnect_max_s = reconnect_max_s
         self._stop = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._disp: Optional[threading.Thread] = None
+        self._rawq: "_queue.Queue" = _queue.Queue()   # inbound bytes -> dispatch thread
+        self._outq: Optional[asyncio.Queue] = None     # whole frames (created in loop)
+        self._wake: Optional[asyncio.Event] = None     # end the session (disconnect/close)
 
     # transport-core (unit-tested) ---------------------------------------------
     def _write(self, data: bytes) -> None:
-        w = self._writer
-        if w is None:
-            return                     # not connected yet: drop (LED state re-renders on link-up)
-        for chunk in protocol.chunks(data, protocol.BLE_CHUNK):
-            w(chunk)
+        s = self._sink
+        if s is not None:
+            s(data)                    # whole frame; the writer coroutine chunks it in order
 
     def _on_notify(self, data: bytes) -> None:
-        self._ingest(bytes(data))
+        self._ingest(bytes(data))      # reassemble + dispatch (on the dispatch thread in prod)
 
     def _on_disconnect(self) -> None:
         self._reset_frames()           # clear any half object before the next link
@@ -256,11 +259,27 @@ class BleTransport(Transport):
     def connect(self) -> bool:
         if not self._autostart_loop:
             return False               # tests drive the core directly
+        if self._thread is not None and self._thread.is_alive():
+            return True                # re-entrancy guard: one session per instance
         self._stop.clear()
+        self._disp = threading.Thread(target=self._dispatch_loop, daemon=True)
+        self._disp.start()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop_runner, daemon=True)
         self._thread.start()
         return True
+
+    def _dispatch_loop(self) -> None:
+        # inbound handlers (handle_button -> tmux subprocess) can block for seconds;
+        # run them here, off the asyncio loop, so BLE I/O never freezes.
+        while True:
+            data = self._rawq.get()
+            if data is None:
+                return
+            try:
+                self._on_notify(data)
+            except Exception:
+                log.exception("BLE dispatch")
 
     def _loop_runner(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -268,6 +287,8 @@ class BleTransport(Transport):
             self._loop.run_until_complete(self._session())
         except Exception:
             log.exception("BLE loop crashed")
+        finally:
+            self._loop.close()
 
     async def _scan(self, scanner):
         if self._address:
@@ -281,45 +302,75 @@ class BleTransport(Transport):
 
         return await scanner.find_device_by_filter(_match, timeout=10.0)
 
+    async def _writer_task(self, client) -> None:
+        # single writer: dequeue a WHOLE frame and write its chunks in order, so
+        # chunks of concurrent frames can never interleave on the wire.
+        try:
+            while True:
+                frame = await self._outq.get()
+                for chunk in protocol.chunks(frame, protocol.BLE_CHUNK):
+                    try:
+                        await client.write_gatt_char(self._rx, chunk, response=False)
+                    except Exception as e:
+                        log.warning("BLE write error: %s", e)
+                        break          # drop the rest of this frame; firmware resyncs
+        except asyncio.CancelledError:
+            pass
+
+    async def _wait_or_wake(self, secs: float) -> None:
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=secs)
+        except asyncio.TimeoutError:
+            pass
+
     async def _session(self) -> None:
         from bleak import BleakClient, BleakScanner   # lazy: no hardware dep for tests
+        self._outq = asyncio.Queue()
+        self._wake = asyncio.Event()
         backoff = 1.0
         while not self._stop.is_set():
             try:
                 dev = await self._scan(BleakScanner)
                 if dev is None:
-                    await asyncio.sleep(backoff)
+                    await self._wait_or_wake(backoff)
                     backoff = min(backoff * 2, self._reconnect_max_s)
                     continue
-                disconnected = asyncio.Event()
+                self._wake.clear()
 
                 def _dc(_c):
-                    self._loop.call_soon_threadsafe(disconnected.set)
+                    self._loop.call_soon_threadsafe(self._wake.set)
 
                 async with BleakClient(dev, disconnected_callback=_dc) as client:
                     if not self._has_console([s.uuid for s in client.services]):
                         raise RuntimeError("connected device has no feldd console service")
                     await client.start_notify(
-                        self._tx, lambda _s, d: self._on_notify(bytes(d)))
-                    self._writer = lambda chunk: asyncio.run_coroutine_threadsafe(
-                        client.write_gatt_char(self._rx, chunk, response=False), self._loop)
+                        self._tx, lambda _s, d: self._rawq.put(bytes(d)))
+                    self._sink = lambda frame: self._loop.call_soon_threadsafe(
+                        self._outq.put_nowait, frame)
+                    writer = asyncio.create_task(self._writer_task(client))
                     self._reset_frames()
                     self._emit_link("up")
                     self.send(protocol.monset(True))     # arm mon stream
                     self.send(protocol.console(True))     # declare the console session
                     self.send(protocol.mode_query())      # learn current mode
                     backoff = 1.0
-                    await disconnected.wait()
+                    await self._wake.wait()               # disconnect OR close()
+                    writer.cancel()
             except Exception as e:
                 log.warning("BLE session ended: %s", e)
-            self._writer = None
+            self._sink = None
             self._on_disconnect()
             if self._stop.is_set():
                 break
-            await asyncio.sleep(backoff)
+            await self._wait_or_wake(backoff)
             backoff = min(backoff * 2, self._reconnect_max_s)
+        self._rawq.put(None)             # stop the dispatch thread
 
     def close(self) -> None:
         self._stop.set()
-        if self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(lambda: None)
+        if self._loop is not None and self._wake is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._wake.set)
+            except Exception:
+                pass
+        self._rawq.put(None)             # unblock the dispatch thread even if no session

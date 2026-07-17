@@ -1,7 +1,8 @@
-"""Tests for BleTransport's transport-core: chunked writes, notification
-reassembly, link-drop frame reset. The bleak scan/connect/subscribe path needs a
-real radio + module and is validated by the M3 burner round-trip, not here; these
-lock the byte-level behavior the wire depends on.
+"""Tests for BleTransport's transport-core: whole-frame writes, notification
+reassembly, link-drop frame reset, console-service detection. The bleak
+scan/connect/subscribe session (single-writer ordering + dispatch thread + close
+handling) needs a real radio + module and is validated by the M3 burner round-trip,
+not here; these lock the byte-level behavior the wire depends on.
 """
 from sp1_console import protocol as P
 from sp1_console.transport import BleTransport
@@ -11,26 +12,26 @@ RX = "fe1ddcc0-0002-4b1e-9c81-1a2b3c4d5e01"
 TX = "fe1ddcc0-0003-4b1e-9c81-1a2b3c4d5e01"
 
 
-def _ble(writer):
+def _ble(sink):
     return BleTransport(name="feldd SP-1", service_uuid=SVC, rx_uuid=RX, tx_uuid=TX,
-                        writer=writer, autostart_loop=False)
+                        sink=sink, autostart_loop=False)
 
 
-def test_long_write_is_chunked_to_the_20_byte_cap_and_rejoins():
-    sent = []
-    t = _ble(sent.append)
-    obj = P.led(mask=0xFF, bri=[100, 90, 80, 70, 60, 50, 40, 30])   # > 20 bytes
+def test_write_enqueues_the_whole_frame_not_interleavable_chunks():
+    # the single writer coroutine chunks whole frames in order (chunk correctness
+    # is protocol.chunks' job); _write must hand it ONE complete frame, so two
+    # concurrent frames can never interleave on the wire.
+    out = []
+    t = _ble(out.append)
+    obj = P.led(mask=0xFF, bri=[100, 90, 80, 70, 60, 50, 40, 30])
     t.send(obj)
-    assert len(P.serialize(obj)) > 20                # precondition: needs chunking
-    assert all(len(c) <= 20 for c in sent)
-    assert b"".join(sent) == P.serialize(obj)
+    assert out == [P.serialize(obj)]
 
 
-def test_short_write_is_a_single_chunk():
-    sent = []
-    t = _ble(sent.append)
-    t.send(P.led(mask=5))
-    assert sent == [b'{"t":"led","mask":5}']
+def test_write_before_connect_is_dropped_not_raised():
+    t = BleTransport(service_uuid=SVC, rx_uuid=RX, tx_uuid=TX, sink=None,
+                     autostart_loop=False)
+    t.send(P.led(mask=5))              # sink None -> dropped (re-renders on link-up)
 
 
 def test_notifications_reassemble_across_chunks_and_dispatch():
