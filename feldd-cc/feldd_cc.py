@@ -27,10 +27,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-try:
-    import serial  # pyserial
-except ImportError:
-    serial = None
+# pyserial is imported lazily inside sp1_console.transport (SerialTransport), so the
+# daemon module no longer needs it at import time.
 
 RENDER_HZ = 20.0
 NUM_TRACK_LEDS = 4           # 4 reliable front LEDs (ix 0..3); side LEDs (4..7) off in v1
