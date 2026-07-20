@@ -310,8 +310,22 @@ class State:
                 return led
         return None
 
+    def _pane_owner(self, sid, pane):
+        """A subagent shares its parent's tmux PANE but has its own session id. It must
+        not claim a separate LED/Track slot (jumping to it just lands on the parent), so
+        fold its activity into whichever registered session already owns that pane. Only
+        a NEW sid folds, and only on an exact pane match -- two real sessions never merge
+        (distinct panes never collide; a missing pane never folds)."""
+        if not pane or sid in self.sessions:
+            return sid
+        for other, s in self.sessions.items():
+            if other != sid and s.get("pane") == pane:
+                return other
+        return sid
+
     def set_state(self, sid, cwd, st, pane=None, tmux=None):
         with self.lock:
+            sid = self._pane_owner(sid, pane)   # fold a same-pane subagent into its parent
             s = self._ensure(sid, cwd, tmux)
             if pane:
                 s["pane"] = pane

@@ -773,6 +773,33 @@ def test_handle_fader_noop_when_not_cockpit():
     assert seen == []                         # faders only act in cockpit mode
 
 
+def test_subagent_sharing_a_pane_folds_into_its_parent():
+    # A subagent fires SubagentStart/Stop with its OWN session id but the PARENT's tmux
+    # pane. It must not claim a separate LED/Track slot (it's not independently
+    # navigable -> jumping to it lands on the parent). Its activity folds into the parent.
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("parent", "/proj", "working", pane="%8", tmux="general4")
+    st.set_state("subagent", "", "done", pane="%8", tmux="general4")   # same pane, new sid
+    assert list(st.sessions.keys()) == ["parent"]        # no phantom second slot
+    assert st.sessions["parent"]["pane"] == "%8"
+
+
+def test_distinct_panes_stay_separate_sessions():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working", pane="%8", tmux="s1")
+    st.set_state("b", "/y", "working", pane="%9", tmux="s2")   # different pane -> its own slot
+    assert set(st.sessions.keys()) == {"a", "b"}
+
+
+def test_no_pane_does_not_fold_unrelated_sessions():
+    # With no pane info we can't prove co-location, so sessions stay distinct (never
+    # merge two real sessions by accident).
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("a", "/x", "working")
+    st.set_state("b", "/y", "working")
+    assert set(st.sessions.keys()) == {"a", "b"}
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
