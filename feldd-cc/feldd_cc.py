@@ -1001,19 +1001,48 @@ def make_handler(state):
 
 
 # --------------------------------------------------------------------------- main
+# The custom feldd wireless-console GATT service (unadvertised; opened post-connect).
+CONSOLE_SVC_UUID = "fe1ddcc0-0001-4b1e-9c81-1a2b3c4d5e01"
+CONSOLE_RX_UUID = "fe1ddcc0-0002-4b1e-9c81-1a2b3c4d5e01"
+CONSOLE_TX_UUID = "fe1ddcc0-0003-4b1e-9c81-1a2b3c4d5e01"
+
+
+def build_transport(args):
+    """Pick the transport from args. Default: USB (return None -> Device uses
+    SerialTransport). --ble: wireless. On macOS the SP-1 is normally PAIRED in System
+    Settings (kept as a BT keyboard/MIDI device, so it does NOT advertise), so BLE
+    uses CoreBluetooth's retrieveConnectedPeripherals to attach to the held device and
+    open the console service on the same link. On other platforms it falls back to the
+    bleak scan path (BleTransport)."""
+    if not args.ble:
+        return None
+    if sys.platform == "darwin":
+        from sp1_console.cb_transport import CoreBluetoothTransport
+        log("transport: BLE via macOS CoreBluetooth (pair the SP-1 in System Settings first)")
+        return CoreBluetoothTransport(service_uuid=CONSOLE_SVC_UUID, rx_uuid=CONSOLE_RX_UUID,
+                                      tx_uuid=CONSOLE_TX_UUID, name_hint=args.ble_name)
+    from sp1_console.transport import BleTransport
+    log("transport: BLE via bleak scan")
+    return BleTransport(name=args.ble_name, service_uuid=CONSOLE_SVC_UUID,
+                        rx_uuid=CONSOLE_RX_UUID, tx_uuid=CONSOLE_TX_UUID)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("FELDD_CC_PORT", "9200")))
     ap.add_argument("--serial-glob", default=os.environ.get("FELDD_PORT", "/dev/cu.usbmodem*"))
     ap.add_argument("--config", default=None, help="path to feldd_cc.config.json")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--ble", action="store_true",
+                    help="use Bluetooth (macOS: attach to the SP-1 paired in System Settings)")
+    ap.add_argument("--ble-name", default="feldd", help="BLE device name hint (default: feldd)")
     args = ap.parse_args()
 
     global CFG
     CFG = load_config(args.config)
     log("session mode:", CFG["sessions"]["mode"])
     state = State(CFG)
-    dev = Device(args.serial_glob, args.dry_run)
+    dev = Device(args.serial_glob, args.dry_run, transport=build_transport(args))
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

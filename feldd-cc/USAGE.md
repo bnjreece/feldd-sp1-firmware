@@ -31,6 +31,23 @@ tmux new-window -n feldd-cc 'cd <this folder> && python3 feldd_cc.py'
 - **Stop it:** `tmux kill-window -t feldd-cc` , the hooks then just fast-fail (harmless)
 - It **releases the LEDs** back to feldd's normal display whenever no sessions are active.
 
+## Wireless (Bluetooth, macOS)
+By default the daemon talks to the SP-1 over **USB**. To run it **wireless** on macOS,
+add `--ble`:
+```bash
+python3 feldd_cc.py --ble
+```
+One-time setup:
+1. Flash **feldd 0.30.0+** and run **Provision Bluetooth** (feldd.com configurator).
+2. **Pair the SP-1 in System Settings → Bluetooth** (it becomes a "My Device").
+3. Put the SP-1 in **MIDI mode** (`••` + Track 4) so button presses don't type into the Mac.
+
+Then `--ble` **attaches to the device macOS already has** (via CoreBluetooth
+`retrieveConnectedPeripherals`) and drives the console over that same link — coexisting
+with the OS's keyboard/MIDI use, no separate mode, auto-reconnecting on a drop. (A device
+macOS is holding stops advertising, so the app attaches to the existing connection rather
+than scanning — which is why plain BLE scanners can't find a paired SP-1.)
+
 ## How the lights map to sessions
 
 ### Single mode (`sessions.mode: "single"`)
