@@ -21,6 +21,7 @@ import glob
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -426,8 +427,10 @@ class State:
         else:
             self.fader_grabbed.discard(ix)
 
-    def end(self, sid):
+    def end(self, sid, pane=None):
         with self.lock:
+            if pane:
+                sid = self._pane_owner(sid, pane)   # a real end clears its discovered/folded slot
             s = self.sessions.pop(sid, None)
             if (s and not self.single and isinstance(s["led"], int)
                     and s["led"] not in self.free and s["led"] not in self.pinned):
@@ -643,7 +646,7 @@ def apply_hook(state, event, pane=None):
     cwd = event.get("cwd") or ""
     tmux = tmux_session_of(pane)   # the hook carried $TMUX_PANE; resolve its tmux session
     if name == "SessionEnd":
-        state.end(sid)
+        state.end(sid, pane)
         log("hook", name, sid[:8])
         return
     st = state.cfg["lights"]["events"].get(name)
@@ -652,6 +655,45 @@ def apply_hook(state, event, pane=None):
         if name == "UserPromptSubmit":
             state.human_touch(sid)       # a real human prompt resets the autopilot deadman
         log("hook", name, sid[:8], (tmux or cwd or "?"), "->", st)
+
+
+# --------------------------------------------------------------------------- discovery
+_CLAUDE_TITLE = re.compile(r"^\d+\.\d+")   # Claude Code retitles its pane to its version (e.g. "2.1.211")
+
+
+def _pane_is_claude(cmd):
+    c = (cmd or "").lower()
+    return ("claude" in c) or ("node" in c) or bool(_CLAUDE_TITLE.match(cmd or ""))
+
+
+def discover_sessions(state):
+    """Seed the cockpit at startup: register the tmux panes already running claude as idle
+    sessions, so the board (and the Track buttons) are populated immediately instead of
+    trickling back as each session next fires a hook. A real hook for the same pane folds
+    onto the discovered slot (State._pane_owner); SessionEnd clears it (State.end by pane).
+    Fills up to the board size; extra sessions auto-register the moment they do anything."""
+    try:
+        out = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F",
+             "#{pane_id}\t#{pane_current_command}\t#{session_name}\t#{pane_current_path}"],
+            capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return 0
+    n = 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4:
+            continue
+        pane, cmd, sess, path = parts
+        if sess == "feldd-cc" or not _pane_is_claude(cmd):   # skip the daemon's own pane + shells
+            continue
+        state.set_state("disc:%s" % pane, path, "idle", pane=pane, tmux=sess)
+        n += 1
+        if n >= state.n_leds:
+            break
+    if n:
+        log("discovered %d existing claude session(s) at startup" % n)
+    return n
 
 
 # --------------------------------------------------------------------------- tmux input
@@ -1096,12 +1138,16 @@ def main():
     ap.add_argument("--ble", action="store_true",
                     help="use Bluetooth (macOS: attach to the SP-1 paired in System Settings)")
     ap.add_argument("--ble-name", default="feldd", help="BLE device name hint (default: feldd)")
+    ap.add_argument("--no-discover", action="store_true",
+                    help="don't pre-register existing claude tmux panes at startup")
     args = ap.parse_args()
 
     global CFG
     CFG = load_config(args.config)
     log("session mode:", CFG["sessions"]["mode"])
     state = State(CFG)
+    if not args.no_discover:
+        discover_sessions(state)             # seed the board with existing claude sessions
     dev = Device(args.serial_glob, args.dry_run, transport=build_transport(args))
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))

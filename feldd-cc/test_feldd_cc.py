@@ -813,6 +813,26 @@ def test_no_pane_does_not_fold_unrelated_sessions():
     assert set(st.sessions.keys()) == {"a", "b"}
 
 
+def test_pane_is_claude_detects_version_title_and_skips_shells():
+    assert fc._pane_is_claude("2.1.211")        # Claude Code retitles its pane to its version
+    assert fc._pane_is_claude("claude")
+    assert fc._pane_is_claude("node")
+    assert not fc._pane_is_claude("zsh")
+    assert not fc._pane_is_claude("[tmux]")
+    assert not fc._pane_is_claude("")
+
+
+def test_discovered_slot_merges_real_hook_then_clears_on_end():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    st.set_state("disc:%8", "/home", "idle", pane="%8", tmux="loudcue")   # startup discovery
+    assert list(st.sessions) == ["disc:%8"] and st.sessions["disc:%8"]["state"] == "idle"
+    st.set_state("real", "", "working", pane="%8", tmux="loudcue")        # a real hook, same pane
+    assert list(st.sessions) == ["disc:%8"]                                # folds in, no 2nd slot
+    assert st.sessions["disc:%8"]["state"] == "working"
+    st.end("real", pane="%8")                                             # the real SessionEnd
+    assert st.sessions == {}                                              # discovered slot cleared
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
