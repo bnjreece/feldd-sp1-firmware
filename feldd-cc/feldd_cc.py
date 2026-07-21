@@ -674,30 +674,38 @@ def _pane_is_claude(cmd):
 def discover_sessions(state):
     """Seed the cockpit at startup: register the tmux panes already running claude as idle
     sessions, so the board (and the Track buttons) are populated immediately instead of
-    trickling back as each session next fires a hook. A real hook for the same pane folds
-    onto the discovered slot (State._pane_owner); SessionEnd clears it (State.end by pane).
-    Fills up to the board size; extra sessions auto-register the moment they do anything."""
+    trickling back as each session next fires a hook. Ordered **most-recently-active first**
+    (tmux window_activity), so your live work lands on the front Tracks, not the oldest
+    session. A real hook for the same pane folds onto the discovered slot (State._pane_owner);
+    SessionEnd clears it (State.end by pane). Fills up to the board size; the rest
+    auto-register the moment they do anything."""
     try:
         out = subprocess.run(
             ["tmux", "list-panes", "-a", "-F",
-             "#{pane_id}\t#{pane_current_command}\t#{session_name}\t#{pane_current_path}"],
+             "#{window_activity}\t#{pane_id}\t#{pane_current_command}\t#{session_name}\t#{pane_current_path}"],
             capture_output=True, text=True, timeout=3).stdout
     except Exception:
         return 0
-    n = 0
+    rows = []
     for line in out.splitlines():
         parts = line.split("\t")
-        if len(parts) != 4:
+        if len(parts) != 5:
             continue
-        pane, cmd, sess, path = parts
+        act, pane, cmd, sess, path = parts
         if sess == "feldd-cc" or not _pane_is_claude(cmd):   # skip the daemon's own pane + shells
             continue
+        try:
+            act = int(act)
+        except ValueError:
+            act = 0
+        rows.append((act, pane, sess, path))
+    rows.sort(key=lambda r: r[0], reverse=True)              # most-recently-active tmux window first
+    n = 0
+    for _act, pane, sess, path in rows[:state.n_leds]:
         state.set_state("disc:%s" % pane, path, "idle", pane=pane, tmux=sess)
         n += 1
-        if n >= state.n_leds:
-            break
     if n:
-        log("discovered %d existing claude session(s) at startup" % n)
+        log("discovered %d existing claude session(s) at startup (most-recent first)" % n)
     return n
 
 
