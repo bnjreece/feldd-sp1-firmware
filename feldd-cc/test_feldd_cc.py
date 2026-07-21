@@ -48,16 +48,29 @@ def test_custom_event_map():
     assert st.sessions["a"]["state"] == "needs"
 
 
-def test_led_mask_working_then_done_then_idle():
+def test_led_mask_working_lit_then_done_stays_solid():
     c = cfg()
     st = fc.State(c)
     st.set_state("a", "/x", "working")
-    assert st.led_mask(time.time()) == 0x01           # LED 0, solid
+    assert st.led_mask(time.time()) == 0x01           # LED 0 lit (working)
     st.set_state("a", "/x", "done")
-    assert st.led_mask(time.time()) == 0x01           # flash on
-    later = st.sessions["a"]["t"] + c["lights"]["done_hold_s"] + 0.05
-    assert st.led_mask(later) == 0x00                  # flash expired
-    assert st.sessions["a"]["state"] == "idle"
+    assert st.led_mask(time.time()) == 0x01           # done = solid, lit
+    later = st.sessions["a"]["t"] + 30                 # long after
+    assert st.led_mask(later) == 0x01                  # done PERSISTS (no fade to idle)
+    assert st.sessions["a"]["state"] == "done"
+
+
+def test_working_breathes_done_is_solid_full():
+    # the breathe curve dips below full brightness over a cycle...
+    assert min(fc._breathe_duty(t) for t in [0.0, 0.5, 1.0, 1.3, 1.6, 2.0, 2.5]) < 100
+    st = fc.State(cfg())
+    st.set_state("a", "/x", "done")
+    _, bri = st.led_render(time.time())
+    assert bri[0] == 100                                # ...but done sits at full brightness
+    now = time.time()
+    st.set_state("a", "/x", "working")
+    _, bri = st.led_render(now)
+    assert bri[0] == fc._breathe_duty(now)              # working uses the breathe duty
 
 
 def test_single_whole_row():

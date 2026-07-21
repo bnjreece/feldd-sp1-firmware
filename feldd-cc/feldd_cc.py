@@ -19,6 +19,7 @@ import argparse
 import copy
 import glob
 import json
+import math
 import os
 import subprocess
 import sys
@@ -31,6 +32,16 @@ from urllib.parse import urlparse, parse_qs
 # daemon module no longer needs it at import time.
 
 RENDER_HZ = 20.0
+
+
+def _breathe_duty(now, period=2.6, lo=15, hi=100, steps=16):
+    """Smooth 'breathe' brightness (per-LED duty 0..100) for a *working* session. Sine
+    over `period` seconds, quantized to `steps` phase levels per cycle so the LED duty
+    changes only a handful of times a second -- a smooth pulse without spamming the BLE
+    link at the full 20 Hz render rate (the push dedupes on unchanged duty)."""
+    phase = round(((now % period) / period) * steps) / steps      # quantized 0..1
+    frac = (math.sin(phase * 2 * math.pi) + 1) / 2                 # 0..1
+    return int(lo + (hi - lo) * frac)
 NUM_TRACK_LEDS = 4           # 4 reliable front LEDs (ix 0..3); side LEDs (4..7) off in v1
 # feldd monitor button indices
 PLAY, TRK1, TRK4, VOLU, VOLD, FWD, RWD = 0, 1, 4, 5, 6, 7, 8
@@ -560,33 +571,49 @@ class State:
             send_keys_to(pane, cwd, *nudge)
         return fires
 
-    def led_mask(self, now):
-        """8-bit mask of which LEDs should be lit right now (handles blink/done)."""
+    def led_render(self, now):
+        """(mask, bri[8]) for this tick. Semantics: **needs = blink**, **done = solid
+        (persistent)**, **working = slow breathe**, **idle/off = dark**. `bri` is per-LED
+        duty 0..100 -- 100 everywhere except a breathing (working / self-driving) LED."""
         lights = self.cfg["lights"]
-        blink_hz, done_hold = lights["blink_hz"], lights["done_hold_s"]
+        blink_hz = lights["blink_hz"]
         whole_row = lights.get("whole_row", False)
+        breathe = _breathe_duty(now)
         with self.lock:
             mask = 0
+            bri = [100] * 8
             blink_on = int(now * blink_hz * 2) % 2 == 0
             # calm dial (cockpit): needs-you always shows; done shows above the floor;
-            # steady working shows only in the upper half. Non-cockpit = show all.
+            # working shows only in the upper half. Non-cockpit = show all.
             show_done = (not self.cockpit) or self.calm >= 1
             show_working = (not self.cockpit) or self.calm >= 64
-            breathe_on = int(now) % 2 == 0          # ~0.5 Hz slow pulse for autopilot
             for sid, s in self.sessions.items():
                 st, led = s["state"], s["led"]
                 if led is None:
                     continue                     # off-board cockpit session: no LED
+                autop = self.cockpit and sid in self.autopilot
                 on = ((st == "working" and show_working)
                       or (st == "needs" and blink_on)
-                      or (st == "done" and show_done and now - s["t"] < done_hold))
-                if st == "done" and now - s["t"] >= done_hold:
-                    s["state"] = "idle"
-                if self.cockpit and sid in self.autopilot:   # self-driving -> slow pulse
-                    on = on or breathe_on
-                if on:
-                    mask |= 0x0F if (self.single and whole_row) else (1 << led)
-            return mask
+                      or (st == "done" and show_done)          # done is SOLID + persistent
+                      or autop)                                # self-driving always shows
+                if not on:
+                    continue
+                breathing = (st == "working") or autop         # working / self-driving pulse
+                if self.single and whole_row:
+                    mask |= 0x0F
+                    if breathing:
+                        for i in range(4):
+                            bri[i] = breathe
+                elif isinstance(led, int):
+                    mask |= (1 << led)
+                    if breathing:
+                        bri[led] = breathe
+            return mask, bri
+
+    def led_mask(self, now):
+        """Just the on/off mask (breathe/duty dropped) -- for callers/tests that only
+        care which LEDs are lit."""
+        return self.led_render(now)[0]
 
     def any_sessions(self):
         with self.lock:
@@ -924,7 +951,7 @@ class Device:
 
     def __init__(self, port_glob, dry, transport=None):
         self.dry = dry
-        self.last_mask = -1
+        self.last_frame = None
         self.released = False
         self._t = None
         if dry:
@@ -938,16 +965,19 @@ class Device:
             return
         self._t.send(obj)
 
-    def push_mask(self, mask):
-        if mask == self.last_mask:
+    def push(self, mask, bri=None):
+        if bri is not None and all(b == 100 for b in bri):
+            bri = None                    # all full brightness -> mask-only (v1, byte-identical)
+        frame = (mask, tuple(bri) if bri is not None else None)
+        if frame == self.last_frame:
             return
-        self.last_mask = mask
-        self.write(_proto.led(mask))
+        self.last_frame = frame
+        self.write(_proto.led(mask, bri=bri))
 
     def release(self):
         if not self.released:
             self.write(_proto.led_release())
-            self.released, self.last_mask = True, -1
+            self.released, self.last_frame = True, None
 
     def _dispatch(self, obj, state):
         ev = _proto.parse_event(obj)
@@ -976,7 +1006,7 @@ class Device:
             # or the firmware's bit4-fall auto-release over BLE), so force a full
             # re-render: reset the dedupe baseline and un-latch release. int assign
             # is atomic enough for the reader-thread -> render-thread handoff.
-            self.last_mask = -1
+            self.last_frame = None
             self.released = False
 
 
@@ -1086,7 +1116,8 @@ def main():
                 dev.released = False
                 now = time.time()
                 state.autopilot_tick(now, CFG["autopilot"].get("nudge", ["continue", "Enter"]))
-                dev.push_mask(state.led_mask(now))
+                m, bri = state.led_render(now)
+                dev.push(m, bri)
             else:
                 dev.release()
             time.sleep(period)

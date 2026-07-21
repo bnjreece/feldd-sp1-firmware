@@ -43,22 +43,28 @@ def _dev():
     return d, ft
 
 
-def test_push_mask_dedupes_same_value():
+def test_push_dedupes_same_frame():
     d, ft = _dev()
-    d.push_mask(5)
-    d.push_mask(5)
+    d.push(5)
+    d.push(5)
     assert ft.sent.count(P.led(5)) == 1
 
 
-def test_push_mask_re_renders_after_a_link_cycle():
+def test_push_re_renders_after_a_link_cycle():
     d, ft = _dev()
-    d.push_mask(5)
+    d.push(5)
     ft.sent.clear()
-    d.push_mask(5)
+    d.push(5)
     assert ft.sent == []               # deduped while the link stays up
     ft.cycle()                          # reconnect -> device forgot the mask
-    d.push_mask(5)
-    assert P.led(5) in ft.sent         # forced re-render of the same mask
+    d.push(5)
+    assert P.led(5) in ft.sent         # forced re-render of the same frame
+
+
+def test_push_all_full_brightness_is_a_mask_only_frame():
+    d, ft = _dev()
+    d.push(5, bri=[100] * 8)            # all full -> byte-identical to a v1 mask-only led
+    assert ft.sent[-1] == P.led(5)     # no 'bri' key emitted
 
 
 def test_release_is_idempotent():
@@ -71,6 +77,6 @@ def test_release_is_idempotent():
 
 def test_dry_device_never_builds_a_transport():
     d = feldd_cc.Device("glob", dry=True)
-    d.push_mask(5)
+    d.push(5)
     d.release()
     assert d._t is None
