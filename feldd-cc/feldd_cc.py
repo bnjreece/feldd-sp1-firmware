@@ -652,15 +652,31 @@ def find_pane(cwd):
 
 
 def tmux_focus(tmuxname, pane):
-    """Bring a session to the foreground: switch the attached tmux client to it (cockpit
-    'jump'). Focus-follows-select so the SP-1 surfaces whatever session you pick."""
-    if not tmuxname:
+    """Bring a session to the foreground (cockpit 'jump'). Resolve the target session
+    FRESH from the pane -- the cached name goes stale the moment you rename a tmux
+    session, but pane ids survive renames, so a rename must never break the jump. Fall
+    back to the cached name only when the pane is gone, and surface a real failure
+    instead of logging a success that didn't happen."""
+    target = None
+    if pane:
+        try:
+            target = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", pane, "#{session_name}"],
+                capture_output=True, text=True, timeout=2).stdout.strip() or None
+        except Exception:
+            target = None
+    target = target or tmuxname
+    if not target:
         return
     try:
-        subprocess.run(["tmux", "switch-client", "-t", tmuxname], timeout=2)
+        r = subprocess.run(["tmux", "switch-client", "-t", target],
+                           capture_output=True, text=True, timeout=2)
+        if r.returncode != 0:
+            log("jump failed -> %s: %s" % (target, (r.stderr or "").strip() or "?"))
+            return
         if pane:
             subprocess.run(["tmux", "select-pane", "-t", pane], timeout=2)
-        log("jump -> %s" % tmuxname)
+        log("jump -> %s" % target)
     except Exception as e:
         log("jump error:", e)
 
