@@ -469,7 +469,7 @@ def test_fader_autopilot_arms_and_disarms_focused():
 def test_cockpit_allocates_eight_leds():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for sid in "abcdefgh":
-        st.set_state(sid, "/p/%s" % sid, "working")
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid)
     assert {st.sessions[s]["led"] for s in "abcdefgh"} == set(range(8))
     assert st.led_mask(time.time()) == 0xFF
 
@@ -477,7 +477,7 @@ def test_cockpit_allocates_eight_leds():
 def test_mru_new_background_session_waits_on_bench():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for sid in "abcd":
-        st.set_state(sid, "/p/%s" % sid, "working")   # front 0-3
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid)   # front 0-3
     st.set_state("x", "/p/x", "working")              # 5th: benches, doesn't evict a-d
     assert st.sessions["x"]["led"] == 4
     assert {st.sessions[s]["led"] for s in "abcd"} == {0, 1, 2, 3}
@@ -496,7 +496,7 @@ def test_mru_jump_promotes_and_evicts_lru():
 def test_mru_needs_claims_a_front_button():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for sid in "abcde":
-        st.set_state(sid, "/p/%s" % sid, "working")   # a-d front, e bench (4)
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid)   # a-d front, e bench (4)
     st.set_state("e", "/p/e", "needs")                # e needs you -> promotes to front
     assert st.sessions["e"]["led"] < 4
 
@@ -505,8 +505,8 @@ def test_mru_pinned_session_never_evicted():
     st = fc.State(cfg(sessions={"mode": "cockpit", "assign": {"keep": 0}}))
     st.set_state("p", "/p/p", "working", tmux="keep")   # pinned to LED 0
     for sid in "abc":
-        st.set_state(sid, "/x/%s" % sid, "working")     # a,b,c -> front 1,2,3
-    st.set_state("d", "/x/d", "working")                # d -> bench 4
+        st.set_state(sid, "/x/%s" % sid, "working", pane="%%%s" % sid)   # a,b,c -> front 1,2,3
+    st.set_state("d", "/x/d", "working", pane="%d")     # d -> bench 4
     st.focus("d")                                       # promote d; must not touch the pin
     assert st.sessions["p"]["led"] == 0                 # pinned anchor holds
     assert st.sessions["d"]["led"] < 4 and st.sessions["d"]["led"] != 0
@@ -515,7 +515,7 @@ def test_mru_pinned_session_never_evicted():
 def test_mru_bench_offboard_spares_needs():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for sid in "abcdefgh":
-        st.set_state(sid, "/p/%s" % sid, "working")   # a-d front, e-h bench (4-7)
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid)   # a-d front, e-h bench (4-7)
     st.sessions["e"]["state"] = "needs"               # e is a needs session sitting on the bench
     with st.lock:
         st._bench_slot_for("newcomer", vacated=None)  # bench full -> must off-board a NON-needs
@@ -525,7 +525,7 @@ def test_mru_bench_offboard_spares_needs():
 def test_mru_rehomes_offboard_on_end():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for i in range(9):
-        st.set_state("s%d" % i, "/p/%d" % i, "working")   # s0-s7 on board, s8 off-board
+        st.set_state("s%d" % i, "/p/%d" % i, "working", pane="%%%d" % i)   # s0-s7 on board, s8 off-board
     assert st.sessions["s8"]["led"] is None
     st.end("s0")                                          # a slot frees
     assert st.sessions["s8"]["led"] is not None           # s8 is re-homed, not left dark
@@ -534,14 +534,14 @@ def test_mru_rehomes_offboard_on_end():
 def test_select_by_led_none_is_noop():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for i in range(9):
-        st.set_state("s%d" % i, "/p/%d" % i, "working")   # s8 is off-board (led None)
+        st.set_state("s%d" % i, "/p/%d" % i, "working", pane="%%%d" % i)   # s8 is off-board (led None)
     assert st.select_by_led(None) is None                 # never matches an off-board session
 
 
 def test_cockpit_overflow_goes_offboard():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for i in range(10):
-        st.set_state("s%d" % i, "/p/%d" % i, "working")
+        st.set_state("s%d" % i, "/p/%d" % i, "working", pane="%%%d" % i)
     leds = [st.sessions["s%d" % i]["led"] for i in range(10)]
     assert sorted(l for l in leds if l is not None) == list(range(8))   # 8 distinct LEDs
     assert leds[8] is None and leds[9] is None                          # overflow off-board
@@ -560,7 +560,7 @@ def test_cockpit_pin_to_high_led_sticks():
     st = fc.State(cfg(sessions={"mode": "cockpit", "assign": {"web": 6}}))
     st.set_state("x", "/home/u", "working", tmux="web")
     assert st.sessions["x"]["led"] == 6          # a cockpit pin can be 0..7
-    st.set_state("y", "/home/u", "working", tmux="other")
+    st.set_state("y", "/home/u", "working", tmux="other", pane="%y")
     assert st.sessions["y"]["led"] == 0          # unpinned -> first free, 6 reserved
 
 
@@ -604,7 +604,7 @@ def test_cockpit_play_acts_on_press():
 def test_cockpit_track_selects_front_bank():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
     for sid in "abcdefgh":
-        st.set_state(sid, "/p/%s" % sid, "working")
+        st.set_state(sid, "/p/%s" % sid, "working", pane="%%%s" % sid)
     fc.handle_button(st, 2, True)                     # Track 2 -> led 1 = session b
     assert st.active == "b"                           # 5-8 are reached via scrubber / Vol+
 
@@ -694,7 +694,7 @@ def test_fader_scroll_respects_pickup():
 
 def test_calm_dial_gates_working_leds():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
-    st.set_state("a", "/x", "working")       # led 0, solid
+    st.set_state("a", "/x", "working", pane="%a")   # led 0, solid
     fc.fader_calm(st, 0)                      # quietest -> hide busy sessions
     assert (st.led_mask(time.time()) & 1) == 0
     fc.fader_calm(st, 127)                    # loudest -> show everything
@@ -703,7 +703,7 @@ def test_calm_dial_gates_working_leds():
 
 def test_calm_default_shows_everything():
     st = fc.State(cfg(sessions={"mode": "cockpit"}))
-    st.set_state("a", "/x", "working")
+    st.set_state("a", "/x", "working", pane="%a")
     assert st.led_mask(time.time()) & 1      # untouched calm dial = full visibility
 
 
@@ -831,6 +831,17 @@ def test_discovered_slot_merges_real_hook_then_clears_on_end():
     assert st.sessions["disc:%8"]["state"] == "working"
     st.end("real", pane="%8")                                             # the real SessionEnd
     assert st.sessions == {}                                              # discovered slot cleared
+
+
+def test_headless_session_never_claims_a_front_track():
+    st = fc.State(cfg(sessions={"mode": "cockpit"}))
+    # a headless agent (openclaw/cron) fires a NEEDS hook with no tmux pane
+    st.set_state("agent", "/some/dir", "needs", pane=None, tmux=None)
+    led = st.sessions["agent"]["led"]
+    assert led is None or led >= 4        # bench or off-board, NEVER a front Track (0-3)
+    # a real tmux session still lands on a front Track and can be promoted
+    st.set_state("real", "/proj", "needs", pane="%9", tmux="proj")
+    assert st.sessions["real"]["led"] < 4
 
 
 def main():

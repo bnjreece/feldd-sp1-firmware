@@ -200,7 +200,7 @@ class State:
         self.autopilot = {}       # sid -> {"rate": s, "drips": n} (self-driving sessions)
         self.autopilot_parked = set()  # sids the deadman parked; must disarm (fader 0) to re-arm
 
-    def _ensure(self, sid, cwd, tmux=None):
+    def _ensure(self, sid, cwd, tmux=None, pane=None):
         s = self.sessions.get(sid)
         if s:
             if cwd:
@@ -214,7 +214,8 @@ class State:
             pinned = led is not None
             if led is None:
                 if self.cockpit:
-                    led = self._tier_place()   # front 0-3 free -> front; side 4-7 -> bench; else off
+                    # headless (no pane) -> bench only, never a front Track jump target
+                    led = self._tier_place(front_ok=bool(pane))
                 elif self.free:
                     led = self.free.pop(0)
                 else:
@@ -230,12 +231,15 @@ class State:
     # ---- cockpit MRU: front row (0-3) is a sticky LRU cache of the sessions you most
     # recently focused or that most recently needed you; side row (4-7) is the bench.
     # Pinned sessions anchor their LED and are exempt. (All called under self.lock.)
-    def _tier_place(self):
+    def _tier_place(self, front_ok=True):
         """A NEW session's LED: first free front (0-3), then first free bench (4-7), else
-        off-board. Never evicts , a new background session can't steal a front button."""
+        off-board. Never evicts , a new background session can't steal a front button.
+        `front_ok=False` (a headless / pane-less session, e.g. an openclaw agent) skips the
+        front Track row entirely so it can never become a dead jump target."""
         occ = {self.sessions[x]["led"] for x in self.sessions
                if isinstance(self.sessions[x]["led"], int)}
-        for i in list(range(4)) + list(range(4, 8)):
+        tiers = (list(range(4)) if front_ok else []) + list(range(4, 8))
+        for i in tiers:
             if i not in self.pinned and i not in occ:
                 return i
         return None
@@ -270,10 +274,9 @@ class State:
                           key=lambda x: (self.sessions[x]["state"] != "needs",
                                          -self.sessions[x]["focus_t"]))
         for x in offboard:
-            slot = self._tier_place()
-            if slot is None:
-                break
-            self.sessions[x]["led"] = slot
+            slot = self._tier_place(front_ok=bool(self.sessions[x].get("pane")))
+            if slot is not None:                     # a headless one may find no bench yet; keep going
+                self.sessions[x]["led"] = slot
 
     def _promote(self, sid, now):
         """Ensure sid occupies a FRONT LED (0-3), evicting the least-recently-focused
@@ -284,6 +287,8 @@ class State:
         s = self.sessions.get(sid)
         if not s or s.get("pinned"):
             return
+        if not s.get("pane"):
+            return                                   # headless (no tmux pane) -> never a Track target
         s["focus_t"] = now
         cur = s["led"]
         if isinstance(cur, int) and cur < 4:
@@ -338,7 +343,7 @@ class State:
     def set_state(self, sid, cwd, st, pane=None, tmux=None):
         with self.lock:
             sid = self._pane_owner(sid, pane)   # fold a same-pane subagent into its parent
-            s = self._ensure(sid, cwd, tmux)
+            s = self._ensure(sid, cwd, tmux, pane)
             if pane:
                 s["pane"] = pane
             if tmux:
