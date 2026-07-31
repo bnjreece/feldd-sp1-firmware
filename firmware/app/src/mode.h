@@ -5,8 +5,8 @@
 /* Pure, host-testable device-mode model for feldd phase 2b.
  *
  * Device mode is one global byte (persisted in NVS by the librarian, NOT in any
- * profile). An N-mode enum: MIDI and KEYBOARD ship; values 2,3 are reserved for
- * future "personalities" (the Midipal north star). As of the 0.9.1 LED redesign
+ * profile). An N-mode enum: MIDI, KEYBOARD, and LOOPER ship; value 3 remains
+ * reserved for a future personality. As of the 0.9.1 LED redesign
  * the SIDE (PLAY-LED) row no longer renders a STATIC mode pattern: it permanently
  * shows the LAYER (one LED at gesture_layer()), and mode_led_pattern() is now the
  * source for a TEMPORARY MODE-FLASH that plays for ~1.2 s on a switch and then
@@ -16,7 +16,7 @@
  * genuine dot-dot+T4 combo toggle (mode_toggle + combo_dispatch below), so this
  * unit is the pure mode enum + LED table + the combo engine. */
 
-enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1 };
+enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1, MODE_LOOPER = 2 };
 
 /* The 4 mode-indicator LED bits in a pattern byte (LED1..LED4 left-to-right).
  *
@@ -46,13 +46,13 @@ enum device_mode { MODE_MIDI = 0, MODE_KEYBOARD = 1 };
 /* The SIDE-row (PLAY-LED) on/off pattern for `mode` (an OR of MODE_LED* bits, each
  * mapping to SP1_PLAY_LED1..4 — see the HARDWARE CONTRACT above). Used as the
  * MODE-FLASH pattern source (0.9.1: a temporary flash on a switch, not a resting
- * indicator). MIDI = 1+4, KEYBOARD = 2+3, modes 2/3 reserved (1+2, 3+4);
+ * indicator). MIDI = 1+4, KEYBOARD = 2+3, LOOPER = 1+2, mode 3 reserved (3+4);
  * out-of-range clamps to the MIDI pattern. Raw on/off — no PWM, no pulsing. */
 uint8_t mode_led_pattern(int mode);
 
 /* ---- Feature 4: dot-dot (••) Fn-modifier combo engine ----
  * While •• is held (func_down), a PRESS on the combo ladder buttons carries an
- * action: T4 flips MODE (MIDI<->Keyboard), Vol+/- cycle the profile, FWD/RWD step
+ * action: T4 cycles MODE, Vol+/- cycle the profile, FWD/RWD step
  * the layer. The press is consumed (latched per index) and, whatever the crossing
  * ordering, the matching RELEASE is swallowed IFF that index's latch bit is set -
  * never gated on the instantaneous func_down at the release edge (spec (h)1). Any

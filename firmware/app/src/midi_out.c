@@ -67,7 +67,7 @@ static void trs_uart_isr(const struct device *dev, void *user_data)
 }
 
 /* Enqueue one byte (rt = priority tier) and kick the TX IRQ. Best-effort: a full
- * ring drops the byte, which never happens at MIDI rates with a 128-byte tier. */
+ * ring drops the byte, which is guarded by a 512-byte normal tier. */
 static void trs_enqueue(uint8_t b, bool rt)
 {
     unsigned int key = irq_lock();

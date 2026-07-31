@@ -54,7 +54,7 @@ static const struct proto_store g_store = {
     .bank_profiles = NUM_BANK_PROFILES,   /* WITHIN-bank 0..7 (setactive / •• cycle) */
     .faders     = 4,
     .buttons    = 9,
-    .fw         = "0.28.0-beta",
+    .fw         = "0.29.0-looper",
     .uid        = g_uid,
 #ifdef CONFIG_FELDD_BT_PROVISION
     /* Q5 P0 stage-1 READ-ONLY SS probe. proto_handle's bt_ss_probe verb calls this; it does

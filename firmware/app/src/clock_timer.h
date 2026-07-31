@@ -4,11 +4,12 @@
 #include <stdbool.h>
 
 /*
- * clock_timer.h - the internal 24-PPQN MIDI clock generator (GEN mode).
+ * clock_timer.h - the internal 96-PPQN musical clock + 24-PPQN MIDI clock.
  *
  * A dedicated nRF hardware TIMER (timer2 @ 1 MHz via the Zephyr counter API) fires a
- * periodic top-value callback in its own ISR that emits a MIDI clock byte (0xF8) via
- * midi_out_rt(), which drops it in the TRS priority tier. The hardware timer gives
+ * periodic top-value callback in its own ISR. Every top is one 96-PPQN musical
+ * subtick; every fourth top emits a MIDI clock byte (0xF8) via midi_out_rt().
+ * The hardware timer gives
  * 1 us resolution - vs the ~30 us of a k_timer bound to the 32768 Hz system tick,
  * which jittered the tempo visibly above ~100 BPM. Combined with the priority TX that
  * bounds delay to one in-flight byte (~320 us), tick jitter stays well inside the
@@ -20,6 +21,11 @@ void clock_timer_start(uint16_t bpm);   /* begin ticking at bpm */
 void clock_timer_stop(void);            /* stop ticking */
 void clock_timer_set_bpm(uint16_t bpm); /* change tempo live (no-op if not running) */
 bool clock_timer_running(void);
+
+/* Optional 96-PPQN ISR listener. The callback must be tiny and ISR-safe; the
+ * delay runtime uses it only to timestamp and enqueue a fixed-size tick event. */
+typedef void (*clock_timer_subtick_fn)(void *ctx);
+void clock_timer_set_subtick_listener(clock_timer_subtick_fn fn, void *ctx);
 
 /* GEN-emit gate: while an external master is passed through (THRU), the free-running
  * generator must stay silent so the two clocks never overlap on the wire. The timer

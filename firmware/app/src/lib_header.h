@@ -18,8 +18,8 @@ struct lib_header {
 };
 
 /* Highest mode value this header will persist. Mirrors the reserved-personality
- * ceiling that mode.h's mode_led_pattern() renders (MIDI=0, KEYBOARD=1, 2 and 3
- * reserved). A set_mode above this clamps to 0 (MIDI) rather than persisting
+ * ceiling that mode.h's mode_led_pattern() renders (MIDI=0, KEYBOARD=1,
+ * LOOPER=2, and 3 reserved). A set_mode above this clamps to 0 rather than persisting
  * garbage. Kept as a local literal so this header stays freestanding (host test
  * includes only <stdint.h> via this file) — bump it in lockstep with mode.h if a
  * new personality ships. */
@@ -44,7 +44,7 @@ static inline uint8_t lib_header_mode(const struct lib_header *h)
 static inline void lib_header_set_mode(struct lib_header *h, uint8_t mode)
 {
     /* Store the RAW mode byte, range-checked. Do NOT collapse nonzero to 1 — that
-     * would silently drop a future reserved personality (2/3) down to KEYBOARD.
+     * would silently drop Looper/reserved personalities (2/3) to KEYBOARD.
      * Out-of-range clamps to MIDI (0), matching mode_led_pattern()'s defensive
      * clamp. */
     h->mode = (mode <= LIB_HEADER_MODE_MAX) ? mode : 0u;   /* raw, range-checked */

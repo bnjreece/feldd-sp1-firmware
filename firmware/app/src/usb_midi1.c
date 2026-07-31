@@ -1,5 +1,5 @@
 /*
- * usb_midi1.c — hand-rolled, output-only USB-MIDI 1.0 device_next class.
+ * usb_midi1.c — hand-rolled bidirectional USB-MIDI 1.0 device_next class.
  *
  * feldd exposes CDC-ACM (the JSON console) + this always-on USB-MIDI 1.0
  * function in the sample_usbd composite. (The old USB-MIDI 2.0 / usbd_midi2
@@ -8,23 +8,26 @@
  * dual-MIDIStreaming host-compat risk.) A host binds this and sees a real MIDI
  * port with NO mode toggle. VID/PID are unchanged (0x1915/0x5211).
  *
- * The surface is OUTPUT-ONLY (device->host): buttons/faders -> CC/note. In
+ * The original surface was output-only (device->host): buttons/faders -> CC/note. In
  * USB-MIDI 1.0 terms (section 6.2.2) that is ONE bulk IN endpoint carrying 4-byte
  * event packets sourced from ONE Embedded MIDI OUT jack (jackID 2), itself fed by
  * ONE External MIDI IN jack (jackID 1). A device->host bulk IN endpoint MUST
  * associate an Embedded MIDI OUT jack (matches Linux f_midi + TinyUSB); an earlier
  * revision wired it to an Embedded MIDI IN jack, which is spec-illegal and hard-
  * faulted the TE OP-XY host (v1.1.18) mid-enumeration. We ALSO expose a bulk OUT
- * endpoint (host->device) even though feldd consumes nothing: the OP-XY sends
+ * endpoint (host->device): the OP-XY sends
  * clock/notes/CC to every connected device and its v1.1.18 firmware faults on a
- * device with no input to receive them, so we present a full two-way port and simply
- * discard whatever the host sends. The class is modeled on usbd_midi2.c's device_next shape
+ * device with no input to receive them. Clock feeds the router; validated voice
+ * messages can now feed the delay callback and optional TRS thru. The class is
+ * modeled on usbd_midi2.c's device_next shape
  * (USBD_DEFINE_CLASS, the descriptor blob + fs/hs pointer arrays, the
  * usbd_class_api callbacks, the ring_buf -> usbd_ep_enqueue TX path) but stripped
- * to the static, single-instance, send-only minimum — no devicetree node.
+ * to a static, single-instance minimum — no devicetree node.
  *
- * BUILD-VERIFIED only: like the rest of the USB path, real-host enumeration of
- * the CDC + MIDI 1.0 composite is DEFERRED to the bench (Renode has no USBD model).
+ * HOST-TESTED LOOPER LOGIC ONLY: this looper integration has not been built as
+ * SP-1 firmware, flashed, or exercised on hardware. Real-host enumeration and
+ * the CDC + MIDI 1.0 composite remain DEFERRED to the bench (Renode has no USBD
+ * model).
  */
 #include "usb_midi1.h"
 
@@ -376,6 +379,10 @@ static const struct usb_midi1_config usb_midi1_cfg = {
 };
 
 static struct usb_midi1_data usb_midi1_state;
+static usb_midi1_voice_rx_fn voice_rx;
+static void *voice_rx_ctx;
+static usb_midi1_link_fn link_callback;
+static void *link_callback_ctx;
 
 /* ---- endpoint TX path (modeled on usbd_midi2.c's tx ring + ep_enqueue) ---- */
 
@@ -476,11 +483,16 @@ static int usb_midi1_request(struct usbd_class_data *const class_data,
 				uint8_t rt = usb_midi_extract_rt(&d[i]);
 				if (rt) {
 					clock_router_ext_rt(rt);
-				} else if (thru) {
+				} else {
 					uint8_t vb[3];
 					uint8_t vlen = usb_midi_extract_voice(&d[i], vb);
 					if (vlen) {
-						midi_out_thru(vb, vlen);
+						if (voice_rx) {
+							voice_rx(vb, vlen, voice_rx_ctx);
+						}
+						if (thru) {
+							midi_out_thru(vb, vlen);
+						}
 					}
 				}
 			}
@@ -504,6 +516,9 @@ static void usb_midi1_enable(struct usbd_class_data *const class_data)
 	struct usb_midi1_data *data = usbd_class_get_private(class_data);
 
 	data->enabled = true;
+	if (link_callback) {
+		link_callback(true, link_callback_ctx);
+	}
 	LOG_DBG("USB-MIDI 1.0 enabled");
 
 	/* Open the host->device read sink so the host has somewhere to send. */
@@ -520,6 +535,9 @@ static void usb_midi1_disable(struct usbd_class_data *const class_data)
 	struct usb_midi1_data *data = usbd_class_get_private(class_data);
 
 	data->enabled = false;
+	if (link_callback) {
+		link_callback(false, link_callback_ctx);
+	}
 	LOG_DBG("USB-MIDI 1.0 disabled");
 }
 
@@ -528,6 +546,9 @@ static void usb_midi1_suspended(struct usbd_class_data *const class_data)
 	struct usb_midi1_data *data = usbd_class_get_private(class_data);
 
 	data->enabled = false;
+	if (link_callback) {
+		link_callback(false, link_callback_ctx);
+	}
 	LOG_DBG("USB-MIDI 1.0 suspended");
 }
 
@@ -536,6 +557,9 @@ static void usb_midi1_resumed(struct usbd_class_data *const class_data)
 	struct usb_midi1_data *data = usbd_class_get_private(class_data);
 
 	data->enabled = true;
+	if (link_callback) {
+		link_callback(true, link_callback_ctx);
+	}
 	LOG_DBG("USB-MIDI 1.0 resumed");
 }
 
@@ -600,6 +624,21 @@ void usb_midi1_send(const uint8_t pkt[4])
 
 	ring_buf_put(&data->tx_queue, pkt, 4);
 	k_work_submit(&data->tx_work);
+}
+
+void usb_midi1_set_voice_rx(usb_midi1_voice_rx_fn fn, void *ctx)
+{
+	voice_rx = fn;
+	voice_rx_ctx = ctx;
+}
+
+void usb_midi1_set_link_callback(usb_midi1_link_fn fn, void *ctx)
+{
+	link_callback = fn;
+	link_callback_ctx = ctx;
+	if (fn) {
+		fn(usb_midi1_state.enabled, ctx);
+	}
 }
 
 /* SYS_INIT-time bring-up of the per-instance ring + work item. Runs at the same
