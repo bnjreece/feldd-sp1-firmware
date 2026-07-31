@@ -50,14 +50,14 @@ static void test_normal_fifo(void) {
 static void test_normal_full_no_clobber(void) {
     struct midi_rt_ring r;
     midi_rt_ring_init(&r);
-    // capacity is size-1 = 127 (one slot kept open)
-    for (uint8_t i = 0; i < 127; i++) assert(midi_rt_put(&r, i));
+    // capacity is size-1 = 511 (one slot kept open)
+    for (uint16_t i = 0; i < 511; i++) assert(midi_rt_put(&r, (uint8_t)i));
     assert(!midi_rt_put(&r, 0xEE));   // full: refuse
     assert(!midi_rt_put(&r, 0xEF));   // still full
-    // drain: original 127 bytes intact, in order, no clobber from refused puts
+    // drain: original 511 bytes intact, in order, no clobber from refused puts
     uint8_t b;
-    for (uint8_t i = 0; i < 127; i++) {
-        assert(midi_rt_next(&r, &b) && b == i);
+    for (uint16_t i = 0; i < 511; i++) {
+        assert(midi_rt_next(&r, &b) && b == (uint8_t)i);
     }
     assert(!midi_rt_next(&r, &b));
 }
