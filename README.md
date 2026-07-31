@@ -6,6 +6,15 @@
 
 > The SP-1 is an unreleased TE device. This is unofficial community firmware, not affiliated with or endorsed by Teenage Engineering.
 
+> [!CAUTION]
+> **Experimental MIDI looper branch:** the looper logic has passed laptop-based
+> host tests, but this integration has **not been built as SP-1 firmware, flashed,
+> or tested on hardware**. The USB receive path, timing thread, controls, MIDI
+> output, recovery behavior, and memory use are therefore unverified on-device.
+> Do not present this branch as safe to flash. A firmware build, image inspection,
+> and deliberate hardware review are still pending; flashing experimental
+> firmware can leave the device malfunctioning or require bootloader recovery.
+
 **Latest firmware: v0.27.3 (stable)** (get it at [feldd.com](https://feldd.com)). Beta in soak: **v0.28.0-beta** &mdash; MIDI thru (forward USB-in MIDI out the 3.5mm TRS jack, a USB-to-TRS bridge), on the `?beta=1` link.
 
 **New in 0.27:** Bluetooth. feldd reprograms the SP-1's built-in radio, in place from the browser, into a wireless BLE-MIDI controller and a Bluetooth keyboard, turn it on with •• + PLAY and pair with a phone, laptop, or iPad, no cable. (0.24 added MIDI clock; PLAY is a normal mappable button.)
