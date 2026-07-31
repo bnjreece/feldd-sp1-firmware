@@ -75,6 +75,7 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
 #include "clock_timer.h"
 #include "clock_router.h"
 #include "clockgen.h"
+#include "midi_delay_runtime.h"
 #include "bt_probe.h"   /* Phase-A BT bring-up probe (dev-only, CONFIG_FELDD_BT_PROBE) */
 #include "bt_download.h" /* module-download state machine (dev-only, CONFIG_FELDD_BT_DOWNLOAD) */
 #include "bt_provision.h" /* Q5 SS probe + DS-write provisioning (dev/canary, CONFIG_FELDD_BT_PROVISION) */
@@ -150,7 +151,9 @@ static void clock_set_live_bpm(uint16_t bpm)
  * seen as a profile change and re-applies the clock config. */
 static inline uint8_t clock_active_slot(void)
 {
-    return lib_bank_global(librarian_mode(), librarian_active_index());
+    uint8_t mode = librarian_mode();
+    return lib_bank_global(mode < NUM_MODES ? mode : MODE_MIDI,
+                           librarian_active_index());
 }
 
 /* The active profile's packed clock config (chord_flags[2..3]). The detector watches
@@ -169,6 +172,16 @@ static void clock_apply_active(bool is_boot)
     struct clock_cfg cc;
     profile_clock_cfg(librarian_active(), &cc);
     clock_router_apply_profile(&cc, is_boot, librarian_bpm());
+}
+
+/* V1 Looper is deliberately internal/tap only. Disable the external-clock
+ * router, then run TIMER2 at the persisted global BPM for the 96-PPQN grid. */
+static void looper_clock_start(void)
+{
+    struct clock_cfg disabled = { 0 };
+    clock_router_apply_profile(&disabled, true, librarian_bpm());
+    clock_timer_start(librarian_bpm());
+    clock_timer_set_gen_emit(true);
 }
 /* Forward decl: defined just above route_midi_button, but called from
  * enter_bootloader (which appears earlier). Purges the TX ring + emits Offs. */
@@ -743,6 +756,7 @@ int main(void)
      * its state, so map_* sees a benign empty profile rather than crashing. */
     int lib_rc = librarian_init();
     printk("LIB init rc=%d active=%d\n", lib_rc, librarian_active_index());
+    midi_delay_runtime_init();
 
     /* Feature B (0.23): apply the persisted LED brightness. The charge-standby gate
      * left us at the ambient default, so honor a user "full" preference here. */
@@ -752,7 +766,11 @@ int main(void)
      * loaded. is_boot=true keeps the restored global tempo (a power cycle resumes the
      * last-used tempo, not a snap to the profile default). A clock-less/legacy profile
      * decodes to disabled, so the clock stays silent unless the profile opted in. */
-    clock_apply_active(true);
+    if (librarian_mode() == MODE_LOOPER) {
+        looper_clock_start();
+    } else {
+        clock_apply_active(true);
+    }
 
     /* M6.2: bind the CDC console as the JSON-lines config protocol channel and
      * start its line reader. From here on the control loop calls
@@ -788,6 +806,8 @@ int main(void)
      *   threshold neither dials a profile nor powers off — avoids accidental
      *   switches while the user is on their way to a power-off hold. */
     uint32_t held = 0;
+    int func_was_down = 0;
+    int func_combo_used = 0;
     uint32_t tick = 0;
     /* Honor the •• button only AFTER it has read released (high) at least once
      * since boot. On a low/marginal battery the pin can read low at power-on
@@ -813,6 +833,7 @@ int main(void)
      * so the first loop iteration doesn't spuriously re-arm. */
     uint8_t last_active = clock_active_slot();   /* mode-aware active-profile key (0..15) */
     uint16_t last_clk = clock_active_cfg();      /* active profile's clock bytes (live-edit watch) */
+    uint8_t last_mode = librarian_mode();
     /* PLAY engaged-layer holder (Feature 4). gesture_t now carries ONLY the engaged
      * layer (the peek FSM is retired): the layer is SET by the ••+FWD/RWD combo
      * (gesture_set_layer(gesture_layer_step(...))) and READ by the side-row LED +
@@ -898,6 +919,7 @@ int main(void)
          * 0 on each consumed press (the clean-hold power-off gate, spec (b)4).
          * func_down exposes the modifier level to the evt loop + LED peek below. */
         int func_low = (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0);
+        uint32_t func_hold_before = held;
         if (!func_armed) {
             /* Not armed yet: ignore •• entirely until it reads released once. */
             if (!func_low) {
@@ -935,6 +957,22 @@ int main(void)
             held = 0;
         }
         int func_down = (func_low && func_armed && held < 625);
+        if (!func_was_down && func_down) {
+            func_combo_used = 0;
+        } else if (func_was_down && !func_down) {
+            /* In Looper mode, a short bare Function tap is the tempo pad. Commit
+             * on release so a Function+button combo cannot also alter tempo. */
+            if (librarian_mode() == MODE_LOOPER && !func_combo_used &&
+                func_hold_before > 0 && func_hold_before <= 40) {
+                uint16_t bpm = clock_tap_bpm(&g_clock_tap,
+                                    (uint32_t)(k_uptime_get() * 1000));
+                if (bpm) {
+                    clock_set_live_bpm(bpm);
+                }
+            }
+            func_combo_used = 0;
+        }
+        func_was_down = func_down;
 
         /* If the active profile changed this tick (via the •• tap above OR a
          * host setactive/write/reset serviced by config_cdc_poll()), re-arm
@@ -942,8 +980,23 @@ int main(void)
          * current physical positions on the next read — otherwise the unchanged
          * raw codes would stay suppressed and the new CCs would never reach the
          * host/OP-XY until each fader was physically moved. */
-        uint8_t now_active = clock_active_slot();   /* mode-aware (0..15), catches a MODE flip */
-        if (now_active != last_active) {
+        uint8_t now_mode = librarian_mode();
+        uint8_t now_active = clock_active_slot();
+        if (now_mode != last_mode) {
+            /* Config-protocol mode changes do not pass through the hardware combo
+             * case below, so perform the same Looper clock/stop transition here. */
+            if (last_mode == MODE_LOOPER) {
+                (void)midi_delay_runtime_set_running(false);
+            }
+            if (now_mode == MODE_LOOPER) {
+                looper_clock_start();
+            } else {
+                clock_apply_active(false);
+            }
+            last_mode = now_mode;
+            last_active = now_active;
+            last_clk = clock_active_cfg();
+        } else if (now_active != last_active) {
             chord_flush_all();   /* v7: release held chords on ANY profile change (dial/host/switch) */
             faders_rearm();
             /* New profile = different CCs: drop soft-takeover memory so each bank
@@ -1083,6 +1136,7 @@ int main(void)
                 if (pressed && func_down) {
                     g_combo.latched |= play_bit;
                     held = 0;                              /* reset_hold: void the •• power-off */
+                    func_combo_used = 1;
                     config_cdc_monitor_button(0, pressed);
                     continue;                              /* consumed: no shift-emit */
                 }
@@ -1106,6 +1160,7 @@ int main(void)
             struct combo_decision cd = combo_dispatch(&g_combo, func_down, idx, pressed);
             if (cd.reset_hold) {
                 held = 0;
+                func_combo_used = 1;
             }
             if (cd.consumed) {
                 if (pressed) {
@@ -1113,6 +1168,9 @@ int main(void)
                     case COMBO_MODE_TOGGLE: {
                         uint8_t next = mode_toggle(librarian_mode());
                         if (librarian_set_mode(next) == 0) {
+                            if (mode_now == MODE_LOOPER && next != MODE_LOOPER) {
+                                (void)midi_delay_runtime_set_running(false);
+                            }
                             mode_now = next;
                             /* End the Keyboard session on a flip: drop held keys +
                              * send the all-zero key-up so nothing sticks; release
@@ -1135,9 +1193,14 @@ int main(void)
                             /* Clock: the mode flip moved to the OTHER bank's profile
                              * (its own clock_cfg). Re-apply here + resync last_active to
                              * the new mode-aware slot so the detector does not also fire. */
-                            clock_apply_active(false);
+                            if (next == MODE_LOOPER) {
+                                looper_clock_start();
+                            } else {
+                                clock_apply_active(false);
+                            }
                             last_active = clock_active_slot();
                             last_clk = clock_active_cfg();
+                            last_mode = next;
                         }
                         break;
                     }
@@ -1201,6 +1264,25 @@ int main(void)
                     }
                 }
                 config_cdc_monitor_button(idx, pressed);   /* still report the swallowed edge */
+                continue;
+            }
+
+            /* First hardware proof: Looper mode owns the performance controls.
+             * PLAY starts/stops audible repeats; FWD/RWD select the grid. Other
+             * mapped buttons are intentionally silent until freeze lands. */
+            if (mode_now == MODE_LOOPER) {
+                if (pressed && idx == 0) {
+                    (void)midi_delay_runtime_toggle();
+                } else if (pressed && idx == COMBO_BTN_FWD) {
+                    (void)midi_delay_runtime_step_length(+1);
+                } else if (pressed && idx == COMBO_BTN_RWD) {
+                    (void)midi_delay_runtime_step_length(-1);
+                } else if (pressed && idx == COMBO_BTN_VOLUP) {
+                    (void)midi_delay_runtime_step_style(+1);
+                } else if (pressed && idx == COMBO_BTN_VOLDN) {
+                    (void)midi_delay_runtime_step_style(-1);
+                }
+                config_cdc_monitor_button(idx, pressed);
                 continue;
             }
 
@@ -1355,7 +1437,11 @@ int main(void)
          * the LED); the solid/blink encoding already disambiguates same-column
          * layers (e.g. L2 solid vs L6 blink), so no new cadence is needed.
          * (0.22 Feature 2, spec 2026-07-08-feldd-022.) */
-        unsigned char side_layer = (unsigned char)layer_now;
+        /* Looper reuses the proven 1..4 solid / 5..8 blink vocabulary for its
+         * eight delay lengths. Other modes continue to show the mapping layer. */
+        unsigned char side_layer = mode_now == MODE_LOOPER
+            ? midi_delay_runtime_length_index()
+            : (unsigned char)layer_now;
         if (panic_active) {
             /* Side LEDs are already lit by the panic confirm flash above; do not
              * overdraw them this tick (they stay on for the flash window). */
@@ -1499,7 +1585,20 @@ int main(void)
                      * CC (tempo-only, so the clock byte never fights a CC on the shared
                      * TRS wire). fader_update_rail returns cc>=0 only on a real move, so
                      * a held fader never flickers the tempo. */
-                    if (clock_router_enabled() && (int)clock_router_bpm_fader() == idx) {
+                    if (mode_now == MODE_LOOPER) {
+                        if (idx == 0) {
+                            uint8_t repeats = (uint8_t)(1 + (cc * 7) / 127);
+                            (void)midi_delay_runtime_set_repeats(repeats);
+                        } else if (idx == 1) {
+                            (void)midi_delay_runtime_set_velocity_decay(
+                                (uint8_t)cc);
+                        } else if (idx == 2) {
+                            int8_t pitch = (int8_t)(((cc * 24) + 63) / 127 - 12);
+                            (void)midi_delay_runtime_set_pitch_step(pitch);
+                        }
+                        /* Fader 4 remains reserved for note-pair-safe humanize. */
+                        config_cdc_monitor_fader(idx, cc);
+                    } else if (clock_router_enabled() && (int)clock_router_bpm_fader() == idx) {
                         clock_set_live_bpm(clockgen_fader_bpm((uint8_t)cc, 40, 240));
                         config_cdc_monitor_fader(idx, cc);   /* still report the move */
                     } else {

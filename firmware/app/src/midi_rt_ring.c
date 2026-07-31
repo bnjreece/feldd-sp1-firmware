@@ -2,7 +2,7 @@
 #include "midi_rt_ring.h"
 
 #define RT_MASK 7    // rt[] is 8 slots, power of two
-#define NB_MASK 127  // nb[] is 128 slots, power of two
+#define NB_MASK 511  // nb[] is 512 slots, power of two
 
 void midi_rt_ring_init(struct midi_rt_ring *r)
 {
@@ -23,7 +23,7 @@ bool midi_rt_put_rt(struct midi_rt_ring *r, uint8_t b)
 
 bool midi_rt_put(struct midi_rt_ring *r, uint8_t b)
 {
-    uint8_t nt = (uint8_t)((r->nb_t + 1) & NB_MASK);
+    uint16_t nt = (uint16_t)((r->nb_t + 1u) & NB_MASK);
     if (nt == r->nb_h) {
         return false;               // full: refuse without clobbering
     }
@@ -37,7 +37,7 @@ bool midi_rt_put_msg(struct midi_rt_ring *r, const uint8_t *b, uint8_t len)
     // Free slots in the normal ring = (head - tail - 1) & mask (one slot kept
     // open). All-or-nothing: reject the whole message if it won't fit, so a
     // near-full ring never emits a truncated (running-status-corrupting) message.
-    uint8_t freeslots = (uint8_t)((r->nb_h - r->nb_t - 1) & NB_MASK);
+    uint16_t freeslots = (uint16_t)((r->nb_h - r->nb_t - 1u) & NB_MASK);
     if (freeslots < len) {
         return false;
     }
@@ -56,7 +56,7 @@ bool midi_rt_next(struct midi_rt_ring *r, uint8_t *out)
     }
     if (r->nb_h != r->nb_t) {        // then normal ring
         *out = r->nb[r->nb_h];
-        r->nb_h = (uint8_t)((r->nb_h + 1) & NB_MASK);
+        r->nb_h = (uint16_t)((r->nb_h + 1u) & NB_MASK);
         return true;
     }
     return false;                    // both empty

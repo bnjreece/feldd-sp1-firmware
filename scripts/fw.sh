@@ -9,19 +9,42 @@
 #   ./scripts/fw.sh monitor    open the SP-1 CDC serial port (protocol/monitor stream)
 #   ./scripts/fw.sh clean      remove the build dir
 set -u
-ROOT="$HOME/bnjmn/sp-1"
-WS="$ROOT/.zephyr-ws"
-SDK="$WS/zephyr-sdk-0.17.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WS="${FELDD_ZEPHYR_WS:-$ROOT/.zephyr-ws}"
+SDK="${ZEPHYR_SDK_INSTALL_DIR:-$WS/zephyr-sdk-0.17.0}"
 APP="$ROOT/firmware/app"
-BOARD_ROOT="$ROOT/reference/related-firmware/marisko"
+BOARD_ROOT="${FELDD_BOARD_ROOT:-$(cd "$ROOT/.." && pwd)/marisko}"
 BUILD="$WS/build"
 ELF="$BUILD/app/zephyr/zephyr.elf"        # NCS sysbuild path (note the app/ segment)
 BIN_OUT="$APP/sp1_firmware.bin"
-export PATH="$HOME/Library/Python/3.14/bin:$SDK/arm-zephyr-eabi/bin:$PATH"
+export PATH="$SDK/arm-zephyr-eabi/bin:$PATH"
 OBJCOPY="$SDK/arm-zephyr-eabi/bin/arm-zephyr-eabi-objcopy"
 OBJDUMP="$SDK/arm-zephyr-eabi/bin/arm-zephyr-eabi-objdump"
 
-do_build(){ local p="$1"; cd "$WS" || exit 1
+require_build_env(){
+  [ -d "$WS/.west" ] || {
+    echo "missing west workspace: $WS"
+    echo "set FELDD_ZEPHYR_WS or install the NCS v3.3.0 workspace there"
+    exit 1
+  }
+  [ -x "$OBJCOPY" ] || {
+    echo "missing Zephyr ARM SDK: $SDK"
+    echo "set ZEPHYR_SDK_INSTALL_DIR to a Zephyr SDK with arm-zephyr-eabi"
+    exit 1
+  }
+  [ -d "$BOARD_ROOT/boards/arm/sp1" ] || {
+    echo "missing SP-1 board root: $BOARD_ROOT"
+    echo "set FELDD_BOARD_ROOT to the marisko checkout"
+    exit 1
+  }
+  command -v west >/dev/null 2>&1 || {
+    echo "west is not installed or not on PATH"
+    exit 1
+  }
+}
+
+do_build(){ local p="$1"; require_build_env; cd "$WS" || exit 1
   ZEPHYR_SDK_INSTALL_DIR="$SDK" west build -b sp1 -d build "$APP" $p -- -DBOARD_ROOT="$BOARD_ROOT"; }
 
 do_bin(){
@@ -35,6 +58,7 @@ do_bin(){
 }
 
 do_info(){
+  require_build_env
   [ -f "$ELF" ] || { echo "no ELF - run a build first"; exit 1; }
   echo "== sections (vector table must be VMA 0x00020000) =="
   "$OBJDUMP" -h "$ELF" | grep -iE 'Idx|vector|text|rom_start' | head

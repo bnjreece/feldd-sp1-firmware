@@ -5,7 +5,7 @@ uint8_t mode_led_pattern(int mode)
     switch (mode) {
     case MODE_MIDI:     return MODE_LED1 | MODE_LED4;
     case MODE_KEYBOARD: return MODE_LED2 | MODE_LED3;
-    case 2:             return MODE_LED1 | MODE_LED2;   /* reserved personality */
+    case MODE_LOOPER:   return MODE_LED1 | MODE_LED2;
     case 3:             return MODE_LED3 | MODE_LED4;   /* reserved personality */
     default:            return MODE_LED1 | MODE_LED4;   /* clamp -> MIDI */
     }
@@ -28,7 +28,12 @@ static uint8_t combo_action_for(int idx){
     }
 }
 
-uint8_t mode_toggle(uint8_t cur){ return (cur == MODE_MIDI) ? MODE_KEYBOARD : MODE_MIDI; }
+uint8_t mode_toggle(uint8_t cur)
+{
+    if (cur == MODE_MIDI) return MODE_KEYBOARD;
+    if (cur == MODE_KEYBOARD) return MODE_LOOPER;
+    return MODE_MIDI;
+}
 
 struct combo_decision combo_dispatch(combo_latch_t *l, int func_down, int idx, int pressed){
     struct combo_decision d = { COMBO_NONE, 0, 0 };

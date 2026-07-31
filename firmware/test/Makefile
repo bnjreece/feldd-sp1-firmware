@@ -2,7 +2,7 @@ SRC=../app/src
 CFLAGS=-Wall -Wextra -I$(SRC)
 # NOTE: the Bluetooth radio subsystem (bt_*, wiced_*, cybt_blobs) is not in this
 # open repo (see the root README "What's not here"), so its host tests are omitted too.
-TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override test_nvs_erase test_btn_toggle test_cc_value test_panic test_clockgen test_clock_ctl test_clock_cfg test_usb_rt_parse test_midi_rt_ring
+TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override test_nvs_erase test_btn_toggle test_cc_value test_panic test_clockgen test_clock_ctl test_clock_cfg test_usb_rt_parse test_midi_rt_ring test_midi_delay test_midi_delay_pipeline
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
 test_control_logic: test_control_logic.c $(SRC)/control_logic.c $(SRC)/control_logic.h
@@ -64,5 +64,9 @@ test_usb_rt_parse: test_usb_rt_parse.c $(SRC)/usb_rt_parse.c $(SRC)/usb_rt_parse
 	$(CC) $(CFLAGS) -o $@ test_usb_rt_parse.c $(SRC)/usb_rt_parse.c
 test_midi_rt_ring: test_midi_rt_ring.c $(SRC)/midi_rt_ring.c $(SRC)/midi_rt_ring.h
 	$(CC) $(CFLAGS) -o $@ test_midi_rt_ring.c $(SRC)/midi_rt_ring.c
+test_midi_delay: test_midi_delay.c $(SRC)/midi_delay.c $(SRC)/midi_delay.h $(SRC)/mapping.h
+	$(CC) $(CFLAGS) -o $@ test_midi_delay.c $(SRC)/midi_delay.c
+test_midi_delay_pipeline: test_midi_delay_pipeline.c $(SRC)/midi_delay.c $(SRC)/midi_delay.h $(SRC)/usb_rt_parse.c $(SRC)/usb_rt_parse.h $(SRC)/midi_rt_ring.c $(SRC)/midi_rt_ring.h $(SRC)/clockgen.c $(SRC)/clockgen.h
+	$(CC) $(CFLAGS) -o $@ test_midi_delay_pipeline.c $(SRC)/midi_delay.c $(SRC)/usb_rt_parse.c $(SRC)/midi_rt_ring.c $(SRC)/clockgen.c
 .PHONY: test clean
 clean: ; rm -f $(TESTS)

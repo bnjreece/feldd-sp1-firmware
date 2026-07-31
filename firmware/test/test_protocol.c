@@ -70,7 +70,7 @@ static int mock_reset_all(void)
 static uint8_t mock_get_mode(void) { return g_mode; }
 static int mock_set_mode(uint8_t m)
 {
-    if (m > 1) return 1;
+    if (m > 2) return 1;
     g_mode = m;
     return 0;
 }
@@ -188,6 +188,7 @@ static void t_hello(void)
     snprintf(pv, sizeof pv, "\"pver\":%d", PROFILE_VERSION);
     assert(strstr(out, pv));
     assert(strstr(out, "\"caps\":"));
+    assert(strstr(out, "\"looper\":1"));
     assert(strstr(out, "\"trs\""));
     assert(strstr(out, "\"1.2.3\""));   /* fw echoed */
     assert(strstr(out, "\"uid\":\"0011223344556677\""));  /* hwinfo id echoed */
@@ -773,8 +774,12 @@ static void t_mode_get_set(void)
     n = proto_handle(&s, "{\"t\":\"mode\",\"i\":3}", out, sizeof out, NULL);
     assert(strstr(out, "\"v\":1"));
 
-    /* bad value -> err */
+    /* set Looper mode */
     n = proto_handle(&s, "{\"t\":\"mode\",\"v\":2,\"i\":4}", out, sizeof out, NULL);
+    assert(strstr(out, "\"t\":\"mode_r\"") && strstr(out, "\"v\":2"));
+
+    /* bad value -> err */
+    n = proto_handle(&s, "{\"t\":\"mode\",\"v\":3,\"i\":5}", out, sizeof out, NULL);
     assert(strstr(out, "\"t\":\"err\"") && strstr(out, "BAD_VALUE"));
 }
 

@@ -72,8 +72,8 @@ static void t_init_clears_garbage(void)
     assert(h.version == 3);
 }
 
-/* A reserved personality (2/3) still persists its RAW mode value, NOT collapsed
- * to KEYBOARD. (Forward-compat: mode.h reserves 2/3; LIB_HEADER_MODE_MAX guards.)
+/* Looper/reserved personalities (2/3) persist their RAW mode values, not collapsed
+ * to KEYBOARD. (Forward-compat: mode.h reserves 3; LIB_HEADER_MODE_MAX guards.)
  * NOTE: active[] is only NUM_MODES wide, so reserved modes share no active slot
  * yet — this test only pins the mode byte's raw persistence. */
 static void t_reserved_personality_persists_raw(void)

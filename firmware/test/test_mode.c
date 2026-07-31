@@ -15,8 +15,8 @@ static void t_led_pattern_table(void)
 {
     assert(mode_led_pattern(MODE_MIDI)     == (MODE_LED1 | MODE_LED4));
     assert(mode_led_pattern(MODE_KEYBOARD) == (MODE_LED2 | MODE_LED3));
-    /* reserved modes return a non-crashing pattern (modes 2,3 reserved). */
-    assert(mode_led_pattern(2) == (MODE_LED1 | MODE_LED2));
+    assert(mode_led_pattern(MODE_LOOPER)   == (MODE_LED1 | MODE_LED2));
+    /* reserved mode returns a non-crashing pattern. */
     assert(mode_led_pattern(3) == (MODE_LED3 | MODE_LED4));
     /* out-of-range clamps to MIDI's pattern (defensive). */
     assert(mode_led_pattern(99) == (MODE_LED1 | MODE_LED4));
@@ -41,11 +41,12 @@ static void t_combo_press_maps_and_consumes(void){
        are now the 0.23 utility-row combos, covered by t_combo_utility_row. */
     d = combo_dispatch(&l, 1, 0, 1); assert(d.consumed==0);
 }
-/* mode_toggle flips MIDI<->KEYBOARD; combo T4 fires the toggle exactly once
+/* mode_toggle cycles MIDI->KEYBOARD->LOOPER; combo T4 fires once
  * (press only), so no double-toggle. */
 static void t_mode_toggle_and_single_fire(void){
     assert(mode_toggle(MODE_MIDI)==MODE_KEYBOARD);
-    assert(mode_toggle(MODE_KEYBOARD)==MODE_MIDI);
+    assert(mode_toggle(MODE_KEYBOARD)==MODE_LOOPER);
+    assert(mode_toggle(MODE_LOOPER)==MODE_MIDI);
     combo_latch_t l; combo_latch_init(&l);
     struct combo_decision p = combo_dispatch(&l, 1, COMBO_BTN_T4, 1);   /* press */
     struct combo_decision r = combo_dispatch(&l, 1, COMBO_BTN_T4, 0);   /* release */

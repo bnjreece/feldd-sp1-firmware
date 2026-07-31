@@ -17,7 +17,7 @@
 #include "led_override.h"
 
 /* The caps array advertised in hello_r. Hardcoded for this task per spec. */
-#define CAPS_JSON "[\"trs\",\"usbmidi\",\"shift\",\"led\",\"mon\"]"
+#define CAPS_JSON "[\"trs\",\"usbmidi\",\"shift\",\"led\",\"mon\",\"looper\"]"
 
 /* ------------------------------------------------------------------ */
 /* Minimal flat-JSON field extractor.                                  */
@@ -166,7 +166,7 @@ int proto_handle(const struct proto_store *s, const char *line,
         return emit(out, outcap,
             "{\"t\":\"hello_r\",\"i\":%u,\"ok\":true,\"proto\":%d,\"pver\":%d,"
             "\"fw\":\"%s\",\"profiles\":%u,\"active\":%u,\"faders\":%u,\"buttons\":%u,"
-            "\"caps\":" CAPS_JSON ",\"pbytes\":%d,\"uid\":\"%s\"}",
+            "\"caps\":" CAPS_JSON ",\"looper\":1,\"pbytes\":%d,\"uid\":\"%s\"}",
             id, PROTO_VERSION, PROFILE_VERSION, s->fw,
             (unsigned)s->profiles, (unsigned)s->get_active(),
             (unsigned)s->faders, (unsigned)s->buttons,
@@ -273,12 +273,12 @@ int proto_handle(const struct proto_store *s, const char *line,
     }
 
     /* ---- mode ---- */
-    /* {"t":"mode"} reads, {"t":"mode","v":0|1} sets the global device mode. */
+    /* {"t":"mode"} reads, {"t":"mode","v":0|1|2} sets MIDI/Keyboard/Looper. */
     if (strcmp(verb, "mode") == 0) {
         uint32_t v;
         if (json_uint(line, "v", &v) == 0) {
-            if (v > 1)
-                return emit_err(out, outcap, id, "BAD_VALUE", "mode must be 0 or 1");
+            if (v > 2)
+                return emit_err(out, outcap, id, "BAD_VALUE", "mode must be 0, 1, or 2");
             if (s->set_mode((uint8_t)v) != 0)
                 return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_mode failed");
         }
