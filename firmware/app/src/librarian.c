@@ -32,6 +32,7 @@
 #include <zephyr/sys/util.h>
 #include "librarian.h"
 #include "lib_header.h"
+#include "trigger_out.h"
 #include "clock_cfg.h"   /* seed the per-profile MIDI-clock config in make_default */
 #include "lib_bank.h"
 #include "seed_cadence.h"
@@ -118,6 +119,10 @@ BUILD_ASSERT(DIV_ROUND_UP(NUM_PROFILES, SP1_NVS_ENTRIES_PER_SECTOR)
 #define LIB_ID_HEADER        1u
 #define LIB_ID_SETTINGS      2u   /* future-bookkeeping band 2..0xFF; holds play_mode */
 #define LIB_ID_MIDI_THRU     3u   /* own 1-byte record: MIDI thru USB->TRS, 0 off / 1 on */
+#define LIB_ID_TRS_MODE      4u   /* own 1-byte record: TRS jack role, 0 MIDI / 1 trigger / 2 sync */
+#define LIB_ID_TRS_DIV       5u   /* own 1-byte record: SYNC divider, clock ticks per pulse */
+#define LIB_ID_TRS_WIDTH     6u   /* own 1-byte record: pulse width in 100 us units */
+#define LIB_ID_TRS_CHAN      7u   /* own 1-byte record: trigger match channel, 0 = omni, 1..16 = channel */
 #define LIB_ID_PROFILE_BASE  0x100u
 
 static struct nvs_fs fs;
@@ -131,6 +136,10 @@ static uint8_t        active_mode;               /* current device mode (fast pa
 static uint8_t        play_mode_cache;            /* Feature 4: 0 shift, 1 assignable */
 static uint8_t        brightness_cache;   /* Feature B: 0 dim (default), 1 full; persisted in LIB_ID_SETTINGS[1] */
 static uint8_t        bpm_cache;          /* clock: persisted global GEN tempo 40..240; LIB_ID_SETTINGS[2] */
+static volatile uint8_t trs_mode_cache;   /* TRS jack role; own record LIB_ID_TRS_MODE */
+static volatile uint8_t trs_chan_cache;   /* trigger match channel; own record */
+static volatile uint8_t trs_width_cache;  /* pulse width, 100 us units; own record */
+static volatile uint8_t trs_div_cache;    /* SYNC divider;  own record LIB_ID_TRS_DIV  */
 static volatile uint8_t midi_thru_cache;  /* MIDI thru USB->TRS: 0 off (default)/1 on; own record LIB_ID_MIDI_THRU. volatile: usbd-thread reader (usb_midi1 OUT cb) + config-thread writer, like clock_on */
 #ifdef CONFIG_FELDD_BT_PROVISION
 static uint8_t        provision_done_cache; /* Q5: radio provisioned flag; LIB_ID_SETTINGS[3] (bookkeeping only) */
@@ -646,6 +655,22 @@ int librarian_init(void)
     ssize_t rmt = nvs_read(&fs, LIB_ID_MIDI_THRU, &mt, sizeof(mt));
     midi_thru_cache = lib_midithru_load(rmt == (ssize_t)sizeof(mt), mt);
 
+    /* TRS jack role + SYNC divider: same discipline as MIDI thru — each in its
+     * OWN 1-byte record, absent or out-of-range decoding to the default, so a
+     * device that never touched them is neither short-read nor reseeded. */
+    uint8_t tm = 0;
+    ssize_t rtm = nvs_read(&fs, LIB_ID_TRS_MODE, &tm, sizeof(tm));
+    trs_mode_cache = trs_mode_load(rtm == (ssize_t)sizeof(tm), tm);
+    uint8_t td = 0;
+    ssize_t rtd = nvs_read(&fs, LIB_ID_TRS_DIV, &td, sizeof(td));
+    trs_div_cache = trs_div_load(rtd == (ssize_t)sizeof(td), td);
+    uint8_t tw = 0;
+    ssize_t rtw = nvs_read(&fs, LIB_ID_TRS_WIDTH, &tw, sizeof(tw));
+    trs_width_cache = trs_width_load(rtw == (ssize_t)sizeof(tw), tw);
+    uint8_t tc = 0;
+    ssize_t rtc = nvs_read(&fs, LIB_ID_TRS_CHAN, &tc, sizeof(tc));
+    trs_chan_cache = trs_chan_load(rtc == (ssize_t)sizeof(tc), tc);
+
     /* Load the active profile of the CURRENT mode into the RAM hot copy. The NVS
      * slot it addresses is the GLOBAL index lib_bank_global(mode, within) (0..15).
      * A reserved personality (active_mode >= NUM_MODES) has no bank yet, so it
@@ -911,6 +936,58 @@ int librarian_set_brightness(uint8_t v)
     if (v == brightness_cache) return 0;
     brightness_cache = v;
     return settings_write();
+}
+
+uint8_t librarian_trs_mode(void) { return trs_mode_cache; }
+
+int librarian_set_trs_mode(uint8_t v)
+{
+    if (!fs_ready)            { return -EINVAL; }
+    if (!trs_mode_valid(v))   { return -EINVAL; }
+    if (v == trs_mode_cache)  { return 0; }        /* no-op: don't burn a write */
+    trs_mode_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_MODE, (const void *)&trs_mode_cache,
+                          sizeof(trs_mode_cache));
+    return (w == (ssize_t)sizeof(trs_mode_cache)) ? 0 : -1;
+}
+
+uint8_t librarian_trs_chan(void) { return trs_chan_cache; }
+
+int librarian_set_trs_chan(uint8_t v)
+{
+    if (!fs_ready)            { return -EINVAL; }
+    if (!trs_chan_valid(v))   { return -EINVAL; }
+    if (v == trs_chan_cache)  { return 0; }
+    trs_chan_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_CHAN, (const void *)&trs_chan_cache,
+                          sizeof(trs_chan_cache));
+    return (w == (ssize_t)sizeof(trs_chan_cache)) ? 0 : -1;
+}
+
+uint8_t librarian_trs_width(void) { return trs_width_cache; }
+
+int librarian_set_trs_width(uint8_t v)
+{
+    if (!fs_ready)             { return -EINVAL; }
+    if (!trs_width_valid(v))   { return -EINVAL; }
+    if (v == trs_width_cache)  { return 0; }
+    trs_width_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_WIDTH, (const void *)&trs_width_cache,
+                          sizeof(trs_width_cache));
+    return (w == (ssize_t)sizeof(trs_width_cache)) ? 0 : -1;
+}
+
+uint8_t librarian_trs_div(void) { return trs_div_cache; }
+
+int librarian_set_trs_div(uint8_t v)
+{
+    if (!fs_ready)           { return -EINVAL; }
+    if (!trs_div_valid(v))   { return -EINVAL; }
+    if (v == trs_div_cache)  { return 0; }
+    trs_div_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_DIV, (const void *)&trs_div_cache,
+                          sizeof(trs_div_cache));
+    return (w == (ssize_t)sizeof(trs_div_cache)) ? 0 : -1;
 }
 
 uint8_t librarian_midi_thru(void)

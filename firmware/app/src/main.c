@@ -74,6 +74,7 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
 #include "led.h"
 #include "clock_timer.h"
 #include "clock_router.h"
+#include "trigger_out.h"
 #include "clockgen.h"
 #include "bt_probe.h"   /* Phase-A BT bring-up probe (dev-only, CONFIG_FELDD_BT_PROBE) */
 #include "bt_download.h" /* module-download state machine (dev-only, CONFIG_FELDD_BT_DOWNLOAD) */
@@ -726,6 +727,7 @@ int main(void)
     chord_tx_init(&g_chord_tx);  /* v7: empty the chord MIDI-out deferral ring at boot */
     midi_out_init();        /* bring up uart1 TRS MIDI out + enable the ring PNP */
     clock_timer_init();     /* MIDI clock generator (GEN mode) */
+    trigger_out_init();   /* pulse timer up; jack stays MIDI until restored below */
     clock_router_init();    /* GEN/THRU selector: USB-in clock -> THRU, else GEN */
     usbdev_start();         /* enumerate the USB composite: CDC console + USB-MIDI */
 
@@ -743,6 +745,15 @@ int main(void)
      * its state, so map_* sees a benign empty profile rather than crashing. */
     int lib_rc = librarian_init();
     printk("LIB init rc=%d active=%d\n", lib_rc, librarian_active_index());
+
+    /* Restore the persisted TRS jack role. AFTER librarian_init (the value lives
+     * in NVS) and after midi_out_init (the UART has claimed the pin, so taking it
+     * back is a deliberate handoff, not a race). Defaults to MIDI, so a device
+     * that never set it boots exactly as before. */
+    (void)trigger_out_set_channel(librarian_trs_chan());
+    (void)trigger_out_set_width_us((uint32_t)librarian_trs_width() * TRS_WIDTH_UNIT_US);
+    (void)trigger_out_set_divider(librarian_trs_div());
+    (void)trigger_out_set_mode((enum trs_mode)librarian_trs_mode());
 
     /* Feature B (0.23): apply the persisted LED brightness. The charge-standby gate
      * left us at the ambient default, so honor a user "full" preference here. */

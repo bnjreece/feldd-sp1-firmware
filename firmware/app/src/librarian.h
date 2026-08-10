@@ -35,6 +35,14 @@ uint8_t librarian_brightness(void);        /* Feature B: 0 dim, 1 full */
 int     librarian_set_brightness(uint8_t v);
 uint8_t librarian_midi_thru(void);         /* MIDI thru USB->TRS: 0 off (default), 1 on; own record LIB_ID_MIDI_THRU */
 int     librarian_set_midi_thru(uint8_t v);
+uint8_t librarian_trs_mode(void);          /* TRS jack role: 0 MIDI (default), 1 trigger, 2 sync; own record */
+int     librarian_set_trs_mode(uint8_t v);
+uint8_t librarian_trs_chan(void);          /* trigger match channel; 0 = omni (default), 1..16 = channel */
+int     librarian_set_trs_chan(uint8_t v);
+uint8_t librarian_trs_width(void);         /* pulse width in 100 us units, 1..255 (default 100 = 10 ms) */
+int     librarian_set_trs_width(uint8_t v);
+uint8_t librarian_trs_div(void);           /* SYNC divider: clock ticks per pulse, 1..24 (default 12 = 2 PPQN) */
+int     librarian_set_trs_div(uint8_t v);
 uint8_t librarian_bpm(void);               /* clock: persisted global GEN tempo 40..240 */
 int     librarian_set_bpm(uint8_t v);      /* validate/cache/persist; no-op if unchanged */
 
