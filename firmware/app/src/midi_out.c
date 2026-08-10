@@ -22,6 +22,7 @@
  * added separately once usb_midi1_send is confirmed ISR-safe.
  */
 #include "midi_out.h"
+#include "trigger_out.h"
 #include <errno.h>
 
 #ifdef CONFIG_FELDD_BT_LINK
@@ -70,6 +71,9 @@ static void trs_uart_isr(const struct device *dev, void *user_data)
  * ring drops the byte, which never happens at MIDI rates with a 128-byte tier. */
 static void trs_enqueue(uint8_t b, bool rt)
 {
+    if (trigger_out_owns_trs()) {
+        return;   /* jack is emitting analog pulses; USB + BLE sinks unaffected */
+    }
     unsigned int key = irq_lock();
     if (rt) {
         (void)midi_rt_put_rt(&trs_ring, b);
@@ -87,6 +91,9 @@ static void trs_enqueue(uint8_t b, bool rt)
  * rather than emitting a truncated (running-status-corrupting) one. */
 static void trs_enqueue_msg(const uint8_t *b, uint8_t len)
 {
+    if (trigger_out_owns_trs()) {
+        return;   /* as trs_enqueue: the UART does not own the pin right now */
+    }
     unsigned int key = irq_lock();
     (void)midi_rt_put_msg(&trs_ring, b, len);
     irq_unlock(key);
@@ -175,6 +182,24 @@ void midi_out_thru(const uint8_t *bytes, uint8_t len) { (void)bytes; (void)len; 
 void midi_out_send(const struct midi_msg *m, void *ctx)
 {
     ARG_UNUSED(ctx);
+    /* LOCAL note source for the analog trigger. midi_out_send is the single
+     * fan-out for everything this device generates — the mapping engine and the
+     * chord engine both land here — so one call makes an SP-1 BUTTON fire the
+     * trigger, not just a note arriving from a host.
+     *
+     * That is what makes the feature work standalone: map a button to the trigger
+     * note and the SP-1 advances a sequencer with nothing else attached, which is
+     * the whole point when there is no computer in the bag.
+     *
+     * No double-fire risk: host->device notes reach trigger_out_on_voice from the
+     * USB OUT callback instead, and a note is never both. The button still emits
+     * its note over USB/BLE, so a DAW records the trigger lane alongside
+     * everything else. A chord containing the trigger note fires ONCE — the
+     * coalescing CAS in trigger_out_fire collapses simultaneous notes. */
+    if (trigger_out_owns_trs() && m->len >= 3u) {
+        const uint8_t vb[3] = { m->status, m->d1, m->d2 };
+        trigger_out_on_voice(vb, 3u);
+    }
     trs_send(m);
     midi1_send(m);
 #ifdef CONFIG_FELDD_BT_LINK

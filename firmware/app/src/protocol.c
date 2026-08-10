@@ -16,8 +16,12 @@
 #include "protocol.h"
 #include "led_override.h"
 
-/* The caps array advertised in hello_r. Hardcoded for this task per spec. */
-#define CAPS_JSON "[\"trs\",\"usbmidi\",\"shift\",\"led\",\"mon\"]"
+/* The caps array advertised in hello_r. Hardcoded for this task per spec.
+ * "trsout" says the TRS jack's ROLE is selectable (trsmode/trsdiv verbs), as
+ * distinct from "trs", which only says a TRS MIDI jack exists. A configurator
+ * that does not know the string ignores it, so advertising it is safe for
+ * existing clients and is how a future one discovers the feature. */
+#define CAPS_JSON "[\"trs\",\"trsout\",\"usbmidi\",\"shift\",\"led\",\"mon\"]"
 
 /* ------------------------------------------------------------------ */
 /* Minimal flat-JSON field extractor.                                  */
@@ -316,6 +320,133 @@ int proto_handle(const struct proto_store *s, const char *line,
         return emit(out, outcap,
             "{\"t\":\"midithru_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
             id, (unsigned)s->get_midithru());
+    }
+
+    /* ---- trsmode ---- */
+    /* {"t":"trsmode"} reads; {"t":"trsmode","v":0|1|2} sets what the 3.5 mm TRS
+     * jack does: 0 MIDI out (default, unchanged behaviour), 1 analog trigger on a
+     * matching note, 2 analog sync on a division of the MIDI clock. The jack has
+     * one conductor, so these are exclusive roles, not combinable options. */
+    if (strcmp(verb, "trsmode") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v > 2)
+                return emit_err(out, outcap, id, "BAD_VALUE", "trsmode must be 0, 1 or 2");
+            if (s->set_trsmode((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_trsmode failed");
+        }
+        /* `hw` reports which pulse path came up: 1 = TIMER+PPI (edges in
+         * hardware), 0 = k_timer fallback. Read-only diagnostic — a silent
+         * downgrade would otherwise surface only as sloppy timing. */
+        return emit(out, outcap,
+            "{\"t\":\"trsmode_r\",\"i\":%u,\"ok\":true,\"v\":%u,\"hw\":%u,\"live\":%u,"
+            "\"fires\":%u,\"busy\":%u,\"pin\":%u,\"fault\":%u}",
+            id, (unsigned)s->get_trsmode(), (unsigned)s->get_trshw(),
+            (unsigned)s->get_trslive(), (unsigned)s->get_trsfires(),
+            (unsigned)s->get_trsbusy(), (unsigned)s->get_trspin(),
+            (unsigned)s->get_trsfault());
+    }
+
+    /* ---- trschan ---- */
+    /* {"t":"trschan"} reads; {"t":"trschan","v":0} is OMNI, {"v":1..16} selects
+     * MIDI channel 1..16 as a musician reads it. Omni is the default so the
+     * feature works immediately, but only while nothing else shares the bus. */
+    if (strcmp(verb, "trschan") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v > 16)
+                return emit_err(out, outcap, id, "BAD_VALUE", "trschan must be 0 for omni, or 1..16 for a channel");
+            if (s->set_trschan((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_trschan failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"trschan_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_trschan());
+    }
+
+    /* ---- trswidth ---- */
+    /* {"t":"trswidth"} reads; {"t":"trswidth","v":1..255} sets the pulse width in
+     * units of 100 us, so 1 = 0.1 ms and 100 = 10 ms. Live-settable precisely so
+     * it can be swept against real gear: the right width is a property of the
+     * receiving input, and inputs that trigger on both edges of a long pulse want
+     * a short one. */
+    if (strcmp(verb, "trswidth") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v < 1 || v > 255)
+                return emit_err(out, outcap, id, "BAD_VALUE", "trswidth must be 1..255 (x100us)");
+            if (s->set_trswidth((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_trswidth failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"trswidth_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_trswidth());
+    }
+
+    /* ---- trsring ---- */
+    /* {"t":"trsring","v":0|1} controls the ring current source while the jack is
+     * in a pulse mode. Type A MIDI puts the source on the RING and switches it
+     * with the tip, so ON is very likely required for the tip to drive anything.
+     * Defaults ON. */
+    if (strcmp(verb, "trsring") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v > 1)
+                return emit_err(out, outcap, id, "BAD_VALUE", "trsring must be 0 or 1");
+            if (s->set_trsring((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "set_trsring failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"trsring_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_trsring());
+    }
+
+    /* ---- trsinv ---- */
+    /* {"t":"trsinv","v":0|1} sets pulse polarity: 0 = idle low, pulse high
+     * (ordinary V-trig); 1 = idle high, pulse low. Worth trying when a V-trig
+     * pulse the firmware believes it is emitting does not move the receiving
+     * device — some inputs want a pull-down, and a tip wired to SINK cannot
+     * source one. */
+    if (strcmp(verb, "trsinv") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v > 1)
+                return emit_err(out, outcap, id, "BAD_VALUE", "trsinv must be 0 or 1");
+            if (s->set_trsinv((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "set_trsinv failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"trsinv_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_trsinv());
+    }
+
+    /* ---- trspulse ---- */
+    /* {"t":"trspulse"} fires ONE pulse directly, bypassing note matching and the
+     * clock divider. Isolates the output stage from everything that feeds it:
+     * if the jack is dead but `fires` climbs, the routing is fine and the fault
+     * is electrical. Works in either pulse mode; a no-op in MIDI mode. */
+    if (strcmp(verb, "trspulse") == 0) {
+        s->trspulse();
+        return emit(out, outcap,
+            "{\"t\":\"trspulse_r\",\"i\":%u,\"ok\":true,\"fires\":%u,\"busy\":%u}",
+            id, (unsigned)s->get_trsfires(), (unsigned)s->get_trsbusy());
+    }
+
+    /* ---- trsdiv ---- */
+    /* {"t":"trsdiv"} reads; {"t":"trsdiv","v":1..24} sets the SYNC-mode rate in
+     * MIDI clock ticks per pulse. Clock is 24 PPQN, so 12 = 2 PPQN (the Pocket
+     * Operator / Volca rate, default), 6 = one pulse per 16th, 24 = per quarter. */
+    if (strcmp(verb, "trsdiv") == 0) {
+        uint32_t v;
+        if (json_uint(line, "v", &v) == 0) {
+            if (v < 1 || v > 24)
+                return emit_err(out, outcap, id, "BAD_VALUE", "trsdiv must be 1..24");
+            if (s->set_trsdiv((uint8_t)v) != 0)
+                return emit_err(out, outcap, id, "NVS_FAIL", "nvs set_trsdiv failed");
+        }
+        return emit(out, outcap,
+            "{\"t\":\"trsdiv_r\",\"i\":%u,\"ok\":true,\"v\":%u}",
+            id, (unsigned)s->get_trsdiv());
     }
 
     /* ---- list ---- */
