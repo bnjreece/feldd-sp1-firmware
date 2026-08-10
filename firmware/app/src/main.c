@@ -75,9 +75,15 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
 #include "clock_timer.h"
 #include "clock_router.h"
 #include "clockgen.h"
+#ifdef CONFIG_FELDD_BT_PROBE
 #include "bt_probe.h"   /* Phase-A BT bring-up probe (dev-only, CONFIG_FELDD_BT_PROBE) */
+#endif
+#ifdef CONFIG_FELDD_BT_DOWNLOAD
 #include "bt_download.h" /* module-download state machine (dev-only, CONFIG_FELDD_BT_DOWNLOAD) */
+#endif
+#ifdef CONFIG_FELDD_BT_PROVISION
 #include "bt_provision.h" /* Q5 SS probe + DS-write provisioning (dev/canary, CONFIG_FELDD_BT_PROVISION) */
+#endif
 
 /* Feature 4: PLAY is the shift/assignable control and •• is the Fn-modifier; the
  * behavior is now a RUNTIME branch on play_mode (librarian_play_mode()), not a
