@@ -177,6 +177,12 @@ int profile_validate(const struct profile *p);                        /* 0 ok, -
 struct clock_cfg;   /* fwd decl (clock_cfg.h) */
 void profile_clock_cfg(const struct profile *p, struct clock_cfg *out);
 void profile_set_clock_cfg(struct profile *p, const struct clock_cfg *cfg);
+/* Complete the fields a shorter (older-version) blob did not carry, applying
+ * that version's semantics. Exposed (was static) so the NVS migration path in
+ * librarian.c fills a widened profile the SAME way the wire path does — "what a
+ * missing field meant under the version that omitted it" must have one answer,
+ * not one per caller. `wire` is the source length, i.e. which version wrote it. */
+void profile_fill_missing(struct profile *out, int wire);
 int profile_to_b64(const struct profile *p, char *out, int outcap);   /* returns encoded len, or -1 */
 int profile_from_b64(const char *b64, int len, struct profile *out);  /* 0 ok, -1 bad */
 /* Wire byte count for a given profile version (the clean prefix length). v1..v6

@@ -32,6 +32,7 @@
 #include <zephyr/sys/util.h>
 #include "librarian.h"
 #include "lib_header.h"
+#include "profile_migrate.h"
 #include "clock_cfg.h"   /* seed the per-profile MIDI-clock config in make_default */
 #include "lib_bank.h"
 #include "seed_cadence.h"
@@ -572,6 +573,66 @@ static int seed_defaults(void)
     return seed_cadence_run(NUM_PROFILES, seed_feed_cb, seed_write_cb, NULL);
 }
 
+/* ---- migration -----------------------------------------------------------
+ *
+ * A PROFILE_VERSION bump used to mean seed_defaults(): every one of the user's
+ * profiles replaced with factory defaults. The wire path has upgraded older
+ * blobs since v2 (profile_from_b64 -> profile_fill_missing); this gives the NVS
+ * store the same treatment.
+ *
+ * Reuses seed_cadence_run() rather than looping here, for two reasons. The
+ * watchdog: this rewrites every slot synchronously at boot, before the control
+ * loop starts feeding, and forces an NVS garbage-collection erase on top — the
+ * exact combination that has produced a watchdog boot loop in this firmware
+ * before, and the cadence is CI-covered against the SAME function. And the
+ * ordering: the cadence writes the header LAST, so an interrupted migration
+ * leaves the old header in place and simply runs again on the next boot.
+ *
+ * ctx carries the EXISTING header. It must not be rebuilt with lib_header_init(),
+ * which zeroes mode and every bank's active index — a migrated device would come
+ * back in MIDI mode on slot 0, having silently lost where the user was. Only the
+ * version byte changes. */
+static int migrate_write_cb(void *ctx, int id)
+{
+    struct lib_header *hdr = (struct lib_header *)ctx;
+
+    if (id == SEED_CADENCE_HEADER_ID) {
+        hdr->version = PROFILE_VERSION;   /* keep mode + every bank's active */
+        return (int)nvs_write(&fs, LIB_ID_HEADER, hdr, sizeof(*hdr));
+    }
+
+    /* nvs_read() returns the STORED record's length, not the number of bytes it
+     * copied, which is exactly the discriminator needed here: it says which
+     * version wrote this slot without keeping any side bookkeeping. */
+    uint8_t  raw[sizeof(struct profile)];
+    uint16_t rec = (uint16_t)(LIB_ID_PROFILE_BASE + id);
+    ssize_t  got = nvs_read(&fs, rec, raw, sizeof(raw));
+
+    /* Already current: leave it alone. NVS garbage-collects partway through a
+     * 16-slot rewrite, so a power loss leaves a MIXED store and this runs again
+     * on the next boot — it must be safe to re-enter, and rewriting a slot that
+     * is already correct would burn flash for nothing. */
+    if (got == (ssize_t)sizeof(struct profile)) {
+        return 0;
+    }
+
+    struct profile p;
+    if (got < 0
+        || profile_migrate(raw, (size_t)got, &p, profile_fill_missing) != 0) {
+        /* Absent, or a length no version appended to (see profile_migrate_src_ok).
+         * Nothing here can be recovered, so this ONE slot falls back to defaults
+         * rather than the whole store being wiped. */
+        make_default(id, &p);
+    }
+    return (int)nvs_write(&fs, rec, &p, sizeof(p));
+}
+
+/* Widen every stored slot into the current struct, then stamp the header. */
+static int migrate_all(struct lib_header *hdr)
+{
+    return seed_cadence_run(NUM_PROFILES, seed_feed_cb, migrate_write_cb, hdr);
+}
+
 int librarian_init(void)
 {
     int rc = fs_bring_up();
@@ -594,7 +655,19 @@ int librarian_init(void)
         nvs_read(&fs, LIB_ID_PROFILE_BASE + (NUM_PROFILES - 1u),
                  &probe, sizeof(probe)) < 0;
 
-    if (r != (ssize_t)sizeof(hdr) || hdr.version != PROFILE_VERSION || top_slot_missing) {
+    /* Split what used to be one condition. A store that is unreadable or from a
+     * smaller layout has nothing to preserve and must be reseeded. A store that
+     * is merely from an older VERSION is a different case: its profiles are the
+     * user's, and a version bump is not a reason to destroy them. */
+    if (r == (ssize_t)sizeof(hdr) && !top_slot_missing
+        && hdr.version != PROFILE_VERSION) {
+        rc = migrate_all(&hdr);
+        if (rc) {
+            return rc;
+        }
+        /* hdr now carries PROFILE_VERSION with mode + actives preserved, so the
+         * load below picks up where the user left off. */
+    } else if (r != (ssize_t)sizeof(hdr) || hdr.version != PROFILE_VERSION || top_slot_missing) {
         /* First boot (or incompatible/short header / pre-bank-split store): lay
          * down defaults. On a
          * genuine first boot nvs_read returns -ENOENT and leaves `hdr` fully

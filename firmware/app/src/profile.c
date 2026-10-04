@@ -9,6 +9,8 @@
 #include <string.h>
 #include <stddef.h>
 #include "profile.h"
+#include "profile_migrate.h"
+#include "config_cdc.h"
 #include "clock_cfg.h"   /* per-profile MIDI-clock config packed into chord_flags[2..3] */
 
 /* Compile-time guard: the version wire boundaries (in profile_wire_len) MUST equal
@@ -25,6 +27,20 @@ PROFILE_STATIC_ASSERT(offsetof(struct profile, chord6)           == 570,  v9_cho
 PROFILE_STATIC_ASSERT(offsetof(struct profile, fader_role)       == 1002, v9_fader_role_off);
 PROFILE_STATIC_ASSERT(offsetof(struct profile, chord_flags)      == 1034, v9_chord_flags_off);
 PROFILE_STATIC_ASSERT(sizeof(struct profile)                     == 1038, v9_sizeof);
+
+/* Two limits constrain how large a profile may grow, and only ONE of them was
+ * guarded. librarian.c asserts the NVS sector packing (~1352 B). The USB-CDC
+ * frame buffers cap out lower — around 1107 B — so they bite FIRST, and nothing
+ * checked them. An oversized frame is not an error: config_cdc.h records that it
+ * is silently dropped and the parser resyncs, so a bench flash appears to succeed
+ * while storing nothing. That is a miserable bug to chase; catch it at build time.
+ *
+ * Wrapper sizes are from config_cdc.h's own arithmetic (45 chars for a `write`
+ * request, 56 for a `read_r` reply, plus the NUL). */
+#define PROFILE_B64_LEN (((int)sizeof(struct profile) / 3) * 4)
+PROFILE_STATIC_ASSERT(sizeof(struct profile) % 3 == 0,                     b64_no_padding);
+PROFILE_STATIC_ASSERT(PROFILE_B64_LEN + 45 + 1 <= CONFIG_CDC_LINE_CAP,     b64_fits_line_cap);
+PROFILE_STATIC_ASSERT(PROFILE_B64_LEN + 56 + 1 <= CONFIG_CDC_RESP_CAP,     b64_fits_resp_cap);
 
 /* ---- base64 alphabet ---- */
 static const char b64_enc_tbl[] =
@@ -123,7 +139,7 @@ int profile_to_b64(const struct profile *p, char *out, int outcap)
  * Fields not addressed here are already zeroed by the caller (keyboard keymaps,
  * etc. — 0 == unbound, matching how each version's own firmware read them).
  * `wire` is the decoded prefix length (so we know which version produced it). */
-static void profile_fill_missing(struct profile *out, int wire)
+void profile_fill_missing(struct profile *out, int wire)
 {
     (void)out; (void)wire;   /* strict v9: a full 1038-byte blob carries every field */
 }
@@ -157,7 +173,14 @@ int profile_from_b64(const char *b64, int len, struct profile *out)
      * image. Legacy lengths (180/294/528) are dropped here so a stored v8 blob is
      * rejected and the librarian reseeds. The buf[0] version cross-check below still
      * holds: profile_wire_len(9) == sizeof == src_len. */
-    if (src_len != (int)sizeof(struct profile))
+    /* Accept the current size, or a length profile_migrate_src_ok() vouches for
+     * as a TRUE PREFIX of the current struct. The accept list is empty at v9 (v9
+     * resized interior arrays rather than appending, so nothing earlier is a
+     * prefix of it), which makes this behave exactly as the previous strict check
+     * did — the policy simply now lives in ONE place instead of being spelled out
+     * here as a hardcoded comparison. */
+    if (src_len != (int)sizeof(struct profile)
+        && !profile_migrate_src_ok((size_t)src_len))
         return -1;
 
     /* All valid wire lengths are multiples of 3 -> zero padding chars. */
@@ -200,12 +223,14 @@ int profile_from_b64(const char *b64, int len, struct profile *out)
     if (profile_wire_len(buf[0]) != src_len)
         return -1;
 
-    /* Zero the full struct first so any bytes the prefix did not carry start at 0,
-     * then copy the decoded prefix and complete the missing fields. */
-    memset(out, 0, sizeof(struct profile));
-    memcpy(out, buf, (size_t)src_len);
-    profile_fill_missing(out, src_len);
-    return 0;
+    /* Widen through the shared path: copy the prefix, zero the remainder, let
+     * profile_fill_missing() apply the source version's semantics, and STAMP THE
+     * VERSION last. The stamp is what the open-coded version of this lacked:
+     * profile_validate() rejects any profile whose version byte is not
+     * PROFILE_VERSION, and protocol.c validates immediately after decoding, so an
+     * accepted older blob would have been decoded correctly and then thrown away
+     * as BAD_VERSION. */
+    return profile_migrate(buf, (size_t)src_len, out, profile_fill_missing);
 }
 
 /* ---- profile_validate ----
