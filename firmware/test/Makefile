@@ -2,17 +2,17 @@ SRC=../app/src
 CFLAGS=-Wall -Wextra -I$(SRC)
 # NOTE: the Bluetooth radio subsystem (bt_*, wiced_*, cybt_blobs) is not in this
 # open repo (see the root README "What's not here"), so its host tests are omitted too.
-TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override test_nvs_erase test_btn_toggle test_cc_value test_panic test_clockgen test_clock_ctl test_clock_cfg test_usb_rt_parse test_midi_rt_ring
+TESTS=test_control_logic test_mapping test_profile test_protocol test_buttons test_config_cdc test_gesture test_midi1_codec test_transport test_mode test_lib_header test_lib_bank test_dial test_led_dial test_side_led test_layer_bank test_kbd_hid test_chord_engine test_chord6 test_led_override test_nvs_erase test_btn_toggle test_cc_value test_panic test_clockgen test_clock_ctl test_clock_cfg test_usb_rt_parse test_midi_rt_ring test_trigger_match test_profile_migrate test_held_notes test_midi_thru_dest
 test: $(TESTS)
 	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
 test_control_logic: test_control_logic.c $(SRC)/control_logic.c $(SRC)/control_logic.h
 	$(CC) $(CFLAGS) -o $@ test_control_logic.c $(SRC)/control_logic.c
 test_mapping: test_mapping.c $(SRC)/mapping.c $(SRC)/mapping.h $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/cc_value.c $(SRC)/cc_value.h
 	$(CC) $(CFLAGS) -o $@ test_mapping.c $(SRC)/mapping.c $(SRC)/chord6.c $(SRC)/cc_value.c
-test_profile: test_profile.c $(SRC)/profile.c $(SRC)/profile.h $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/clock_cfg.c $(SRC)/clock_cfg.h
+test_profile: test_profile.c $(SRC)/profile.c $(SRC)/profile.h $(SRC)/profile_migrate.h $(SRC)/trigger_out.h $(SRC)/chord6.c $(SRC)/chord6.h $(SRC)/clock_cfg.c $(SRC)/clock_cfg.h
 	$(CC) $(CFLAGS) -o $@ test_profile.c $(SRC)/profile.c $(SRC)/chord6.c $(SRC)/clock_cfg.c
 test_profile_h_dep: $(SRC)/profile.h
-test_protocol: test_protocol.c $(SRC)/protocol.c $(SRC)/protocol.h $(SRC)/profile.h $(SRC)/led_override.c $(SRC)/led_override.h $(SRC)/clock_cfg.c $(SRC)/clock_cfg.h
+test_protocol: test_protocol.c $(SRC)/protocol.c $(SRC)/protocol.h $(SRC)/profile.h $(SRC)/profile_migrate.h $(SRC)/trigger_out.h $(SRC)/led_override.c $(SRC)/led_override.h $(SRC)/clock_cfg.c $(SRC)/clock_cfg.h
 	$(CC) $(CFLAGS) -o $@ test_protocol.c $(SRC)/protocol.c $(SRC)/profile.c $(SRC)/led_override.c $(SRC)/clock_cfg.c
 test_buttons: test_buttons.c $(SRC)/buttons.c $(SRC)/buttons.h
 	$(CC) $(CFLAGS) -DBUTTONS_HOST_TEST -o $@ test_buttons.c $(SRC)/buttons.c
@@ -34,6 +34,12 @@ test_lib_header: test_lib_header.c $(SRC)/lib_header.h $(SRC)/lib_bank.h $(SRC)/
 	$(CC) $(CFLAGS) -o $@ test_lib_header.c
 test_lib_bank: test_lib_bank.c $(SRC)/lib_bank.h $(SRC)/profile.h
 	$(CC) $(CFLAGS) -o $@ test_lib_bank.c
+test_held_notes: test_held_notes.c $(SRC)/held_notes.h
+	$(CC) $(CFLAGS) -o $@ test_held_notes.c
+test_midi_thru_dest: test_midi_thru_dest.c $(SRC)/midi_thru_dest.h
+	$(CC) $(CFLAGS) -o $@ test_midi_thru_dest.c
+test_profile_migrate: test_profile_migrate.c $(SRC)/profile_migrate.h $(SRC)/profile.h
+	$(CC) $(CFLAGS) -o $@ test_profile_migrate.c
 test_midi1_codec: test_midi1_codec.c $(SRC)/midi1_codec.c $(SRC)/midi1_codec.h
 	$(CC) $(CFLAGS) -o $@ test_midi1_codec.c $(SRC)/midi1_codec.c
 test_transport: test_transport.c $(SRC)/transport.c $(SRC)/transport.h
@@ -66,3 +72,5 @@ test_midi_rt_ring: test_midi_rt_ring.c $(SRC)/midi_rt_ring.c $(SRC)/midi_rt_ring
 	$(CC) $(CFLAGS) -o $@ test_midi_rt_ring.c $(SRC)/midi_rt_ring.c
 .PHONY: test clean
 clean: ; rm -f $(TESTS)
+test_trigger_match: test_trigger_match.c $(SRC)/trigger_match.c $(SRC)/trigger_match.h
+	$(CC) $(CFLAGS) -o $@ test_trigger_match.c $(SRC)/trigger_match.c

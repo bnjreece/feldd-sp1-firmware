@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "protocol.h"
+#include "trigger_out.h"
 
 /* ---------- mock store ---------- */
 /* §0 mode-scoped banks: 16 GLOBAL slots (read/write/reset axis), 8 per bank.
@@ -75,12 +76,72 @@ static int mock_set_mode(uint8_t m)
     return 0;
 }
 static uint8_t g_playrole;
+static uint8_t g_blethru;
+static uint8_t g_midithru;
+static int     g_fail_blethru;
+static uint8_t mock_get_blethru(void){ return g_blethru; }
+static int mock_set_blethru(uint8_t v)
+{
+    if (g_fail_blethru) return g_fail_blethru;
+    if (v > 1) return -1;
+    g_blethru = v; return 0;
+}
+static uint8_t mock_get_midithru(void){ return g_midithru; }
+static int mock_set_midithru(uint8_t v){ if (v > 1) return -1; g_midithru = v; return 0; }
 static uint8_t mock_get_playrole(void){ return g_playrole; }
 static int mock_set_playrole(uint8_t v){ if (v > 1) return -1; g_playrole = v; return 0; }
+
+/* TRS jack role + sync divider (own NVS records on the device; plain RAM here).
+ * g_fail_trs injects an NVS failure so the NVS_FAIL path is exercised too. */
+static uint8_t g_trsmode;
+static uint8_t g_trsdiv = 12;
+static int     g_fail_trs;
+static uint8_t mock_get_trsmode(void){ return g_trsmode; }
+static int mock_set_trsmode(uint8_t v)
+{
+    if (g_fail_trs) return g_fail_trs;
+    if (v > 2) return -1;
+    g_trsmode = v;
+    return 0;
+}
+static uint8_t g_trshw = 1;
+static uint8_t mock_get_trslive(void){ return g_trsmode; }
+static uint32_t g_fires; static uint8_t g_busy;
+static uint32_t mock_get_trsfires(void){ return g_fires; }
+static uint8_t mock_get_trsbusy(void){ return g_busy; }
+static uint8_t g_pin;
+static uint8_t g_inv;
+static uint8_t g_ring = 1;
+static uint8_t mock_get_trsring(void){ return g_ring; }
+static int mock_set_trsring(uint8_t v){ if (v>1) return -1; g_ring=v; return 0; }
+static uint8_t mock_get_trsinv(void){ return g_inv; }
+static int mock_set_trsinv(uint8_t v){ if (v>1) return -1; g_inv=v; return 0; }
+static uint8_t g_trschan = 16;
+static uint8_t mock_get_trschan(void){ return g_trschan; }
+static int mock_set_trschan(uint8_t v){ if (g_fail_trs) return g_fail_trs; if (v>16) return -1; g_trschan=v; return 0; }
+static uint8_t g_trswidth = 100;
+static uint8_t mock_get_trswidth(void){ return g_trswidth; }
+static int mock_set_trswidth(uint8_t v){ if (g_fail_trs) return g_fail_trs; if (v<1) return -1; g_trswidth=v; return 0; }
+static uint8_t mock_get_trspin(void){ return g_pin; }
+static uint8_t g_fault; static uint8_t mock_get_trsfault(void){ return g_fault; }
+static void mock_trspulse(void){ g_fires++; }
+static uint8_t mock_get_trshw(void){ return g_trshw; }
+static uint8_t mock_get_trsdiv(void){ return g_trsdiv; }
+static int mock_set_trsdiv(uint8_t v)
+{
+    if (g_fail_trs) return g_fail_trs;
+    if (v < 1 || v > 24) return -1;
+    g_trsdiv = v;
+    return 0;
+}
 
 static struct proto_store make_store(void)
 {
     struct proto_store s;
+    /* Zero first so any hook this test does not wire is a NULL pointer rather
+     * than stack garbage — reaching one is then a clean crash instead of a jump
+     * to a random address. */
+    memset(&s, 0, sizeof s);
     s.read = mock_read;
     s.write = mock_write;
     s.set_active = mock_set_active;
@@ -89,8 +150,31 @@ static struct proto_store make_store(void)
     s.reset_all = mock_reset_all;
     s.get_mode = mock_get_mode;
     s.set_mode = mock_set_mode;
+    s.get_blethru = mock_get_blethru;
+    s.set_blethru = mock_set_blethru;
+    s.get_midithru = mock_get_midithru;
+    s.set_midithru = mock_set_midithru;
     s.get_playrole = mock_get_playrole;
     s.set_playrole = mock_set_playrole;
+    s.get_trsmode = mock_get_trsmode;
+    s.set_trsmode = mock_set_trsmode;
+    s.get_trsdiv  = mock_get_trsdiv;
+    s.get_trshw   = mock_get_trshw;
+    s.get_trslive = mock_get_trslive;
+    s.get_trsfires = mock_get_trsfires;
+    s.get_trsbusy = mock_get_trsbusy;
+    s.get_trschan = mock_get_trschan;
+    s.set_trschan = mock_set_trschan;
+    s.get_trswidth = mock_get_trswidth;
+    s.set_trswidth = mock_set_trswidth;
+    s.get_trsring = mock_get_trsring;
+    s.set_trsring = mock_set_trsring;
+    s.get_trsinv  = mock_get_trsinv;
+    s.set_trsinv  = mock_set_trsinv;
+    s.get_trspin  = mock_get_trspin;
+    s.get_trsfault = mock_get_trsfault;
+    s.trspulse    = mock_trspulse;
+    s.set_trsdiv  = mock_set_trsdiv;
     s.profiles = MOCK_PROFILES;        /* 16 global slots (read/write/reset axis) */
     s.bank_profiles = MOCK_BANK;       /* 8 within-bank slots (setactive axis) */
     s.faders = NUM_FADERS;
@@ -105,6 +189,9 @@ static void reset_store(void)
     memset(g_arr, 0, sizeof g_arr);
     g_mode = 0;
     g_playrole = 0;
+    g_trsmode = 0;
+    g_trsdiv = 12;
+    g_fail_trs = 0;
     g_active_within[0] = 0;
     g_active_within[1] = 0;
     g_fail_write = 0;
@@ -137,6 +224,17 @@ static struct profile make_full_profile(void)
     }
     for (int i = 0; i < 16; i++)
         p.name[i] = (uint8_t)('A' + i);
+    /* v10 appended jack settings. Required for the profile to be VALID under the
+     * current rules: pulse_width = 0 is rejected on purpose, so a zeroed tail
+     * would make every write_r in this file fail with BAD_VERSION. */
+    p.trs_mode    = TRS_MODE_DEFAULT;
+    p.pulse_width = TRS_WIDTH_DEFAULT;
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        p.trigger_note[L]    = TRIGGER_NOTE_DEFAULT;
+        p.trigger_channel[L] = TRS_CHAN_DEFAULT;
+        p.sync_div[L]        = TRIGGER_DIV_DEFAULT;
+    }
+    p._rsvd_v10 = 0;
     return p;
 }
 
@@ -793,10 +891,164 @@ static void t_playrole_verb(void)
     assert(strstr(out, "BAD_VALUE"));   /* v>1 rejected */
 }
 
+/* ---- trsmode: which role the 3.5 mm TRS jack plays ---- */
+static void t_trsmode_verb(void)
+{
+    struct proto_store s = make_store();
+    char out[512];
+    reset_store();
+
+    /* Bare read must report MIDI (0). That default is the whole additive
+     * guarantee: a device that never touched this behaves as it always did. */
+    int rc = proto_handle(&s, "{\"t\":\"trsmode\",\"i\":1}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(strstr(out, "\"t\":\"trsmode_r\""));
+    assert(strstr(out, "\"ok\":true"));
+    assert(strstr(out, "\"v\":0"));
+    assert(strstr(out, "\"hw\":1"));   /* diagnostic rides along on every read */
+
+    /* Each valid role round-trips and is echoed back. */
+    for (unsigned v = 0; v <= 2; v++) {
+        char line[64];
+        snprintf(line, sizeof line, "{\"t\":\"trsmode\",\"i\":2,\"v\":%u}", v);
+        rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
+        assert(rc > 0);
+        assert(strstr(out, "\"ok\":true"));
+        char want[16];
+        snprintf(want, sizeof want, "\"v\":%u", v);
+        assert(strstr(out, want));
+        assert(g_trsmode == (uint8_t)v);
+    }
+
+    /* 3 is one past the last role and must be refused, not clamped — a silently
+     * clamped value would leave the configurator disagreeing with the device. */
+    rc = proto_handle(&s, "{\"t\":\"trsmode\",\"i\":3,\"v\":3}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(strstr(out, "BAD_VALUE"));
+    assert(g_trsmode == 2);   /* unchanged by the rejected write */
+
+    /* A refused NVS write must surface as NVS_FAIL, not as success. */
+    g_fail_trs = -1;
+    rc = proto_handle(&s, "{\"t\":\"trsmode\",\"i\":4,\"v\":0}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(strstr(out, "NVS_FAIL"));
+    g_fail_trs = 0;
+}
+
+/* ---- trsdiv: sync rate, in MIDI clock ticks per pulse ---- */
+static void t_trsdiv_verb(void)
+{
+    struct proto_store s = make_store();
+    char out[512];
+    reset_store();
+
+    /* Default is 12 = 2 PPQN, the Pocket Operator / Volca rate. */
+    int rc = proto_handle(&s, "{\"t\":\"trsdiv\",\"i\":1}", out, (int)sizeof out, NULL);
+    assert(rc > 0);
+    assert(strstr(out, "\"t\":\"trsdiv_r\""));
+    assert(strstr(out, "\"v\":12"));
+
+    /* The musically meaningful divisors of a 24 PPQN clock all work. */
+    const unsigned divs[] = { 1, 6, 12, 24 };
+    for (unsigned i = 0; i < sizeof divs / sizeof divs[0]; i++) {
+        char line[64];
+        snprintf(line, sizeof line, "{\"t\":\"trsdiv\",\"i\":2,\"v\":%u}", divs[i]);
+        rc = proto_handle(&s, line, out, (int)sizeof out, NULL);
+        assert(rc > 0);
+        assert(strstr(out, "\"ok\":true"));
+        assert(g_trsdiv == (uint8_t)divs[i]);
+    }
+
+    /* 0 would mean "never fire" and 25 is past a whole quarter note; both are
+     * rejected rather than accepted as a silent no-sync. */
+    rc = proto_handle(&s, "{\"t\":\"trsdiv\",\"i\":3,\"v\":0}", out, (int)sizeof out, NULL);
+    assert(strstr(out, "BAD_VALUE"));
+    rc = proto_handle(&s, "{\"t\":\"trsdiv\",\"i\":4,\"v\":25}", out, (int)sizeof out, NULL);
+    assert(strstr(out, "BAD_VALUE"));
+    assert(g_trsdiv == 24);   /* last good value survives both rejections */
+
+    g_fail_trs = -1;
+    rc = proto_handle(&s, "{\"t\":\"trsdiv\",\"i\":5,\"v\":6}", out, (int)sizeof out, NULL);
+    assert(strstr(out, "NVS_FAIL"));
+    g_fail_trs = 0;
+}
+
+/* The two settings are independent: changing the role must not disturb the rate,
+ * since they live in separate NVS records and a configurator will write them in
+ * either order. */
+static void t_trsmode_trsdiv_independent(void)
+{
+    struct proto_store s = make_store();
+    char out[512];
+    reset_store();
+
+    proto_handle(&s, "{\"t\":\"trsdiv\",\"i\":1,\"v\":6}", out, (int)sizeof out, NULL);
+    proto_handle(&s, "{\"t\":\"trsmode\",\"i\":2,\"v\":2}", out, (int)sizeof out, NULL);
+    assert(g_trsdiv == 6);
+    assert(g_trsmode == 2);
+
+    proto_handle(&s, "{\"t\":\"trsmode\",\"i\":3,\"v\":0}", out, (int)sizeof out, NULL);
+    assert(g_trsdiv == 6);    /* role back to MIDI, rate remembered */
+}
+
+/* The blethru verb: reads, sets, range-checks, and reports NVS failure -- the
+ * same four things playrole and midithru are held to.
+ *
+ * THE ONE THAT MATTERS is t_thru_switches_are_independent below. The entire
+ * reason blethru is a second NVS record rather than a widening of midithru is
+ * that a host connected over BOTH USB and BLE needs to silence exactly one
+ * destination. A change that coupled them would still pass every other
+ * assertion here. */
+static void t_blethru_verb(void)
+{
+    reset_store();
+    g_blethru = 0; g_fail_blethru = 0;
+    struct proto_store s = make_store();
+    char out[256];
+    proto_handle(&s, "{\"t\":\"blethru\",\"i\":1}", out, sizeof out, NULL);
+    assert(strstr(out, "\"t\":\"blethru_r\"") && strstr(out, "\"v\":0"));
+    proto_handle(&s, "{\"t\":\"blethru\",\"i\":2,\"v\":1}", out, sizeof out, NULL);
+    assert(strstr(out, "\"v\":1") && g_blethru == 1);
+    proto_handle(&s, "{\"t\":\"blethru\",\"i\":3,\"v\":2}", out, sizeof out, NULL);
+    assert(strstr(out, "BAD_VALUE"));   /* v>1 rejected */
+    assert(g_blethru == 1);             /* and the reject changed nothing */
+
+    g_fail_blethru = -5;
+    proto_handle(&s, "{\"t\":\"blethru\",\"i\":4,\"v\":0}", out, sizeof out, NULL);
+    assert(strstr(out, "NVS_FAIL"));
+    g_fail_blethru = 0;
+}
+
+static void t_thru_switches_are_independent(void)
+{
+    reset_store();
+    g_blethru = 0; g_midithru = 0; g_fail_blethru = 0;
+    struct proto_store s = make_store();
+    char out[256];
+
+    /* BLE on must not touch TRS. */
+    proto_handle(&s, "{\"t\":\"blethru\",\"i\":1,\"v\":1}", out, sizeof out, NULL);
+    assert(g_blethru == 1 && g_midithru == 0);
+
+    /* TRS on must not touch BLE. */
+    proto_handle(&s, "{\"t\":\"midithru\",\"i\":2,\"v\":1}", out, sizeof out, NULL);
+    assert(g_midithru == 1 && g_blethru == 1);
+
+    /* And turning one off leaves the other alone -- the case the feature exists
+     * for: one machine on both transports, silencing only the wireless copy. */
+    proto_handle(&s, "{\"t\":\"blethru\",\"i\":3,\"v\":0}", out, sizeof out, NULL);
+    assert(g_blethru == 0 && g_midithru == 1);
+
+    proto_handle(&s, "{\"t\":\"midithru\",\"i\":4,\"v\":0}", out, sizeof out, NULL);
+    assert(g_midithru == 0 && g_blethru == 0);
+}
+
 int main(void)
 {
     t_hello();
     t_playrole_verb();
+    t_blethru_verb();
+    t_thru_switches_are_independent();
     t_read();
     t_write();
     t_write_bad_len();
@@ -821,6 +1073,9 @@ int main(void)
     t_reset_nvs_fail();
     t_resetall();
     t_mode_get_set();
+    t_trsmode_verb();
+    t_trsdiv_verb();
+    t_trsmode_trsdiv_independent();
     printf("all protocol tests passed\n");
     return 0;
 }

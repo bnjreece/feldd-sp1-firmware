@@ -9,8 +9,16 @@ void midi_out_send(const struct midi_msg *m, void *ctx);   /* matches midi_sink_
 /* Enqueue a MIDI system real-time byte (clock 0xF8 / transport 0xFA/FB/FC) to the
  * TRS PRIORITY tier so it jumps ahead of queued CC/note bytes. ISR-safe. */
 void midi_out_rt(uint8_t status);
+#include "midi_thru_dest.h"   /* MIDI_THRU_DEST_*; the policy, host-tested */
 /* MIDI-thru sink: forward `len` raw bytes (a channel-voice message pulled from a
  * host->device USB-MIDI packet) to the TRS jack ONLY (normal tier). Never fans to
  * USB or BLE, so the thru'd host stream cannot echo back to the host. */
-void midi_out_thru(const uint8_t *bytes, uint8_t len);
+void midi_out_thru(const uint8_t *bytes, uint8_t len, uint8_t dest);
+/* Purge the TRS queue and emit a Note-Off for every note the jack is sounding.
+ * Call before the jack stops being a MIDI output; see the definition for why the
+ * queue is discarded but the notes are not. */
+void midi_out_trs_release_all(void);
+/* 1 once the queue is empty AND the UART has finished shifting the last byte.
+ * Gate the pin handoff on this, never on the queue alone. */
+int  midi_out_trs_idle(void);
 #endif

@@ -6,6 +6,7 @@
 #include "clock_timer.h"
 #include "clockgen.h"
 #include "midi_out.h"
+#include "trigger_out.h"
 #include <zephyr/kernel.h>
 
 #define MIDI_RT_CLOCK 0xF8u
@@ -41,6 +42,16 @@ void clock_router_init(void)
 
 void clock_router_ext_rt(uint8_t rt)
 {
+    /* Analog sync out, EXTERNAL-master path — DELIBERATELY ABOVE the clock_on
+     * gate. That gate governs MIDI clock on the TRS WIRE, and in SYNC mode the
+     * jack carries no MIDI at all, so it has no business suppressing an analog
+     * pulse. Following an external clock is the headline use of sync mode (a DAW
+     * or drum machine driving a Volca / SH-01A through the SP-1), and making it
+     * depend on an unrelated per-profile clock setting would present as a dead
+     * feature. No-op unless the jack is in SYNC mode. */
+    if (rt == MIDI_RT_CLOCK) {
+        trigger_out_clock_tick();
+    }
     if (!clock_on) {
         return; /* clock feature off for this profile: no THRU forward, no detect */
     }

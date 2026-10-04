@@ -136,7 +136,7 @@ except Exception:
 PYSERIAL_HINT = "pyserial not installed — run: pip3 install --break-system-packages pyserial"
 
 # ── protocol / struct constants (mirror profile.h + protocol.c) ─────────────
-PROFILE_VERSION = 9
+PROFILE_VERSION = 10
 PROTO_VERSION = 1
 NUM_FADERS = 4
 NUM_BUTTONS = 9
@@ -199,7 +199,24 @@ PER_V9_EXT    = (NUM_LAYERS - 1) * PER_EXT                                 # 266
 PER_V9_CHORD  = NUM_LAYERS * NUM_BUTTONS * CHORD6_BYTES \
               + NUM_LAYERS * NUM_FADERS + 4                                # 468
 PBYTES_V9 = PBYTES_V4 + PER_V9_LAYERS + PER_V9_EXT + PER_V9_CHORD          # 1038
-PBYTES = PBYTES_V9                                # default = full current image
+
+# v10: per-profile jack settings, APPENDED to the v9 image. Unlike v9 (which
+# resized interior arrays) nothing before byte 1038 moves, so a v9 blob is a true
+# prefix and upgrades by filling this tail with defaults.
+#   trs_mode 1 + pulse_width 1 + trigger_note[8] + trigger_channel[8]
+#   + sync_div[8] + 1 reserved = 27 -> 1065. 1065 % 3 == 0, so still no '=' pad.
+PER_V10_JACK = 1 + 1 + NUM_LAYERS * 3 + 1                                  # 27
+PBYTES_V10 = PBYTES_V9 + PER_V10_JACK                                      # 1065
+
+# v10 tail defaults. MUST match profile.c's profile_fill_missing() and
+# librarian.c's make_default(), or an upgraded profile differs between the two
+# implementations and the parity golden diverges.
+TRS_MODE_DEFAULT     = 0     # MIDI out — unchanged behaviour on upgrade
+TRS_WIDTH_DEFAULT    = 100   # units of 100 us = 10 ms (measured)
+TRIGGER_NOTE_DEFAULT = 51
+TRS_CHAN_DEFAULT     = 0     # 0 = omni; 1..16 = MIDI channel 1..16
+TRIGGER_DIV_DEFAULT  = 12    # clock ticks per pulse = 2 PPQN
+PBYTES = PBYTES_V10   # the CURRENT wire size (v10)
 # Byte length of each on-wire profile version. v1..v8 are strict PREFIX SUPERSETS
 # (each a clean tail-append); v9 is a HARD BREAK (resized interior, see above), so
 # encoding v9 is its own path while v1..v8 still build the frozen legacy image,
@@ -207,7 +224,7 @@ PBYTES = PBYTES_V9                                # default = full current image
 # and prove the v8 -> v9 migration. Mirrors the web codec's VSIZE.
 # A v7 (444 B) full image is no longer a valid wire length; its v6 prefix (294) is
 # still readable. VSIZE keeps the historical prefixes for the read-only Export path.
-VSIZE = {1: PBYTES_V1, 2: PBYTES_V2, 3: PBYTES_V3, 4: PBYTES_V4,
+VSIZE = {10: PBYTES_V10, 1: PBYTES_V1, 2: PBYTES_V2, 3: PBYTES_V3, 4: PBYTES_V4,
          5: PBYTES_V5, 6: PBYTES_V6, 8: PBYTES_V8, 9: PBYTES_V9}
 PORT_GLOB = "/dev/cu.usbmodem*"
 BAUD = 115200
@@ -317,8 +334,8 @@ def encode_profile(p, target_version=PROFILE_VERSION):
     # A v7 dict is accepted as INPUT (its v6 prefix re-encodes; its retired chord_table
     # tail is dropped - chords must be re-expressed as the new per-button chord6 grid).
     in_version = p.get("version", PROFILE_VERSION)
-    if in_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
-        raise ProfileError(f"unsupported profile version {in_version} (expected 1..9)")
+    if in_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        raise ProfileError(f"unsupported profile version {in_version} (expected 1..10)")
 
     channel = _rng("channel", p.get("channel", 0), 0, 15)
 
@@ -338,7 +355,7 @@ def encode_profile(p, target_version=PROFILE_VERSION):
         raise ProfileError(f"shift.button_value must have {NUM_BUTTONS} entries, got {len(shift_bv)}")
 
     out = bytearray()
-    out.append(PROFILE_VERSION)  # v9; restamped for legacy targets (1..8)
+    out.append(PROFILE_VERSION)  # v10; restamped for legacy targets (1..9)
     out.append(channel)
 
     for i, f in enumerate(faders):
@@ -505,9 +522,29 @@ def encode_profile(p, target_version=PROFILE_VERSION):
     out.append(_rng("shift_target", stgt, 0, NUM_LAYERS - 1))       # chord_flags[1]
     out.extend([0] * ((3 if target_version >= 9 else 1) - 1))       # chord_flags[2..] reserved
 
-    if target_version >= 9:
+    if target_version >= 10:
+        # v10 tail. Appended, so everything above is untouched v9 bytes.
+        jack = p.get("jack", {}) or {}
+        out.append(_rng("trs_mode",    jack.get("mode",  TRS_MODE_DEFAULT),  0, 2))
+        out.append(_rng("pulse_width", jack.get("width", TRS_WIDTH_DEFAULT), 1, 255))
+        notes = jack.get("trigger_note",    [TRIGGER_NOTE_DEFAULT] * NUM_LAYERS)
+        chans = jack.get("trigger_channel", [TRS_CHAN_DEFAULT]     * NUM_LAYERS)
+        divs  = jack.get("sync_div",        [TRIGGER_DIV_DEFAULT]  * NUM_LAYERS)
+        for L in range(NUM_LAYERS):
+            out.append(_rng(f"trigger_note[{L}]", notes[L], 0, 127))
+        for L in range(NUM_LAYERS):
+            out.append(_rng(f"trigger_channel[{L}]", chans[L], 0, 16))
+        for L in range(NUM_LAYERS):
+            out.append(_rng(f"sync_div[{L}]", divs[L], 1, 24))
+        out.append(0)                               # reserved, MUST be 0
+        if len(out) != PBYTES_V10:
+            raise ProfileError(f"internal: encoded {len(out)} bytes, expected {PBYTES_V10}")
+        return bytes(out)                           # v10: 1065-byte image, byte 0 == 10
+
+    if target_version == 9:
         if len(out) != PBYTES_V9:
             raise ProfileError(f"internal: encoded {len(out)} bytes, expected {PBYTES_V9}")
+        out[0] = 9
         return bytes(out)                           # v9: full 1038-byte image, byte 0 == 9
 
     # Legacy target: full frozen 528-byte image built above; stamp the version byte and
@@ -667,6 +704,23 @@ def decode_profile(blob):
         chord = {"chord6": grid, "fader_role": frole, "chord_velocity": cvel,
                  "cc_value": cvgrid, "shift_target": stgt}
 
+    # v10 tail: per-profile jack settings. Decoding these is not optional — the
+    # ENCODER writes them, so a decode that drops them makes a friendly-JSON
+    # round-trip (export then import) silently reset a profile's jack settings to
+    # defaults. Found on hardware: export-all reported jack: None against a device
+    # whose raw bytes were correct. --selftest did not catch it because it checks
+    # encode and byte-parity, never decode(encode(p)) == p.
+    jack = None
+    if len(blob) >= PBYTES_V10:
+        o = PBYTES_V9
+        jack = {
+            "mode":            blob[o],
+            "width":           blob[o + 1],
+            "trigger_note":    list(blob[o + 2:o + 2 + NUM_LAYERS]),
+            "trigger_channel": list(blob[o + 2 + NUM_LAYERS:o + 2 + 2 * NUM_LAYERS]),
+            "sync_div":        list(blob[o + 2 + 2 * NUM_LAYERS:o + 2 + 3 * NUM_LAYERS]),
+        }
+
     return {
         "format": "sp1-profile",
         "version": version,
@@ -678,6 +732,7 @@ def decode_profile(blob):
         "layers": layers,
         "ext": ext,
         "chord": chord,
+        "jack": jack,
     }
 
 
@@ -1277,7 +1332,9 @@ def run_selftest():
     # ZERO-fills every appended layer bank (a full v9 blob is fully explicit; unset ==
     # empty). This is the HARD BREAK from v8, which INHERITED base for the missing
     # banks. layer[0]=L3 @118, layer[1]=L4 @149, layer[5]=L8 @273.
-    check(len(blob) == 1038, f"v9 blob is exactly 1038 bytes (got {len(blob)})")
+    check(len(blob) == 1065, f"v10 blob is exactly 1065 bytes (got {len(blob)})")
+    # v10 appended, so every v9 offset below is unmoved — that is the property
+    # that lets a stored v9 profile be widened instead of reseeded.
     check(blob[118] == 0, "L3 fader_cc[0] at offset 118 (== 0, v9 zero-fill)")
     check(blob[131] == 0, "L3 button_key[0] at offset 131 (== 0, factory unbound)")
     check(blob[149] == 0, "L4 fader_cc[0] at offset 149 (== 0, v9 zero-fill)")
@@ -1340,7 +1397,7 @@ def run_selftest():
     PARITY_V4_B64 = ("BAUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhce"
                      "HyAhIiMkJSZPUC1YWSBtaXgAAAAAAAAAAAECAwQFBgcICQoLDAQFKCwrKVBP"
                      "AAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAAA==")
-    check(len(blob1) == 1038, f"v9 image is 1038 bytes (got {len(blob1)})")
+    check(len(blob1) == 1065, f"v10 image is 1065 bytes (got {len(blob1)})")
     check(len(blob1_v4) == 118, f"v4 parity slice is 118 bytes (got {len(blob1_v4)})")
     check(b64_v4 == PARITY_V4_B64, "cross-repo v4 parity base64 matches the canonical literal")
     check(blob1[1:118] == blob1_v4[1:], "v9 first 118 bytes == v4 image (shared prefix [0..117])")
@@ -1370,10 +1427,32 @@ def run_selftest():
     # targets (1..8) build the FROZEN legacy image, stamp byte 0, and slice to
     # VSIZE[target] (v1..v8 are clean prefix-supersets of the 528-byte v8 image).
     check(encode_profile(p_in) == blob1, "encode default == v9 (target arg optional)")
-    check(VSIZE == {1: 69, 2: 82, 3: 100, 4: 118, 5: 180, 6: 294, 8: 528, 9: 1038},
-          "VSIZE = {1:69,2:82,3:100,4:118,5:180,6:294,8:528,9:1038}")
-    check(len(encode_profile(p_in, 9)) == 1038 and encode_profile(p_in, 9) == blob1,
-          "encode(p, 9) is the 1038-byte v9 image (== default)")
+    check(VSIZE == {1: 69, 2: 82, 3: 100, 4: 118, 5: 180, 6: 294, 8: 528,
+                    9: 1038, 10: 1065},
+          "VSIZE = {...,9:1038,10:1065}")
+    check(len(encode_profile(p_in, 10)) == 1065 and encode_profile(p_in, 10) == blob1,
+          "encode(p, 10) is the 1065-byte v10 image (== default)")
+    # The v9 image must remain a true PREFIX of the v10 one. If this ever fails, a
+    # version has changed existing bytes rather than appending, and profile_migrate
+    # would widen stored profiles into garbage that still passes a length check.
+    check(encode_profile(p_in, 9)[1:] == blob1[1:1038],
+          "v9 is byte-for-byte the v10 prefix (byte 0 is the version stamp)")
+    # DECODE the v10 tail, not just encode it. The encoder shipped before the
+    # decoder did, and every check here passed anyway — because they all test
+    # encode + byte-parity and none tested decode(encode(p)). The consequence was
+    # a friendly-JSON round-trip silently resetting a profile's jack settings.
+    p_jack = dict(default_profile())
+    p_jack["jack"] = {"mode": 2, "width": 77, "trigger_note": [60] * NUM_LAYERS,
+                      "trigger_channel": [3] * NUM_LAYERS,
+                      "sync_div": [6] * NUM_LAYERS}
+    b_jack = encode_profile(p_jack, 10)
+    d_jack = decode_profile(b_jack)
+    check(d_jack.get("jack") == p_jack["jack"],
+          "decode_profile round-trips the v10 jack settings")
+    check(encode_profile(d_jack, 10) == b_jack,
+          "re-encoding a decoded v10 profile is byte-identical")
+    check(decode_profile(encode_profile(p_jack, 9)).get("jack") is None,
+          "a v9 blob decodes with no jack section (nothing to invent)")
     for tv, sz in ((1, 69), (2, 82), (3, 100), (4, 118), (5, 180), (6, 294), (8, 528)):
         bv = encode_profile(p_in, tv)
         check(len(bv) == sz, f"encode(p, {tv}) is {sz} bytes")
@@ -1535,12 +1614,12 @@ def run_selftest():
     check(p9["chord"]["fader_role"][0][0] == 1 and p9["chord"]["chord_velocity"] == 100,
           "fader_role diagonal + velocity 100")
     # RECONCILE: python v9 re-encode of the decoded golden is byte-identical to firmware.
-    reenc9 = base64.b64encode(encode_profile(p9)).decode("ascii")
+    reenc9 = base64.b64encode(encode_profile(p9, 9)).decode("ascii")
     check(reenc9 == PARITY_V9_B64, "python v9 re-encode == firmware PARITY_V9_B64 (RECONCILED)")
 
     print("\n2h. v9 cc_value 3-way byte-parity (firmware authoritative)")
     PARITY_V9_CCVAL_B64 = (
-        "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgcXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAA"
+        "CgUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgcXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAA"
         "AAAAECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwN"
         "Dg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGA"
         "QFBgcICQoLDB4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoL"
@@ -1555,12 +1634,11 @@ def run_selftest():
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAA"
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAA"
-        "EAAAAAAQEAAAAAAQAAAAABAAAAAAFkAAAA"
-    )
-    check(len(PARITY_V9_CCVAL_B64) == 1384 and not PARITY_V9_CCVAL_B64.endswith("="),
-          "cc_value golden is 1384 chars, no padding")
+        "EAAAAAAQEAAAAAAQAAAAABAAAAAAFkAAAAAGQzMzMzMzMzMwAAAAAAAAAADAwMDAwMDAwA")
+    check(len(PARITY_V9_CCVAL_B64) == 1420 and not PARITY_V9_CCVAL_B64.endswith("="),
+          "cc_value golden is 1420 chars, no padding")
     blob_cv = base64.b64decode(PARITY_V9_CCVAL_B64)
-    check(len(blob_cv) == 1038, "cc_value golden decodes to 1038 bytes")
+    check(len(blob_cv) == 1065, "cc_value golden decodes to 1065 bytes")
     # offset asserts (spec Section 7): slot at 570 + (L*9+i)*6
     check(blob_cv[28] == 7,  "button[3].type == cc_value at offset 28")
     check(blob_cv[400] == 7, "ext[2].button_type[4] == cc_value at offset 400")
@@ -1587,22 +1665,22 @@ def run_selftest():
         "AAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAWQA"
        )
     PARITY_V8_LEGACY_B64 = (
-        "CQUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhceHyAhIiMkJSZPUC1YWSBtaXgAAAAAAAAAAA"
-        "ECAwQFBgcICQoLDAQFKCwrKVBPAAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAACgpKis8PT4/QEFCQ0QUFRYXGBkaGxwB"
-        "AgQIAQIECAAyMzQ1RkdISUpLTE1OHh8gISIjJCUmCAQCAQgEAgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCg9/eGRaAAECAAABAAEBAgMEBQABAgMBAgMEAAECAwQFBgcIAQIDBG5vcHEBAg"
-        "ABAQABAAIDBAUAAQIDBAUGBwgJCgsMDQ4PAAEUAAcAf0BQYAIAAQIBAQAAAwQFAAECAwQFCQoLDAIDBAUGBwgJCgAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQAAAAAAAAAAAAAAAAAAAABkAAAA"
-       )
+        "CgUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhceHyAhIiMkJSZPUC1YWSBtaXgAAAAAAA"
+        "AAAAECAwQFBgcICQoLDAQFKCwrKVBPAAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAACgpKis8PT4/QEFCQ0QUFRYX"
+        "GBkaGxwBAgQIAQIECAAyMzQ1RkdISUpLTE1OHh8gISIjJCUmCAQCAQgEAgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCg9/eGRaAAECAAABAAEBAgMEBQABAgMBAgMEAAECAw"
+        "QFBgcIAQIDBG5vcHEBAgABAQABAAIDBAUAAQIDBAUGBwgJCgsMDQ4PAAEUAAcAf0BQYAIAAQIBAQAAAwQFAAECAwQF"
+        "CQoLDAIDBAUGBwgJCgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAA"
+        "EAAAAAAQAAAAAAAAAAAAAAAAAAAABkAAAAAGQzMzMzMzMzMwAAAAAAAAAADAwMDAwMDAwA")
     v8src = base64.b64decode(PARITY_V8_LEGACY_SRC_B64)
     check(len(v8src) == 528, f"frozen v8 source is 528 bytes (got {len(v8src)})")
     p_mig = decode_profile(v8src)                # frozen LEGACY_NUM_LAYERS=4 decode path
@@ -1611,11 +1689,11 @@ def run_selftest():
     check(p_mig["faders"][0]["cc"] == 7, "migrated L1 fader0 cc == 7 (from v8 inline)")
     check(p_mig["layers"][3]["fader_cc"][0] == 50, "migrated L4 fader_cc[0] == 50 (v8 layer[1])")
     mig9 = base64.b64encode(encode_profile({**p_mig, "version": 9})).decode("ascii")
-    check(len(mig9) == 1384, "upconverted v9 image is 1384 chars")
+    check(len(mig9) == 1420, "upconverted image is 1420 chars (v10)")
     check(mig9 == PARITY_V8_LEGACY_B64, "python v8 -> v9 upconvert == C reference (RECONCILED)")
     # L5..L8 come up EMPTY under the frozen upconvert; L1..L4 carry the v8 data.
     p_up = decode_profile(base64.b64decode(mig9))
-    check(p_up["version"] == 9 and len(p_up["layers"]) == 8, "upconvert exposes 8 layers")
+    check(p_up["version"] == 10 and len(p_up["layers"]) == 8, "upconvert exposes 8 layers")
     check(p_up["layers"][3]["fader_cc"][0] == 50, "L4 preserved from v8 after upconvert")
     check(all(x == 0 for x in p_up["layers"][7]["fader_cc"]) and
           all(x == 0 for x in p_up["layers"][7]["button_value"]), "L8 layer bank EMPTY after upconvert")
@@ -1630,26 +1708,26 @@ def run_selftest():
     # differ (AAAA -> AwAA). FIRMWARE IS AUTHORITATIVE (test_profile.c
     # PARITY_V9_SHIFT_B64); sp1ctl.py + codec.test.ts pin this exact string.
     PARITY_V9_SHIFT_B64 = (
-        "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAA"
-        "ECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwNDg8QERIC"
-        "AwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB"
-        "4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoLDA0OJicoKVNUVVZX"
-        "WFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAA"
-        "ECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQFAwQFBgQFBgcICQoLDAQFBgdo"
-        "aWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ"
-        "4GBwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1uAQIAAQEAAQABAgMEBQABAgMHCAkKCAkK"
-        "CwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFkAwAA"
-    )
-    check(len(PARITY_V9_SHIFT_B64) == 1384 and not PARITY_V9_SHIFT_B64.endswith("="),
-          "shift-target golden is 1384 chars, no padding")
+        "CgUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAA"
+        "AAAAECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwN"
+        "Dg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGA"
+        "QFBgcICQoLDB4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoL"
+        "DA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQ"
+        "YHCAkKAgMEBWZnaGkCAAECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQF"
+        "AwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAA"
+        "UAAQIDBAUAAQUGBwgGBwgJCgsMDQ4GBwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1u"
+        "AQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAA"
+        "EAAAAAAQEAAAAAAQAAAAABAAAAAAFkAwAAAGQzMzMzMzMzMwAAAAAAAAAADAwMDAwMDAwA")
+    check(len(PARITY_V9_SHIFT_B64) == 1420 and not PARITY_V9_SHIFT_B64.endswith("="),
+          "shift-target golden is 1420 chars, no padding")
     blob_st = base64.b64decode(PARITY_V9_SHIFT_B64)
-    check(len(blob_st) == 1038, "shift-target golden decodes to 1038 bytes")
+    check(len(blob_st) == 1065, "shift-target golden decodes to 1065 bytes")
     check(blob_st[1035] == 3, "chord_flags[1]=shift_target at offset 1035 (== 3, UI L4)")
     p_st = decode_profile(blob_st)
     check(p_st["chord"]["shift_target"] == 3, "shift_target decodes to 3 (carried through, not dropped)")

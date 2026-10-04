@@ -22,6 +22,7 @@
  * added separately once usb_midi1_send is confirmed ISR-safe.
  */
 #include "midi_out.h"
+#include "trigger_out.h"
 #include <errno.h>
 
 #ifdef CONFIG_FELDD_BT_LINK
@@ -33,6 +34,7 @@
 #include "usb_midi1.h"
 #include "midi1_codec.h"
 #include "midi_rt_ring.h"
+#include "held_notes.h"
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/devicetree.h>
@@ -44,6 +46,20 @@ static const struct gpio_dt_spec ring =
     GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), midi_ring_gpios);
 
 static struct midi_rt_ring trs_ring;
+
+/* Which notes the JACK is currently sounding — see held_notes.h. Fed from the one
+ * choke point both producers pass through (trs_enqueue_msg), so the controller
+ * path and the MIDI-thru path are covered by the same three lines. */
+static struct held_notes trs_held;
+
+/* When the TX ISR last handed a byte to the UART, in cycles. midi_out_trs_idle()
+ * needs "has the last byte finished shifting out", and uart_irq_tx_complete() does
+ * not answer that on an idle, TX-disabled UARTE — it returns 0, so a gate built on
+ * it never opens. Measured on hardware 2026-08-05: the deferred handoff to a pulse
+ * mode never completed, while the immediate handoff back to MIDI always did.
+ *
+ * Timing it instead is driver-independent and cannot get stuck. */
+static volatile uint32_t trs_last_tx_cycles;
 
 /* UART TX ISR: drain the priority ring into the TX FIFO one byte at a time; stop
  * the TX IRQ when the ring is empty. */
@@ -62,6 +78,7 @@ static void trs_uart_isr(const struct device *dev, void *user_data)
             uart_irq_tx_disable(dev);
             break;
         }
+        trs_last_tx_cycles = k_cycle_get_32();
         uart_fifo_fill(dev, &b, 1);
     }
 }
@@ -70,6 +87,9 @@ static void trs_uart_isr(const struct device *dev, void *user_data)
  * ring drops the byte, which never happens at MIDI rates with a 128-byte tier. */
 static void trs_enqueue(uint8_t b, bool rt)
 {
+    if (trigger_out_owns_trs()) {
+        return;   /* jack is emitting analog pulses; USB + BLE sinks unaffected */
+    }
     unsigned int key = irq_lock();
     if (rt) {
         (void)midi_rt_put_rt(&trs_ring, b);
@@ -87,10 +107,86 @@ static void trs_enqueue(uint8_t b, bool rt)
  * rather than emitting a truncated (running-status-corrupting) one. */
 static void trs_enqueue_msg(const uint8_t *b, uint8_t len)
 {
+    if (trigger_out_owns_trs()) {
+        return;   /* as trs_enqueue: the UART does not own the pin right now */
+    }
     unsigned int key = irq_lock();
-    (void)midi_rt_put_msg(&trs_ring, b, len);
+    bool admitted = midi_rt_put_msg(&trs_ring, b, len);
+    /* Track ONLY what was admitted. put_msg is all-or-nothing and returns false
+     * on a full ring, which with MIDI thru enabled is ordinary rather than a
+     * corner case: a dropped Note-On never reached the wire and would become a
+     * phantom, while a dropped Note-Off means the note IS still sounding and its
+     * bit must stay set. Both are handled by simply not feeding a refused
+     * message. Inside the lock so the two producers cannot interleave. */
+    if (admitted && len >= 3) {
+        held_notes_feed(&trs_held, b[0], b[1], b[2]);
+    }
     irq_unlock(key);
     uart_irq_tx_enable(trs);
+}
+
+/* Discard everything queued and release every note the jack is sounding.
+ *
+ * Called when the jack is about to stop being a MIDI output. Order matters and is
+ * the same rule chord_flush_all() already follows ("Fix 6"): PURGE FIRST, then
+ * emit. Emitting first would let a stale queued Note-On drain afterwards and
+ * re-strand the very note just released.
+ *
+ * Discarding is right for the queue and wrong for the notes, which is why they
+ * are handled separately. Queued real-time bytes are worthless late — a stale
+ * burst of clock ticks jitters the downstream tempo worse than silence — and
+ * queued voice messages are for a jack that is about to stop carrying MIDI. But
+ * a note already sounding has no other way home: the host does not learn the jack
+ * is gone and will send its own Note-Off into what is now a pulse output.
+ *
+ * Only notes the JACK sent are released. Not All Notes Off, which would kill
+ * notes the SP-1 never originated — indefensible when playing into an instrument
+ * running its own sequencer — and not All Sound Off, which guillotines release
+ * tails. */
+void midi_out_trs_release_all(void)
+{
+    unsigned int key = irq_lock();
+    midi_rt_ring_init(&trs_ring);          /* purge BEFORE emitting */
+    struct held_notes snapshot = trs_held;
+    held_notes_init(&trs_held);
+    irq_unlock(key);
+
+    int cursor = 0;
+    uint8_t ch, note;
+    while (held_notes_next(&snapshot, &cursor, &ch, &note)) {
+        uint8_t off[3] = { (uint8_t)(0x80u | (ch & 0x0Fu)), note, 0u };
+        key = irq_lock();
+        (void)midi_rt_put_msg(&trs_ring, off, 3);
+        irq_unlock(key);
+    }
+    uart_irq_tx_enable(trs);
+}
+
+/* Has everything handed to the UART actually reached the wire?
+ *
+ * A ring reporting empty is NOT the same as an idle line: up to one byte (320 us
+ * at 31250 baud) can still be in the UARTE's shift register. Disconnecting
+ * PSEL.TXD at that moment truncates it electrically — the exact corruption
+ * midi_rt_put_msg's all-or-nothing admission exists to prevent, one layer below
+ * where any of its host tests can see it. */
+/* One MIDI byte is 10 bits at 31250 baud = 320 us. Wait THREE byte-times after the
+ * last byte was queued: the UARTE's own FIFO can still hold a byte or two behind
+ * the one shifting, and ~1 ms is imperceptible on a profile switch that costs a
+ * human hundreds of milliseconds. Erring long is free here; erring short truncates
+ * a byte electrically, which is the one failure the ring's atomicity cannot catch. */
+#define TRS_DRAIN_GUARD_US 960u
+
+int midi_out_trs_idle(void)
+{
+    unsigned int key = irq_lock();
+    int empty = !midi_rt_pending(&trs_ring);
+    uint32_t last = trs_last_tx_cycles;
+    irq_unlock(key);
+    if (!empty) {
+        return 0;
+    }
+    uint32_t elapsed_us = k_cyc_to_us_floor32(k_cycle_get_32() - last);
+    return elapsed_us >= TRS_DRAIN_GUARD_US;
 }
 
 int midi_out_init(void)
@@ -137,13 +233,42 @@ void midi_out_rt(uint8_t status)
 #endif
 }
 
-/* MIDI-thru: forward `len` raw channel-voice bytes to the TRS jack ONLY (normal
- * tier), never USB or BLE, so a host->device stream cannot echo back to the host.
- * Called from the USB class OUT completion (usbd thread) when the global thru
- * switch is on. */
-void midi_out_thru(const uint8_t *bytes, uint8_t len)
+/* MIDI-thru: forward `len` raw channel-voice bytes to the destinations named in
+ * `dest` (MIDI_THRU_DEST_*). NEVER back out USB -- the stream came FROM the USB
+ * host and echoing it would loop.
+ *
+ * BLE IS NOT A LOOP, which is why it may be a destination at all. The comment
+ * that used to sit here said "TRS ONLY ... never USB or BLE", and its reasoning
+ * was sound for USB and over-broad for BLE: feldd has no BLE-MIDI *in* path, so
+ * there is nothing for a BLE send to echo into. The one real case is a host
+ * connected over BOTH transports at once receiving its own stream back over the
+ * air -- which is a reason for the two switches to be independent, not a reason
+ * to refuse the destination.
+ *
+ * Called from the USB class OUT completion (usbd thread). Both sinks are
+ * non-blocking: the TRS ring is drained by its ISR, and bt_link_send_midi()
+ * MUST queue and return rather than wait on the module UART. This runs on the
+ * usbd thread that also feeds the TRS ring and the clock; a send that blocks on
+ * uart_poll_out() (~870 us per message, one WICED HCI frame at 115200) would put BLE
+ * congestion straight into TRS timing and clock jitter. */
+void midi_out_thru(const uint8_t *bytes, uint8_t len, uint8_t dest)
 {
-    trs_enqueue_msg(bytes, len);   /* normal tier, atomic + all-or-nothing */
+    if (dest & MIDI_THRU_DEST_TRS) {
+        trs_enqueue_msg(bytes, len);   /* normal tier, atomic + all-or-nothing */
+    }
+#ifdef CONFIG_FELDD_BT_LINK
+    if (dest & MIDI_THRU_DEST_BLE) {
+        /* Rebuild the midi_msg the BLE encoder wants. usb_midi_extract_voice()
+         * already validated the length, and bt_link_core re-checks the status/data
+         * bits before framing, so a malformed message is refused rather than
+         * desynchronising the module's parser. No-op unless a host is subscribed. */
+        struct midi_msg m = { .status = bytes[0],
+                              .d1     = (len > 1) ? bytes[1] : 0,
+                              .d2     = (len > 2) ? bytes[2] : 0,
+                              .len    = len };
+        bt_link_send_midi(&m);
+    }
+#endif
 }
 
 /* USB-MIDI 1.0 sink: encode the channel-voice message as a 4-byte event and queue
@@ -168,13 +293,33 @@ static void midi1_send(const struct midi_msg *m) { (void)m; }
 
 int  midi_out_init(void) { return 0; }
 void midi_out_rt(uint8_t status) { (void)status; }
-void midi_out_thru(const uint8_t *bytes, uint8_t len) { (void)bytes; (void)len; }
+void midi_out_thru(const uint8_t *bytes, uint8_t len, uint8_t dest) { (void)bytes; (void)len; (void)dest; }
+void midi_out_trs_release_all(void) { }
+int  midi_out_trs_idle(void) { return 1; }
 
 #endif /* MIDI_OUT_HOST_TEST */
 
 void midi_out_send(const struct midi_msg *m, void *ctx)
 {
     ARG_UNUSED(ctx);
+    /* LOCAL note source for the analog trigger. midi_out_send is the single
+     * fan-out for everything this device generates — the mapping engine and the
+     * chord engine both land here — so one call makes an SP-1 BUTTON fire the
+     * trigger, not just a note arriving from a host.
+     *
+     * That is what makes the feature work standalone: map a button to the trigger
+     * note and the SP-1 advances a sequencer with nothing else attached, which is
+     * the whole point when there is no computer in the bag.
+     *
+     * No double-fire risk: host->device notes reach trigger_out_on_voice from the
+     * USB OUT callback instead, and a note is never both. The button still emits
+     * its note over USB/BLE, so a DAW records the trigger lane alongside
+     * everything else. A chord containing the trigger note fires ONCE — the
+     * coalescing CAS in trigger_out_fire collapses simultaneous notes. */
+    if (trigger_out_owns_trs() && m->len >= 3u) {
+        const uint8_t vb[3] = { m->status, m->d1, m->d2 };
+        trigger_out_on_voice(vb, 3u);
+    }
     trs_send(m);
     midi1_send(m);
 #ifdef CONFIG_FELDD_BT_LINK

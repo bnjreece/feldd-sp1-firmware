@@ -32,6 +32,8 @@
 #include <zephyr/sys/util.h>
 #include "librarian.h"
 #include "lib_header.h"
+#include "profile_migrate.h"
+#include "trigger_out.h"
 #include "clock_cfg.h"   /* seed the per-profile MIDI-clock config in make_default */
 #include "lib_bank.h"
 #include "seed_cadence.h"
@@ -118,6 +120,21 @@ BUILD_ASSERT(DIV_ROUND_UP(NUM_PROFILES, SP1_NVS_ENTRIES_PER_SECTOR)
 #define LIB_ID_HEADER        1u
 #define LIB_ID_SETTINGS      2u   /* future-bookkeeping band 2..0xFF; holds play_mode */
 #define LIB_ID_MIDI_THRU     3u   /* own 1-byte record: MIDI thru USB->TRS, 0 off / 1 on */
+#define LIB_ID_BLE_THRU     10u   /* own 1-byte record: MIDI thru USB->BLE, 0 off / 1 on.
+                                   * Id 10, not 4: ids 4..7 hold the jack's retired
+                                   * device-level records, which the v9->v10 migration
+                                   * still reads, so this sits above them and below
+                                   * LIB_ID_PROFILE_BASE.
+                                   * A NEW id in the bookkeeping band, never a field added
+                                   * to a struct: no existing record changes size, so the
+                                   * profile store version does NOT move and a v10 store
+                                   * needs no migration. Older firmware ignores this id;
+                                   * newer firmware defaults it when the read returns
+                                   * -ENOENT, which is what every device has today. */
+#define LIB_ID_TRS_MODE      4u   /* own 1-byte record: TRS jack role, 0 MIDI / 1 trigger / 2 sync */
+#define LIB_ID_TRS_DIV       5u   /* own 1-byte record: SYNC divider, clock ticks per pulse */
+#define LIB_ID_TRS_WIDTH     6u   /* own 1-byte record: pulse width in 100 us units */
+#define LIB_ID_TRS_CHAN      7u   /* own 1-byte record: trigger match channel, 0 = omni, 1..16 = channel */
 #define LIB_ID_PROFILE_BASE  0x100u
 
 static struct nvs_fs fs;
@@ -131,7 +148,12 @@ static uint8_t        active_mode;               /* current device mode (fast pa
 static uint8_t        play_mode_cache;            /* Feature 4: 0 shift, 1 assignable */
 static uint8_t        brightness_cache;   /* Feature B: 0 dim (default), 1 full; persisted in LIB_ID_SETTINGS[1] */
 static uint8_t        bpm_cache;          /* clock: persisted global GEN tempo 40..240; LIB_ID_SETTINGS[2] */
-static volatile uint8_t midi_thru_cache;  /* MIDI thru USB->TRS: 0 off (default)/1 on; own record LIB_ID_MIDI_THRU. volatile: usbd-thread reader (usb_midi1 OUT cb) + config-thread writer, like clock_on */
+static volatile uint8_t trs_mode_cache;   /* TRS jack role; own record LIB_ID_TRS_MODE */
+static volatile uint8_t trs_chan_cache;   /* trigger match channel; own record */
+static volatile uint8_t trs_width_cache;  /* pulse width, 100 us units; own record */
+static volatile uint8_t trs_div_cache;    /* SYNC divider;  own record LIB_ID_TRS_DIV  */
+static volatile uint8_t midi_thru_cache;
+static volatile uint8_t ble_thru_cache;   /* MIDI thru USB->BLE: 0 off (default)/1 on; own record LIB_ID_BLE_THRU. volatile for the same reason as midi_thru_cache: usbd-thread reader, config-thread writer */  /* MIDI thru USB->TRS: 0 off (default)/1 on; own record LIB_ID_MIDI_THRU. volatile: usbd-thread reader (usb_midi1 OUT cb) + config-thread writer, like clock_on */
 #ifdef CONFIG_FELDD_BT_PROVISION
 static uint8_t        provision_done_cache; /* Q5: radio provisioned flag; LIB_ID_SETTINGS[3] (bookkeeping only) */
 static uint8_t        provision_app_maj;    /* Q5: flashed app major;       LIB_ID_SETTINGS[4] */
@@ -465,6 +487,19 @@ static void make_default(int slot, struct profile *p)
 
     /* name[16], NUL-padded by the memset above. */
     memcpy(p->name, nm, strlen(nm));
+
+    /* v10 jack settings. A factory profile must be VALID under the CURRENT rules,
+     * and pulse_width = 0 is rejected on purpose — so these cannot be left as the
+     * caller's zeroes. Same values profile_fill_missing() writes when upgrading a
+     * stored v9 profile, so a seeded slot and a migrated slot agree. */
+    p->trs_mode    = TRS_MODE_DEFAULT;
+    p->pulse_width = TRS_WIDTH_DEFAULT;
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        p->trigger_note[L]    = TRIGGER_NOTE_DEFAULT;
+        p->trigger_channel[L] = TRS_CHAN_DEFAULT;
+        p->sync_div[L]        = TRIGGER_DIV_DEFAULT;
+    }
+    p->_rsvd_v10 = 0;
 }
 
 /* Adapters so fs_bring_up's mixed-geometry erase drives the pure, host-tested
@@ -572,6 +607,144 @@ static int seed_defaults(void)
     return seed_cadence_run(NUM_PROFILES, seed_feed_cb, seed_write_cb, NULL);
 }
 
+/* ---- migration -----------------------------------------------------------
+ *
+ * A PROFILE_VERSION bump used to mean seed_defaults(): every one of the user's
+ * profiles replaced with factory defaults. The wire path has upgraded older
+ * blobs since v2 (profile_from_b64 -> profile_fill_missing); this gives the NVS
+ * store the same treatment.
+ *
+ * Reuses seed_cadence_run() rather than looping here, for two reasons. The
+ * watchdog: this rewrites every slot synchronously at boot, before the control
+ * loop starts feeding, and forces an NVS garbage-collection erase on top — the
+ * exact combination that has produced a watchdog boot loop in this firmware
+ * before, and the cadence is CI-covered against the SAME function. And the
+ * ordering: the cadence writes the header LAST, so an interrupted migration
+ * leaves the old header in place and simply runs again on the next boot.
+ *
+ * ctx carries the EXISTING header. It must not be rebuilt with lib_header_init(),
+ * which zeroes mode and every bank's active index — a migrated device would come
+ * back in MIDI mode on slot 0, having silently lost where the user was. Only the
+ * version byte changes. */
+/* ---- retiring the device-level jack records --------------------------------
+ *
+ * Until now the jack's four settings lived in their own 1-byte NVS records
+ * (LIB_ID_TRS_MODE/DIV/WIDTH/CHAN, ids 4..7). v10 moves the same concepts into
+ * the profile. They must NOT both stay live, or every read needs a precedence
+ * rule and every user needs to know it.
+ *
+ * So the migration SEEDS from them and then deletes them. Seeding beats filling
+ * from compiled defaults for a reason worth stating: it preserves what the user
+ * actually configured. Someone running trigger mode on channel 10 at 8 ms keeps
+ * exactly that, rather than being reset to MIDI. It also collapses two cases into
+ * one code path, because the existing trs_*_load(present, stored) helpers already
+ * return the compiled default when a record is absent — which is precisely the
+ * "no record was ever written" case. */
+static struct {
+    uint8_t mode, div, width, chan;
+} g_legacy_trs;
+
+static void migrate_capture_legacy(void)
+{
+    uint8_t v;
+    ssize_t r;
+    r = nvs_read(&fs, LIB_ID_TRS_MODE,  &v, sizeof(v));
+    g_legacy_trs.mode  = trs_mode_load(r == (ssize_t)sizeof(v), v);
+    r = nvs_read(&fs, LIB_ID_TRS_DIV,   &v, sizeof(v));
+    g_legacy_trs.div   = trs_div_load(r == (ssize_t)sizeof(v), v);
+    r = nvs_read(&fs, LIB_ID_TRS_WIDTH, &v, sizeof(v));
+    g_legacy_trs.width = trs_width_load(r == (ssize_t)sizeof(v), v);
+    r = nvs_read(&fs, LIB_ID_TRS_CHAN,  &v, sizeof(v));
+    g_legacy_trs.chan  = trs_chan_load(r == (ssize_t)sizeof(v), v);
+}
+
+/* Fill a widened profile's tail: the format's own defaults first, then the
+ * device-level values on top, so the user's configuration survives the move. */
+static void migrate_fill(struct profile *out, int wire)
+{
+    profile_fill_missing(out, wire);
+    if (wire > (int)offsetof(struct profile, trs_mode)) {
+        return;   /* the tail was already carried by the stored image */
+    }
+    out->trs_mode    = g_legacy_trs.mode;
+    out->pulse_width = g_legacy_trs.width;
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        out->trigger_channel[L] = g_legacy_trs.chan;
+        out->sync_div[L]        = g_legacy_trs.div;
+        /* trigger_note has no device-level counterpart — there was one note
+         * for the whole device via trigger_out_set_match(), not in NVS — so the
+         * format default stands. */
+    }
+}
+
+/* Delete the four records once every slot AND the header are written. Order is
+ * load-bearing: deleting first would mean a power loss leaves the records gone
+ * with slots still unmigrated, and those would then seed from compiled defaults
+ * instead of the user's settings — a store where some profiles carry the old
+ * configuration and some do not. Deleting last leaves them orphaned on a power
+ * loss, which is harmless.
+ *
+ * Feed the watchdog between them: four deletes can force a GC erase, and this
+ * still runs before the control loop starts feeding. */
+static void migrate_retire_legacy(void)
+{
+    static const uint16_t ids[] = {
+        LIB_ID_TRS_MODE, LIB_ID_TRS_DIV, LIB_ID_TRS_WIDTH, LIB_ID_TRS_CHAN
+    };
+    for (unsigned i = 0; i < ARRAY_SIZE(ids); i++) {
+        feed_wdt();
+        (void)nvs_delete(&fs, ids[i]);
+    }
+    feed_wdt();
+}
+
+static int migrate_write_cb(void *ctx, int id)
+{
+    struct lib_header *hdr = (struct lib_header *)ctx;
+
+    if (id == SEED_CADENCE_HEADER_ID) {
+        hdr->version = PROFILE_VERSION;   /* keep mode + every bank's active */
+        return (int)nvs_write(&fs, LIB_ID_HEADER, hdr, sizeof(*hdr));
+    }
+
+    /* nvs_read() returns the STORED record's length, not the number of bytes it
+     * copied, which is exactly the discriminator needed here: it says which
+     * version wrote this slot without keeping any side bookkeeping. */
+    uint8_t  raw[sizeof(struct profile)];
+    uint16_t rec = (uint16_t)(LIB_ID_PROFILE_BASE + id);
+    ssize_t  got = nvs_read(&fs, rec, raw, sizeof(raw));
+
+    /* Already current: leave it alone. NVS garbage-collects partway through a
+     * 16-slot rewrite, so a power loss leaves a MIXED store and this runs again
+     * on the next boot — it must be safe to re-enter, and rewriting a slot that
+     * is already correct would burn flash for nothing. */
+    if (got == (ssize_t)sizeof(struct profile)) {
+        return 0;
+    }
+
+    struct profile p;
+    if (got < 0
+        || profile_migrate(raw, (size_t)got, &p, migrate_fill) != 0) {
+        /* Absent, or a length no version appended to (see profile_migrate_src_ok).
+         * Nothing here can be recovered, so this ONE slot falls back to defaults
+         * rather than the whole store being wiped. */
+        make_default(id, &p);
+    }
+    return (int)nvs_write(&fs, rec, &p, sizeof(p));
+}
+
+/* Widen every stored slot into the current struct, then stamp the header. */
+static int migrate_all(struct lib_header *hdr)
+{
+    migrate_capture_legacy();     /* read the device records BEFORE anything moves */
+    int rc = seed_cadence_run(NUM_PROFILES, seed_feed_cb, migrate_write_cb, hdr);
+    if (rc) {
+        return rc;                /* leave the records alone; the sweep re-runs */
+    }
+    migrate_retire_legacy();      /* only once every slot and the header are down */
+    return 0;
+}
+
 int librarian_init(void)
 {
     int rc = fs_bring_up();
@@ -594,7 +767,19 @@ int librarian_init(void)
         nvs_read(&fs, LIB_ID_PROFILE_BASE + (NUM_PROFILES - 1u),
                  &probe, sizeof(probe)) < 0;
 
-    if (r != (ssize_t)sizeof(hdr) || hdr.version != PROFILE_VERSION || top_slot_missing) {
+    /* Split what used to be one condition. A store that is unreadable or from a
+     * smaller layout has nothing to preserve and must be reseeded. A store that
+     * is merely from an older VERSION is a different case: its profiles are the
+     * user's, and a version bump is not a reason to destroy them. */
+    if (r == (ssize_t)sizeof(hdr) && !top_slot_missing
+        && hdr.version != PROFILE_VERSION) {
+        rc = migrate_all(&hdr);
+        if (rc) {
+            return rc;
+        }
+        /* hdr now carries PROFILE_VERSION with mode + actives preserved, so the
+         * load below picks up where the user left off. */
+    } else if (r != (ssize_t)sizeof(hdr) || hdr.version != PROFILE_VERSION || top_slot_missing) {
         /* First boot (or incompatible/short header / pre-bank-split store): lay
          * down defaults. On a
          * genuine first boot nvs_read returns -ENOENT and leaves `hdr` fully
@@ -645,6 +830,28 @@ int librarian_init(void)
     uint8_t mt = 0;
     ssize_t rmt = nvs_read(&fs, LIB_ID_MIDI_THRU, &mt, sizeof(mt));
     midi_thru_cache = lib_midithru_load(rmt == (ssize_t)sizeof(mt), mt);
+
+    /* BLE thru (USB-in -> BLE-out): the same discipline, its own record, default
+     * OFF. Absent on every device that exists today, which loads as 0. */
+    uint8_t bt = 0;
+    ssize_t rbt = nvs_read(&fs, LIB_ID_BLE_THRU, &bt, sizeof(bt));
+    ble_thru_cache = lib_blethru_load(rbt == (ssize_t)sizeof(bt), bt);
+
+    /* TRS jack role + SYNC divider: same discipline as MIDI thru — each in its
+     * OWN 1-byte record, absent or out-of-range decoding to the default, so a
+     * device that never touched them is neither short-read nor reseeded. */
+    uint8_t tm = 0;
+    ssize_t rtm = nvs_read(&fs, LIB_ID_TRS_MODE, &tm, sizeof(tm));
+    trs_mode_cache = trs_mode_load(rtm == (ssize_t)sizeof(tm), tm);
+    uint8_t td = 0;
+    ssize_t rtd = nvs_read(&fs, LIB_ID_TRS_DIV, &td, sizeof(td));
+    trs_div_cache = trs_div_load(rtd == (ssize_t)sizeof(td), td);
+    uint8_t tw = 0;
+    ssize_t rtw = nvs_read(&fs, LIB_ID_TRS_WIDTH, &tw, sizeof(tw));
+    trs_width_cache = trs_width_load(rtw == (ssize_t)sizeof(tw), tw);
+    uint8_t tc = 0;
+    ssize_t rtc = nvs_read(&fs, LIB_ID_TRS_CHAN, &tc, sizeof(tc));
+    trs_chan_cache = trs_chan_load(rtc == (ssize_t)sizeof(tc), tc);
 
     /* Load the active profile of the CURRENT mode into the RAM hot copy. The NVS
      * slot it addresses is the GLOBAL index lib_bank_global(mode, within) (0..15).
@@ -913,6 +1120,58 @@ int librarian_set_brightness(uint8_t v)
     return settings_write();
 }
 
+uint8_t librarian_trs_mode(void) { return trs_mode_cache; }
+
+int librarian_set_trs_mode(uint8_t v)
+{
+    if (!fs_ready)            { return -EINVAL; }
+    if (!trs_mode_valid(v))   { return -EINVAL; }
+    if (v == trs_mode_cache)  { return 0; }        /* no-op: don't burn a write */
+    trs_mode_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_MODE, (const void *)&trs_mode_cache,
+                          sizeof(trs_mode_cache));
+    return (w == (ssize_t)sizeof(trs_mode_cache)) ? 0 : -1;
+}
+
+uint8_t librarian_trs_chan(void) { return trs_chan_cache; }
+
+int librarian_set_trs_chan(uint8_t v)
+{
+    if (!fs_ready)            { return -EINVAL; }
+    if (!trs_chan_valid(v))   { return -EINVAL; }
+    if (v == trs_chan_cache)  { return 0; }
+    trs_chan_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_CHAN, (const void *)&trs_chan_cache,
+                          sizeof(trs_chan_cache));
+    return (w == (ssize_t)sizeof(trs_chan_cache)) ? 0 : -1;
+}
+
+uint8_t librarian_trs_width(void) { return trs_width_cache; }
+
+int librarian_set_trs_width(uint8_t v)
+{
+    if (!fs_ready)             { return -EINVAL; }
+    if (!trs_width_valid(v))   { return -EINVAL; }
+    if (v == trs_width_cache)  { return 0; }
+    trs_width_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_WIDTH, (const void *)&trs_width_cache,
+                          sizeof(trs_width_cache));
+    return (w == (ssize_t)sizeof(trs_width_cache)) ? 0 : -1;
+}
+
+uint8_t librarian_trs_div(void) { return trs_div_cache; }
+
+int librarian_set_trs_div(uint8_t v)
+{
+    if (!fs_ready)           { return -EINVAL; }
+    if (!trs_div_valid(v))   { return -EINVAL; }
+    if (v == trs_div_cache)  { return 0; }
+    trs_div_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_TRS_DIV, (const void *)&trs_div_cache,
+                          sizeof(trs_div_cache));
+    return (w == (ssize_t)sizeof(trs_div_cache)) ? 0 : -1;
+}
+
 uint8_t librarian_midi_thru(void)
 {
     return midi_thru_cache;   /* RAM copy */
@@ -935,6 +1194,32 @@ int librarian_set_midi_thru(uint8_t v)
     midi_thru_cache = v;
     ssize_t w = nvs_write(&fs, LIB_ID_MIDI_THRU, &midi_thru_cache, sizeof(midi_thru_cache));
     return (w == (ssize_t)sizeof(midi_thru_cache)) ? 0 : -1;
+}
+
+uint8_t librarian_ble_thru(void)
+{
+    return ble_thru_cache;   /* RAM copy */
+}
+
+int librarian_set_ble_thru(uint8_t v)
+{
+    /* Mirrors librarian_set_midi_thru exactly: own record, range-checked, and a
+     * same-value set does not burn an NVS write. Kept as a separate function
+     * rather than a shared helper taking an id -- the two switches are allowed to
+     * diverge (different defaults, one day different validation), and a shared
+     * helper would make that a refactor instead of an edit. */
+    if (!fs_ready) {
+        return -EINVAL;
+    }
+    if (!lib_blethru_valid(v)) {
+        return -EINVAL;
+    }
+    if (v == ble_thru_cache) {
+        return 0;             /* no-op: don't burn an NVS write */
+    }
+    ble_thru_cache = v;
+    ssize_t w = nvs_write(&fs, LIB_ID_BLE_THRU, &ble_thru_cache, sizeof(ble_thru_cache));
+    return (w == (ssize_t)sizeof(ble_thru_cache)) ? 0 : -1;
 }
 
 uint8_t librarian_bpm(void)

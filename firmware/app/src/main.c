@@ -24,6 +24,8 @@
  * electrical bench-test, and USB-MIDI computer-enumeration are checked when
  * Unit A is on the bench.
  */
+#include <stddef.h>
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/fatal.h>
@@ -74,6 +76,7 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
 #include "led.h"
 #include "clock_timer.h"
 #include "clock_router.h"
+#include "trigger_out.h"
 #include "clockgen.h"
 #include "bt_probe.h"   /* Phase-A BT bring-up probe (dev-only, CONFIG_FELDD_BT_PROBE) */
 #include "bt_download.h" /* module-download state machine (dev-only, CONFIG_FELDD_BT_DOWNLOAD) */
@@ -552,6 +555,109 @@ static void chord_tx_enqueue(uint8_t status, uint8_t d1, uint8_t d2)
  * The CC NUMBER for a toggle is the button's `value` field (same convention as
  * map_button's BTN_CC_MOMENTARY) and we honor the per-button channel + the active
  * LAYER (0..NUM_LAYERS-1) bank exactly like map_button. */
+/* ---- v10: the jack follows the profile ------------------------------------
+ *
+ * trs_mode / pulse_width are per profile; trigger_note / trigger_channel /
+ * sync_div are per LAYER. Two entry points, deliberately, because they are not
+ * equally safe to call.
+ *
+ * trs_apply_layer() touches only comparison values and the divider — nothing that
+ * reconfigures the pin — so it is safe on every layer change, including the
+ * momentary L2 hold that fires at gesture speed.
+ *
+ * trs_apply_profile() additionally sets the MODE, which tears down and rebuilds
+ * uart1's pinctrl. That must happen only on a profile change: doing it per layer
+ * would truncate MIDI mid-byte on a held button. This is the "per-layer NOTE yes,
+ * per-layer MODE no" split, enforced by having two functions rather than a flag. */
+static int g_trs_layer = -1;
+
+static void trs_apply_layer(int layer)
+{
+    const struct profile *p = librarian_active();
+    if (p == 0) {
+        return;
+    }
+    int L = (layer >= 0 && layer < NUM_LAYERS) ? layer : 0;
+    /* set_match writes note AND channel, so set_channel runs after it to apply the
+     * stored 0=omni / 1..16 encoding through its own conversion. */
+    (void)trigger_out_set_match(p->trigger_note[L], TRIGGER_ANY);
+    (void)trigger_out_set_channel(p->trigger_channel[L]);
+    (void)trigger_out_set_divider(p->sync_div[L]);
+    g_trs_layer = L;
+}
+
+/* A mode change that takes the jack AWAY from MIDI cannot happen immediately:
+ * anything the jack is sounding has to be released first, and those Note-Offs
+ * have to reach the wire before PSEL.TXD is disconnected. So the change is
+ * PENDING until midi_out_trs_idle() says the line is quiet.
+ *
+ * Deferred rather than busy-waited because the flush is variable-length — zero
+ * bytes typically, up to ~69 ms if every button is holding a full chord — and
+ * blocking that long would stall the 8 ms control tick. Deferred to the MAIN LOOP
+ * rather than the TX ISR: the handoff reconfigures pinctrl and a GPIO, which has
+ * no business running in interrupt context, and one tick of latency on a profile
+ * switch is imperceptible against the gesture that caused it. */
+static int  g_trs_mode_pending = -1;
+
+static void trs_pump_mode_change(void)
+{
+    if (g_trs_mode_pending < 0) {
+        return;
+    }
+    if (!midi_out_trs_idle()) {
+        return;   /* a byte is still shifting; truncating it corrupts the stream */
+    }
+    (void)trigger_out_set_mode((enum trs_mode)g_trs_mode_pending);
+    g_trs_mode_pending = -1;
+}
+
+/* The jack bytes of the active profile as last applied: trs_mode through
+ * sync_div[], contiguous in the packed struct. A live configurator edit of the
+ * ACTIVE slot changes these without changing the active index, so the main
+ * loop compares them, as it does clock_active_cfg() for the clock. */
+#define TRS_TAIL_LEN (offsetof(struct profile, sync_div) + NUM_LAYERS - \
+                      offsetof(struct profile, trs_mode))
+static uint8_t g_trs_applied[TRS_TAIL_LEN];
+
+static bool trs_profile_changed(void)
+{
+    const struct profile *p = librarian_active();
+    return p != 0 && memcmp(&p->trs_mode, g_trs_applied, TRS_TAIL_LEN) != 0;
+}
+
+static void trs_apply_profile(void)
+{
+    const struct profile *p = librarian_active();
+    if (p == 0) {
+        return;
+    }
+    memcpy(g_trs_applied, &p->trs_mode, TRS_TAIL_LEN);
+    (void)trigger_out_set_width_us((uint32_t)p->pulse_width * TRS_WIDTH_UNIT_US);
+    trs_apply_layer(g_trs_layer < 0 ? 0 : g_trs_layer);
+
+    enum trs_mode want = (enum trs_mode)p->trs_mode;
+    if (want == trigger_out_mode()) {
+        /* Also cancels a handoff still waiting for the wire to go idle: a quick
+         * switch away from MIDI and straight back must not land on the first. */
+        g_trs_mode_pending = -1;
+        return;                       /* nothing to hand over */
+    }
+    if (want == TRS_MODE_MIDI) {
+        /* Coming BACK to MIDI: the pin is ours to give back immediately, and
+         * there is nothing queued on a jack that was not carrying MIDI. */
+        (void)trigger_out_set_mode(want);
+        g_trs_mode_pending = -1;
+        return;
+    }
+    /* Leaving MIDI. Setting the pending mode does NOT yet move the pin, but
+     * releasing first is what matters: purge the queue, then emit a Note-Off for
+     * everything the jack is sounding. The handoff follows once the wire is idle. */
+    midi_out_trs_release_all();
+    chord_flush_all();                /* the SP-1's own latched chord notes */
+    g_trs_mode_pending = (int)want;
+    trs_pump_mode_change();           /* often already idle — take it now */
+}
+
 static int route_midi_button(int idx, int pressed, int layer_now)
 {
     const struct profile *p = librarian_active();
@@ -726,6 +832,7 @@ int main(void)
     chord_tx_init(&g_chord_tx);  /* v7: empty the chord MIDI-out deferral ring at boot */
     midi_out_init();        /* bring up uart1 TRS MIDI out + enable the ring PNP */
     clock_timer_init();     /* MIDI clock generator (GEN mode) */
+    trigger_out_init();   /* pulse timer up; jack stays MIDI until restored below */
     clock_router_init();    /* GEN/THRU selector: USB-in clock -> THRU, else GEN */
     usbdev_start();         /* enumerate the USB composite: CDC console + USB-MIDI */
 
@@ -743,6 +850,12 @@ int main(void)
      * its state, so map_* sees a benign empty profile rather than crashing. */
     int lib_rc = librarian_init();
     printk("LIB init rc=%d active=%d\n", lib_rc, librarian_active_index());
+
+    /* Restore the persisted TRS jack role. AFTER librarian_init (the value lives
+     * in NVS) and after midi_out_init (the UART has claimed the pin, so taking it
+     * back is a deliberate handoff, not a race). Defaults to MIDI, so a device
+     * that never set it boots exactly as before. */
+    trs_apply_profile();   /* v10: the jack's settings come from the profile */
 
     /* Feature B (0.23): apply the persisted LED brightness. The charge-standby gate
      * left us at the ambient default, so honor a user "full" preference here. */
@@ -945,6 +1058,7 @@ int main(void)
         uint8_t now_active = clock_active_slot();   /* mode-aware (0..15), catches a MODE flip */
         if (now_active != last_active) {
             chord_flush_all();   /* v7: release held chords on ANY profile change (dial/host/switch) */
+            trs_apply_profile();   /* v10: the new profile owns the jack's role */
             faders_rearm();
             /* New profile = different CCs: drop soft-takeover memory so each bank
              * re-seeds and emits immediately (the prior jump-on-switch behavior),
@@ -968,6 +1082,12 @@ int main(void)
              * clock (no chord-flush / fader-rearm; those are for a real switch). */
             clock_apply_active(false);
             last_clk = clock_active_cfg();
+        }
+        if (trs_profile_changed()) {
+            /* Same idea for the jack (v10): a live edit of the active profile's
+             * jack settings. Also covers any path that changed the active profile
+             * without passing through the switch block above. */
+            trs_apply_profile();
         }
 
         /* Scan both ladders FIRST (buttons before faders, like the verified
@@ -1057,7 +1177,15 @@ int main(void)
          * soft-takeover re-arm) that used to force-re-emit all four faders at the
          * PLAY-sagged rail value on every PLAY press/release edge (petercolombo fader
          * jitter, 2026-07-12). The side-row LED still FOLLOWS layer_now (0.22 Feature 2). */
+        trs_pump_mode_change();   /* v10: complete a deferred jack handoff */
+
         int layer_now = gesture_layer(&shift_gesture);
+        if (layer_now != g_trs_layer) {
+            /* Per-layer note/channel/divisor only. NOT the mode — see the comment
+             * on trs_apply_layer(); L2 is a momentary hold and rebuilding uart1
+             * pinctrl at gesture speed would truncate MIDI in flight. */
+            trs_apply_layer(layer_now);
+        }
 
         for (int i = 0; i < ne; i++) {
             uint8_t idx = evt[i].idx;

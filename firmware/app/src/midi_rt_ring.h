@@ -27,4 +27,10 @@ bool midi_rt_put_msg(struct midi_rt_ring *r, const uint8_t *b, uint8_t len);
 /* Dequeue next byte to transmit: real-time ring first (FIFO), then normal
  * (FIFO). Returns false (leaves *out untouched) if both are empty. */
 bool midi_rt_next(struct midi_rt_ring *r, uint8_t *out);
+/* Anything still queued in either tier? Note this says nothing about bytes already
+ * handed to the UART — a byte can be in the shift register with the ring empty. */
+static inline bool midi_rt_pending(const struct midi_rt_ring *r)
+{
+    return (r->rt_h != r->rt_t) || (r->nb_h != r->nb_t);
+}
 #endif

@@ -47,7 +47,8 @@ LOG_MODULE_REGISTER(usb_midi1, LOG_LEVEL_INF);
 #include "usb_rt_parse.h"
 #include "clock_router.h"
 #include "librarian.h"   /* librarian_midi_thru(): global MIDI-thru switch */
-#include "midi_out.h"    /* midi_out_thru(): forward voice to the TRS jack */
+#include "midi_out.h"
+#include "trigger_out.h"    /* midi_out_thru(): forward voice to the TRS jack */
 
 /* USB Device Class Definition for MIDI Devices 1.0 constants. */
 /* B.4.1 MS Class-Specific Interface Descriptor Subtypes */
@@ -469,18 +470,28 @@ static int usb_midi1_request(struct usbd_class_data *const class_data,
 			/* Bound the scan to the pooled buffer (MPS 64 -> <=16 events), so a
 			 * future net_buf resize can never widen the parse past the payload. */
 			size_t n = MIN(buf->len, buf->size);
-			/* Read the global thru switch once for this buffer (a single-byte
-			 * RAM copy; the config thread's writer is atomic on Cortex-M). */
-			bool thru = librarian_midi_thru();
+			/* Read BOTH thru switches once for this buffer (single-byte RAM
+			 * copies; the config thread's writer is atomic on Cortex-M), and
+			 * compose the destination mask once rather than per message. */
+			uint8_t dest = midi_thru_dest(librarian_midi_thru(),
+			                              librarian_ble_thru());
+			bool thru = (dest != MIDI_THRU_DEST_NONE);
 			for (size_t i = 0; i + 4 <= n; i += 4) {
 				uint8_t rt = usb_midi_extract_rt(&d[i]);
 				if (rt) {
 					clock_router_ext_rt(rt);
-				} else if (thru) {
+				} else if (thru || trigger_out_owns_trs()) {
+					/* Decode when EITHER consumer wants it. MIDI-thru
+					 * defaults OFF, so gating on `thru` alone would
+					 * silently starve the trigger. Compound so the
+					 * default path (both off) adds no work. */
 					uint8_t vb[3];
 					uint8_t vlen = usb_midi_extract_voice(&d[i], vb);
 					if (vlen) {
-						midi_out_thru(vb, vlen);
+						if (thru) {
+							midi_out_thru(vb, vlen, dest);
+						}
+						trigger_out_on_voice(vb, vlen);
 					}
 				}
 			}

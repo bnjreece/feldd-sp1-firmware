@@ -7,6 +7,62 @@ source of truth shared by three clients that MUST stay byte-identical:
 - the host CLI (`scripts/sp1ctl.py`, proven by `--selftest`),
 - the feldd-sp-1 web codec (`lib/feldd/codec.ts`, mirrored + selftest-checked).
 
+> ## ⚠️ This document describes v2. The current format is **v10**.
+>
+> Everything below the "Version history" table still describes `PROFILE_VERSION = 2`
+> and has not been revised since. **`profile.h` is authoritative**; treat the prose
+> here as historical unless it agrees with it.
+>
+> | Ver | Bytes | base64 | Adds |
+> |---|---|---|---|
+> | 1 | 69 | 92 | base image |
+> | 2 | 82 | 112 | per-control MIDI channel |
+> | 3 | 100 | — | `button_key` / `button_mod` (USB-HID) |
+> | 4 | 118 | — | shift-layer keyboard |
+> | 5 | 180 | — | layers L3/L4 |
+> | 6 | 294 | — | per-layer `layer_ext` |
+> | 8 | 528 | — | `chord6` grid + `fader_role` (v7 retired) |
+> | 9 | **1038** | 1384 | **hard break** — interior arrays resized, `NUM_LAYERS` 4 → 8 |
+> | 10 | **1065** | 1420 | **tail append** — per-profile jack settings |
+>
+> ### v10 — per-profile jack settings
+>
+> The TRS jack's role becomes part of the profile, so stepping profiles
+> re-purposes the port. A **pure tail append**: bytes `[0..1037]` keep the v9
+> layout and only byte 0, the version, changes, which is what lets a stored v9
+> profile be widened rather than reseeded. Anything added later must append for the same reason.
+>
+> | Offset | Field | Scope | Range | Default |
+> |---|---|---|---|---|
+> | 1038 | `trs_mode` | profile | `0` MIDI, `1` trigger, `2` sync | `0` |
+> | 1039 | `pulse_width` | profile | **1–255**, units of 100 µs | `100` (10 ms) |
+> | 1040–1047 | `trigger_note[8]` | per layer | 0–127 | `51` |
+> | 1048–1055 | `trigger_channel[8]` | per layer | **`0` omni, `1`–`16` = channel 1–16** | `0` |
+> | 1056–1063 | `sync_div[8]` | per layer | **1–24** clock ticks per pulse | `12` |
+> | 1064 | reserved | — | **must be 0** | `0` |
+>
+> Three encodings are easy to get wrong:
+>
+> - **`pulse_width` is not milliseconds** — 100 µs units, so 10 ms is `100`. **`0`
+>   is invalid**, deliberately, so an accidentally zero-filled tail fails loudly
+>   instead of emitting a 0 ms pulse that silently does nothing.
+> - **`trigger_channel` is 1-based**, unlike the transmit-channel fields elsewhere
+>   in the profile (which are 0–15 because they feed a status byte directly). It is
+>   a *filter with an "any" option*, so it needs a 17th value and cannot share that
+>   encoding; given it must differ, it differs toward the form a human reads.
+> - **`sync_div` is ticks per pulse** against 24 PPQN — a divisor, not a rate.
+>   `12` = 1/8 = 2 PPQN, the Pocket Operator / Volca rate.
+>
+> **`1065 % 3 == 0`**, so base64 still carries no `=` padding. The reserved byte at
+> 1064 is what pads it there, and is claimable by a future field *without* another
+> version bump — do not use it as scratch space.
+>
+> Two limits constrain further growth, and the tighter one is **not** the obvious
+> one: the USB-CDC frame buffers cap out around `sizeof` **1107**, while NVS sector
+> packing allows **1352**. A change that grows the struct past ~1107 must raise
+> `CONFIG_CDC_LINE_CAP` / `CONFIG_CDC_RESP_CAP` in the same change — an oversized
+> frame is silently dropped rather than erroring.
+
 `PROFILE_VERSION = 2`. A device advertises it as `pver` in `hello_r`. **v2 adds a
 per-control MIDI channel** so one profile can drive several tracks at once (4
 faders -> 4 channels = a mixer). v2 is a strict superset of v1: the first 69

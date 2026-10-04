@@ -97,9 +97,19 @@ static inline uint8_t lib_bpm_load(int present, uint8_t stored){
  * bpm/provision bytes. An absent record (present=0) or an out-of-range byte decodes
  * as off, so no existing device is reseeded. */
 #define LIB_MIDITHRU_DEFAULT 0u
+/* USB-in -> BLE thru. Its OWN switch and its own default, deliberately separate
+ * from LIB_MIDITHRU: the TRS jack and a wireless host are different destinations
+ * with different reasons to be on. Defaults OFF for the same reason MIDI-thru
+ * does -- feldd is a control surface, not a MIDI sink -- and because a host
+ * connected over BOTH USB and BLE would otherwise receive its own stream back. */
+#define LIB_BLETHRU_DEFAULT 0u
 static inline int     lib_midithru_valid(uint8_t v){ return v <= 1u; }
 static inline uint8_t lib_midithru_load(int present, uint8_t stored){
     return (present && lib_midithru_valid(stored)) ? stored : LIB_MIDITHRU_DEFAULT;
+}
+static inline int     lib_blethru_valid(uint8_t v){ return v <= 1u; }
+static inline uint8_t lib_blethru_load(int present, uint8_t stored){
+    return (present && lib_blethru_valid(stored)) ? stored : LIB_BLETHRU_DEFAULT;
 }
 
 #endif /* LIB_HEADER_H */
