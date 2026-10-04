@@ -406,18 +406,24 @@ static void charge_gauge(int pct, int chg, uint32_t blink)
 /* CHARGE-STANDBY GATE (mirrors the chattock sp1-tape-looper). The SP-1
  * bootloader hands control to the app on ANY power event: a deliberate ••
  * power-on, but ALSO a bare USB-charge plug-in, a battery insert, OR the
- * soft-reset right after a flash. Only a •• wake (RESETREAS.OFF) or a watchdog
- * recovery (RESETREAS.DOG) is a "real" turn-on. For anything else we must NOT
+ * soft-reset right after a flash, AND a •• bump in a bag (which wakes the chip
+ * exactly as a deliberate press does). Only a watchdog recovery (RESETREAS.DOG)
+ * skips this gate. For anything else we must NOT
  * spin up the full app (USB, SAADC, TRS) on what may be a nearly-flat cell -
  * that is exactly what brown-out-thrashes a low battery and can wedge the
  * device out of reach of the bootloader (the bug that bricked Unit A on the
  * bench). So park here: show the battery gauge (a stock-style filling bar on the
- * side row) while charging, wait for a ~0.6 s •• hold to actually switch on, and on
- * battery with nothing held drop to a clean SYSTEM_OFF (a •• press wakes it). */
+ * side row) while charging, wait for a 1.5 s •• hold to actually switch on, and on
+ * battery with nothing held drop to a clean SYSTEM_OFF (a •• press wakes it
+ * back into this gate). */
+#define WAKE_HOLD_MS 1500   /* •• hold to power on; the stock firmware's length */
+
 static void charge_standby_gate(uint32_t wake_reas)
 {
-    /* Real power-on (•• press) or watchdog recovery -> straight to full boot. */
-    if (wake_reas & (POWER_RESETREAS_OFF_Msk | POWER_RESETREAS_DOG_Msk)) {
+    /* Only a watchdog recovery skips the gate. A •• wake walks the same hold
+     * as a plug-in, so a bump in a bag costs milliseconds instead of a battery
+     * (the tape looper removed the same bypass for the same report). */
+    if (wake_reas & POWER_RESETREAS_DOG_Msk) {
         return;
     }
 
@@ -430,8 +436,8 @@ static void charge_standby_gate(uint32_t wake_reas)
         if (nrf_gpio_pin_read(SP1_FUNC_BTN) == 0) {   /* •• pressed */
             if (hold_t < 0) {
                 hold_t = k_uptime_get();
-            } else if (k_uptime_get() - hold_t >= 600) {
-                break;                                /* held ~0.6 s -> power on */
+            } else if (k_uptime_get() - hold_t >= WAKE_HOLD_MS) {
+                break;                                /* held 1.5 s -> power on */
             }
             led_idx(0, true);                         /* press feedback on track LED1 (clear of the side gauge) */
         } else {                                      /* •• released */
