@@ -1,7 +1,7 @@
 #ifndef PROFILE_H
 #define PROFILE_H
 #include <stdint.h>
-#define PROFILE_VERSION 9
+#define PROFILE_VERSION 10
 #define NUM_FADERS 4
 #define NUM_BUTTONS 9
 #define NUM_LAYERS 8                /* 8 selectable layers = 8 tracks (PLAY count-dial, taps 1..8) */
@@ -152,7 +152,23 @@ struct profile {
      * reader that does not understand BTN_CC_VALUE. */
     struct chord6 chord6[NUM_LAYERS][NUM_BUTTONS];     /* 4*9*6 = 216 B; packed per button */
     uint8_t  fader_role[NUM_LAYERS][NUM_FADERS];       /* 4*4   = 16 B; 0=cc,1=chord_depth */
-    uint8_t  chord_flags[4];                           /* 4 B: [0]=chord velocity, [1]=PLAY shift target (0.22 F1, reused in place; 0=default->L2, 1..7 select a layer), [2..3]=reserved pad struct to 1038 (multiple of 3) so base64 has no '=' padding (spec 2.1). */
+    uint8_t  chord_flags[4];                           /* 4 B: [0]=chord velocity, [1]=PLAY shift target (0.22 F1, reused in place; 0=default->L2, 1..7 = a layer), [2..3] carry the per-profile MIDI-clock config via the clock_cfg codec — NOT free pad, despite what earlier comments claimed. */
+
+    /* ---- v10: per-profile jack settings -------------------------------------
+     * APPENDED. Bytes 1..1037 are byte-identical to v9 (byte 0 is the version),
+     * which is the whole reason a v9 store can be widened instead of reseeded
+     * (profile_migrate.h).
+     * Anything added later must append here for the same reason.
+     *
+     * Encodings are Phase-1's one-byte NVS codecs verbatim (trigger_out.h) —
+     * trs_mode_valid / trs_width_valid / trs_chan_valid / trs_div_valid — so the
+     * device-level setting and the per-profile field cannot drift apart. */
+    uint8_t  trs_mode;                       /* 1038: 0 MIDI / 1 trigger / 2 sync */
+    uint8_t  pulse_width;                    /* 1039: units of 100 us; 1..255 = 0.1..25.5 ms. 0 is INVALID, so a zero-filled tail fails loudly instead of emitting a 0 ms pulse */
+    uint8_t  trigger_note[NUM_LAYERS];       /* 1040..1047: 0..127 */
+    uint8_t  trigger_channel[NUM_LAYERS];    /* 1048..1055: 0 = omni, 1..16 = MIDI channel 1..16 (matches the UI; NOT the 0..15 of the transmit-channel fields, which are fed straight into a status byte) */
+    uint8_t  sync_div[NUM_LAYERS];           /* 1056..1063: MIDI-clock ticks per pulse, 1..24 */
+    uint8_t  _rsvd_v10;                      /* 1064: MUST be 0. Pads sizeof to a multiple of 3, and is claimable by a future field WITHOUT another version bump */
 } __attribute__((packed));
 
 /* v9 byte layout (packed, all u8). v9 is the FIRST version to RESIZE the interior
@@ -165,8 +181,21 @@ struct profile {
  *   [304..569]   ext[7]          (L2..L8 completion; was ext[3] @180..293)
  *   [570..1001]  chord6[8][9]    (packed per (layer,button); was @294..509)
  *   [1002..1033] fader_role[8][4]
- *   [1034..1037] chord_flags[4]  ([0]=velocity, [1]=PLAY shift target @1035, [2..3]=reserved pad)
+ *   [1034..1037] chord_flags[4]  ([0]=velocity, [1]=PLAY shift target @1035, [2..3]=clock_cfg)
  *   sizeof = 1038; base64 = ceil(1038/3)*4 = 1384 chars, no '=' padding.
+ */
+
+/* v10 byte layout. Unlike v9, v10 is a PURE TAIL APPEND: [0..1037] keep the v9
+ * layout and only byte 0 (the version) changes, so a v9 blob is a valid prefix
+ * and upgrades by filling the tail with defaults rather than being discarded.
+ *   [0..1037]    v9 image; byte-identical apart from byte 0, the version
+ *   [1038]       trs_mode
+ *   [1039]       pulse_width
+ *   [1040..1047] trigger_note[8]
+ *   [1048..1055] trigger_channel[8]
+ *   [1056..1063] sync_div[8]
+ *   [1064]       _rsvd_v10 (must be 0)
+ *   sizeof = 1065; base64 = (1065/3)*4 = 1420 chars, no '=' padding.
  */
 
 /* codec API */
@@ -177,6 +206,12 @@ int profile_validate(const struct profile *p);                        /* 0 ok, -
 struct clock_cfg;   /* fwd decl (clock_cfg.h) */
 void profile_clock_cfg(const struct profile *p, struct clock_cfg *out);
 void profile_set_clock_cfg(struct profile *p, const struct clock_cfg *cfg);
+/* Complete the fields a shorter (older-version) blob did not carry, applying
+ * that version's semantics. Exposed (was static) so the NVS migration path in
+ * librarian.c fills a widened profile the SAME way the wire path does — "what a
+ * missing field meant under the version that omitted it" must have one answer,
+ * not one per caller. `wire` is the source length, i.e. which version wrote it. */
+void profile_fill_missing(struct profile *out, int wire);
 int profile_to_b64(const struct profile *p, char *out, int outcap);   /* returns encoded len, or -1 */
 int profile_from_b64(const char *b64, int len, struct profile *out);  /* 0 ok, -1 bad */
 /* Wire byte count for a given profile version (the clean prefix length). v1..v6

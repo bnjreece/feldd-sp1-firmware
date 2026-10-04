@@ -8,6 +8,7 @@
  * timer's own ISR and emits 0xF8 with 1 us-scale precision.
  */
 #include "clock_timer.h"
+#include "trigger_out.h"
 #include "clockgen.h"
 #include "midi_out.h"
 #include <zephyr/device.h>
@@ -31,6 +32,10 @@ static void tick_top(const struct device *dev, void *user_data)
     ARG_UNUSED(user_data);
     if (gen_emit) {
         midi_out_rt(MIDI_RT_CLOCK);
+        /* Analog sync out, INTERNAL-master path. Inside the gen_emit guard so an
+         * external master (which clears it) cannot double-fire the pulse. No-op
+         * unless the TRS jack is in SYNC mode. */
+        trigger_out_clock_tick();
     }
 }
 

@@ -15,6 +15,25 @@ struct proto_store {
     int     (*set_playrole)(uint8_t v);                /* 0 ok; nonzero NVS_FAIL */
     uint8_t (*get_midithru)(void);                     /* MIDI thru USB->TRS: 0 off, 1 on */
     int     (*set_midithru)(uint8_t v);                /* 0 ok; nonzero NVS_FAIL */
+    uint8_t (*get_trsmode)(void);                      /* TRS jack role: 0 MIDI, 1 trigger, 2 sync */
+    int     (*set_trsmode)(uint8_t v);                 /* 0 ok; nonzero NVS_FAIL */
+    uint8_t (*get_trsdiv)(void);                       /* SYNC divider: clock ticks per pulse, 1..24 */
+    uint8_t (*get_trshw)(void);                        /* pulse path: 1 hardware (TIMER+PPI), 0 k_timer fallback */
+    uint8_t (*get_trslive)(void);                      /* LIVE module mode, vs the stored one — must agree */
+    uint32_t (*get_trsfires)(void);                    /* pulses asserted since boot */
+    uint8_t (*get_trsbusy)(void);                      /* 1 = a pulse is still high (stuck = no falling edge) */
+    uint8_t (*get_trschan)(void);                      /* match channel 0..15, 16 = omni */
+    int     (*set_trschan)(uint8_t v);
+    uint8_t (*get_trswidth)(void);                     /* pulse width, 100 us units */
+    int     (*set_trswidth)(uint8_t v);
+    uint8_t (*get_trsring)(void);                      /* ring current source in pulse modes */
+    int     (*set_trsring)(uint8_t v);
+    uint8_t (*get_trsinv)(void);                       /* 0 = idle low/pulse high, 1 = inverted */
+    int     (*set_trsinv)(uint8_t v);
+    uint8_t (*get_trspin)(void);
+    uint8_t (*get_trsfault)(void);                     /* 1 = the pad did not follow us on mode entry */                       /* the pin's ACTUAL level — must idle 0 in trigger mode */
+    void    (*trspulse)(void);                         /* fire one pulse, bypassing note + clock */
+    int     (*set_trsdiv)(uint8_t v);                  /* 0 ok; nonzero NVS_FAIL */
     /* Two distinct index axes (§0 mode-scoped banks). read/write/reset address a
      * GLOBAL slot 0..profiles-1 (both banks); setactive/get_active address a
      * WITHIN-bank index 0..bank_profiles-1 (the current mode's bank). Validating

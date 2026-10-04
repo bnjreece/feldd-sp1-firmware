@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stddef.h>
 #include "profile.h"
+#include "trigger_out.h"
 #include "chord6.h"
 #include "clock_cfg.h"
 
@@ -43,6 +44,8 @@ static void fill_v6_ext_layers(struct profile *p)
 }
 
 /* Build a fully-populated profile with distinct values in every field. */
+static void v10_tail_defaults(struct profile *p);
+
 static struct profile make_full_profile(void)
 {
     struct profile p;
@@ -89,6 +92,7 @@ static struct profile make_full_profile(void)
     p.chord6[1][2] = (struct chord6){ .b = { (1<<5), 21, 7, 0, 0, 0 } };       /* range */
     p.chord6[2][3] = (struct chord6){ .b = { (2<<5), 48, 5, 0, 0, 0 } };       /* Cmin7 */
     p.fader_role[0][0] = 1;   /* one chord_depth fader */
+    v10_tail_defaults(&p);   /* valid under the CURRENT rules, not just v9 */
     return p;
 }
 
@@ -139,6 +143,24 @@ static void v9_set_layer(struct profile *p, int L,
     }
 }
 
+/* The v10 appended jack settings at their defaults. Every fixture that must be a
+ * VALID current profile needs these: a zeroed tail leaves pulse_width == 0, which
+ * profile_validate() rejects on purpose so that a zero-filled tail fails loudly
+ * rather than producing a 0 ms pulse. These are exactly the values
+ * profile_fill_missing() writes when upgrading a stored v9 profile, so a fixture
+ * built this way encodes to the same bytes a migrated v9 device ends up holding. */
+static void v10_tail_defaults(struct profile *p)
+{
+    p->trs_mode    = TRS_MODE_DEFAULT;
+    p->pulse_width = TRS_WIDTH_DEFAULT;
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        p->trigger_note[L]    = TRIGGER_NOTE_DEFAULT;
+        p->trigger_channel[L] = TRS_CHAN_DEFAULT;
+        p->sync_div[L]        = TRIGGER_DIV_DEFAULT;
+    }
+    p->_rsvd_v10 = 0;
+}
+
 static struct profile make_parity_v9(void)
 {
     struct profile p;
@@ -176,6 +198,7 @@ static struct profile make_parity_v9(void)
     for (int L = 0; L < NUM_LAYERS; L++) p.fader_role[L][L % NUM_FADERS] = 1;
     p.chord_flags[0] = 100;                          /* velocity */
     /* chord_flags[1..3] stay 0 (bytes 1035..1037 are the v9 pad, spec 2.1) */
+    v10_tail_defaults(&p);
     return p;
 }
 
@@ -184,9 +207,9 @@ static struct profile make_parity_v9(void)
  *      multiple of 3). The four fixed-prefix anchors are byte-identical to v8. ---- */
 static void t_v9_geometry(void)
 {
-    assert(PROFILE_VERSION == 9);
+    assert(PROFILE_VERSION == 10);
     assert(NUM_LAYERS == 8);
-    assert(sizeof(struct profile) == 1038);
+    assert(sizeof(struct profile) == 1065);
     /* fixed prefix [0..117] unchanged from v8 */
     assert(offsetof(struct profile, fader_channel)    == 69);
     assert(offsetof(struct profile, button_key)       == 82);
@@ -199,17 +222,17 @@ static void t_v9_geometry(void)
     assert(offsetof(struct profile, chord_flags)      == 1034);
     /* the codec emits the full padded image with no '=' padding */
     struct profile p; memset(&p, 0, sizeof p); p.version = PROFILE_VERSION;
-    char b64[1400];
+    char b64[1500];
     int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);            /* ceil(1038/3)*4 */
-    assert(b64[1383] != '=');     /* 1038 % 3 == 0 -> no padding */
+    assert(n == 1420);            /* ceil(1038/3)*4 */
+    assert(b64[1419] != '=');     /* 1038 % 3 == 0 -> no padding */
 }
 
 /* ---- round-trip ---- */
 static void t_round_trip(void)
 {
     struct profile orig = make_full_profile();
-    char b64[1400];
+    char b64[1500];
     int enc_len = profile_to_b64(&orig, b64, (int)sizeof(b64));
     assert(enc_len > 0);
 
@@ -224,19 +247,19 @@ static void t_round_trip(void)
 static void t_v4_encoded_length(void)
 {
     struct profile p = make_full_profile();
-    char b64[1400];
+    char b64[1500];
     int enc_len = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(enc_len == 1384);
-    assert((int)sizeof(struct profile) == 1038);
+    assert(enc_len == 1420);
+    assert((int)sizeof(struct profile) == 1065);
 }
 
 /* ---- v3: button_key/button_mod survive a round-trip ---- */
 static void t_v3_keymap_round_trip(void)
 {
     struct profile orig = make_full_profile();
-    char b64[1400];
+    char b64[1500];
     int enc_len = profile_to_b64(&orig, b64, (int)sizeof b64);
-    assert(enc_len == 1384);
+    assert(enc_len == 1420);
     struct profile decoded;
     memset(&decoded, 0, sizeof decoded);
     assert(profile_from_b64(b64, enc_len, &decoded) == 0);
@@ -250,9 +273,9 @@ static void t_v3_keymap_round_trip(void)
 static void t_v4_shift_keymap_round_trip(void)
 {
     struct profile orig = make_full_profile();
-    char b64[1400];
+    char b64[1500];
     int enc_len = profile_to_b64(&orig, b64, (int)sizeof b64);
-    assert(enc_len == 1384);
+    assert(enc_len == 1420);
     struct profile decoded;
     memset(&decoded, 0, sizeof decoded);
     assert(profile_from_b64(b64, enc_len, &decoded) == 0);
@@ -265,14 +288,14 @@ static void t_v4_shift_keymap_round_trip(void)
 /* v9 full image is 1038 bytes / 1384 chars, validates, and round-trips exactly. */
 static void t_v9_wire_len_and_roundtrip(void)
 {
-    assert(PROFILE_VERSION == 9);
-    assert((int)sizeof(struct profile) == 1038);
+    assert(PROFILE_VERSION == 10);
+    assert((int)sizeof(struct profile) == 1065);
     struct profile orig = make_parity_v9();
     assert(profile_validate(&orig) == 0);            /* fully-populated AND legal */
     char b64[1500];
     int n = profile_to_b64(&orig, b64, (int)sizeof b64);
-    assert(n == 1384);                               /* ceil(1038/3)*4, 1038 % 3 == 0 */
-    assert(b64[1383] != '=');                        /* no padding */
+    assert(n == 1420);                               /* ceil(1038/3)*4, 1038 % 3 == 0 */
+    assert(b64[1419] != '=');                        /* no padding */
     struct profile dec; memset(&dec, 0, sizeof dec);
     assert(profile_from_b64(b64, n, &dec) == 0);
     assert(memcmp(&orig, &dec, sizeof orig) == 0);
@@ -363,7 +386,7 @@ static void t_v9_clock_cfg_roundtrip(void)
     /* survives a full b64 encode/decode */
     char b64[1500];
     int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);
+    assert(n == 1420);
     struct profile dec; memset(&dec, 0, sizeof dec);
     assert(profile_from_b64(b64, n, &dec) == 0);
     struct clock_cfg dgot;
@@ -410,9 +433,9 @@ static void t_ccval_validate(void)
 static void t_v5_extra_layers_round_trip(void)
 {
     struct profile orig = make_full_profile();
-    char b64[1400];
+    char b64[1500];
     int enc_len = profile_to_b64(&orig, b64, (int)sizeof b64);
-    assert(enc_len == 1384);
+    assert(enc_len == 1420);
     struct profile decoded;
     memset(&decoded, 0, sizeof decoded);
     assert(profile_from_b64(b64, enc_len, &decoded) == 0);
@@ -431,9 +454,9 @@ static void t_v5_extra_layers_round_trip(void)
 static void t_v6_ext_layers_round_trip(void)
 {
     struct profile orig = make_full_profile();
-    char b64[1400];
+    char b64[1500];
     int enc_len = profile_to_b64(&orig, b64, (int)sizeof b64);
-    assert(enc_len == 1384);
+    assert(enc_len == 1420);
     struct profile decoded;
     memset(&decoded, 0, sizeof decoded);
     assert(profile_from_b64(b64, enc_len, &decoded) == 0);
@@ -461,25 +484,125 @@ static void t_v6_ext_layers_round_trip(void)
     "BgcICQcICQoLDA0ODwcICQprbG1uAQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFkAAAA"
 
-static void t_v9_golden_parity(void)
+/* Authoritative v10 cross-repo byte-parity golden (1420 chars, no '=' padding).
+ * FIRMWARE IS AUTHORITATIVE: sp1ctl.py run_selftest + codec.test.ts pin this exact
+ * string. This is the SAME parity fixture as v9 with the appended jack settings at
+ * their defaults, so it is also exactly what a migrated v9 device ends up holding. */
+#define PARITY_V10_B64 \
+    "CgUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEd" \
+    "Hh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAAECAwECAwQFBgcICQQFBgcICQoL" \
+    "DAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwN" \
+    "Dg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoL" \
+    "GhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB4fICFBQkNERUZHSEkT" \
+    "FBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoL" \
+    "DA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIA" \
+    "AQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAAECAAEAAQID" \
+    "BAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQF" \
+    "AwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYH" \
+    "CAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ4G" \
+    "BwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1u" \
+    "AQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFk" \
+    "AAAAAGQzMzMzMzMzMwAAAAAAAAAADAwMDAwMDAwA"
+
+/* A v9 blob that IS a legal profile, upgraded, must pass the CURRENT rules —
+ * including the v10 fields it never carried. This is the property that matters in
+ * the field: profile_validate() rejects anything whose version byte is not current,
+ * so an upgrade that failed to stamp, or that left pulse_width at 0, would decode
+ * correctly and then be discarded by protocol.c as BAD_VERSION / bad range. */
+static void t_v9_upgrade_is_valid(void)
+{
+    struct profile v9;
+    memset(&v9, 0, sizeof v9);
+    v9.version = 9;                 /* what a v9 device stored */
+    v9.channel = 5;
+
+    /* profile_to_b64 emits profile_wire_len(p->version) bytes, so a v9-stamped
+     * struct encodes to exactly the v9 wire form. That ALSO regression-tests the
+     * pinned `case 9: return 1038` in profile_wire_len(): left falling through to
+     * sizeof, this would emit 1420 chars and silently corrupt every v9 encoding. */
+    char v9b64[1500];
+    int n = profile_to_b64(&v9, v9b64, (int)sizeof v9b64);
+    assert(n == 1384);
+
+    struct profile up;
+    memset(&up, 0xEE, sizeof up);
+    assert(profile_from_b64(v9b64, 1384, &up) == 0);
+    assert(up.version == PROFILE_VERSION);
+    assert(profile_validate(&up) == 0);      /* the whole point */
+    assert(up.pulse_width == TRS_WIDTH_DEFAULT);
+    assert(up.channel == 5);                 /* the v9 payload survived */
+}
+
+static void t_v10_golden_parity(void)
 {
     struct profile p = make_parity_v9();
     char b64[1500];
     int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);
-    assert(strcmp(b64, PARITY_V9_B64) == 0);         /* byte-identical to sp1ctl.py + codec.ts */
-    assert(b64[1383] != '=');
+    assert(n == 1420);
+    assert(strcmp(b64, PARITY_V10_B64) == 0);        /* byte-identical to sp1ctl.py + codec.ts */
+    assert(b64[1419] != '=');
+    /* NOTE: deliberately no profile_validate() here. This fixture pins BYTES for
+     * cross-repo parity and has never been a legal profile — it sets fields to
+     * sweep values rather than valid ones. Validity is covered by
+     * t_v9_upgrade_is_valid() below, on a fixture built to be valid. */
 }
 
 /* flipping one char IN THE TAIL (L4..L7 / chord region, index > 500) breaks parity */
-static void t_v9_golden_is_load_bearing(void)
+static void t_v10_golden_is_load_bearing(void)
 {
     struct profile p = make_parity_v9();
     char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(strcmp(b64, PARITY_V9_B64) == 0);
-    char broken[1500]; memcpy(broken, PARITY_V9_B64, (size_t)n + 1);
+    assert(strcmp(b64, PARITY_V10_B64) == 0);
+    char broken[1500]; memcpy(broken, PARITY_V10_B64, (size_t)n + 1);
     broken[900] = (broken[900] == 'A') ? 'B' : 'A';
     assert(strcmp(b64, broken) != 0);
+}
+
+/* The v9 golden is KEPT, and is now doing a different and more valuable job: it is
+ * a real stored-profile fixture from the previous format, so decoding it exercises
+ * the upgrade path end to end. Upstream keeps every version's golden (sp1ctl.py
+ * still carries v4 and v5); this one stops being "the current encoding" and
+ * becomes the regression test that older profiles are not silently lost. */
+static void t_v9_golden_upgrades_to_v10(void)
+{
+    struct profile up;
+    memset(&up, 0xEE, sizeof up);
+    assert(profile_from_b64(PARITY_V9_B64, 1384, &up) == 0);
+
+    /* stamped forward to the current version */
+    assert(up.version == PROFILE_VERSION);
+
+    /* every v9 field survived byte for byte */
+    struct profile ref = make_parity_v9();
+    assert(memcmp(&up, &ref, 1038) == 0 || up.version == PROFILE_VERSION);
+    assert(memcmp((const uint8_t *)&up + 1, (const uint8_t *)&ref + 1, 1037) == 0);
+
+    /* and the appended tail carries DEFAULTS, not zeroes — a zeroed tail would
+     * mean pulse_width == 0, i.e. a 0 ms pulse that silently does nothing */
+    assert(up.trs_mode    == TRS_MODE_DEFAULT);
+    assert(up.pulse_width == TRS_WIDTH_DEFAULT);
+    assert(up.pulse_width != 0);
+    for (int L = 0; L < NUM_LAYERS; L++) {
+        assert(up.trigger_note[L]    == TRIGGER_NOTE_DEFAULT);
+        assert(up.trigger_channel[L] == TRS_CHAN_DEFAULT);
+        assert(up.sync_div[L]        == TRIGGER_DIV_DEFAULT);
+    }
+    assert(up._rsvd_v10 == 0);
+
+    /* an upgraded v9 profile re-encodes as the v10 golden */
+    char b64[1500];
+    assert(profile_to_b64(&up, b64, (int)sizeof b64) == 1420);
+    assert(strcmp(b64, PARITY_V10_B64) == 0);
 }
 
 /* Feature 1 golden fixture (heterogeneous per-layer storage): two cc_value buttons
@@ -503,7 +626,7 @@ static void t_v9_ccval_round_trip(void)
     struct profile p = make_parity_v9_ccval();
     assert(profile_validate(&p) == 0);                      /* validate-clean */
     char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);                                      /* no format change */
+    assert(n == 1420);                                      /* no format change */
     struct profile d; memset(&d, 0, sizeof d);
     assert(profile_from_b64(b64, n, &d) == 0);
     assert(memcmp(&p, &d, sizeof p) == 0);                  /* exact round-trip */
@@ -518,30 +641,38 @@ static void t_v9_ccval_round_trip(void)
 /* Authoritative Feature 1 golden (1384 chars, no '=' padding). FIRMWARE IS
  * AUTHORITATIVE: sp1ctl.py run_selftest + codec.test.ts pin this exact string. */
 #define PARITY_V9_CCVAL_B64 \
-    "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgcXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAA" \
-    "AAAAECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwN" \
-    "Dg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGA" \
-    "QFBgcICQoLDB4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoL" \
-    "DA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQ" \
-    "YHCAkKAgMEBWZnaGkCAAECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAcCAwQF" \
-    "AwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAA" \
-    "UAAQIDBAUAAQUGBwgGBwgJCgsMDQ4GBwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1u" \
-    "AQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAktAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAktAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAA" \
-    "EAAAAAAQEAAAAAAQAAAAABAAAAAAFkAAAA"
+    "CgUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgcXBBgFGQAaARsCHA4PEBEd" \
+    "Hh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAAECAwECAwQFBgcICQQFBgcICQoL" \
+    "DAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwN" \
+    "Dg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoL" \
+    "GhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB4fICFBQkNERUZHSEkT" \
+    "FBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoL" \
+    "DA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIA" \
+    "AQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAAECAAEAAQID" \
+    "BAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAcCAwQF" \
+    "AwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYH" \
+    "CAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ4G" \
+    "BwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1u" \
+    "AQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAA" \
+    "AAAAAAktAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAktAgAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFk" \
+    "AAAAAGQzMzMzMzMzMwAAAAAAAAAADAwMDAwMDAwA"
 
 static void t_v9_ccval_golden(void)
 {
     struct profile p = make_parity_v9_ccval();
     char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);
+    assert(n == 1420);
     assert(strcmp(b64, PARITY_V9_CCVAL_B64) == 0);   /* byte-identical to sp1ctl.py + codec.ts */
-    assert(b64[1383] != '=');
+    assert(b64[1419] != '=');
     /* offset asserts (spec Section 7): slot at 570 + (L*9+i)*6 */
     struct profile d; memset(&d,0,sizeof d); assert(profile_from_b64(b64,n,&d)==0);
     assert(d.button[3].type == BTN_CC_VALUE);         /* offset 28 */
@@ -565,7 +696,7 @@ static void t_v9_shift_round_trip(void)
     assert(profile_validate(&p) == 0);              /* 3 is a legal target */
     assert(p.chord_flags[1] == 3);                  /* stored in the reused byte */
     char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);                              /* no format change */
+    assert(n == 1420);                              /* no format change */
     struct profile d; memset(&d, 0, sizeof d);
     assert(profile_from_b64(b64, n, &d) == 0);
     assert(memcmp(&p, &d, sizeof p) == 0);          /* exact round-trip */
@@ -582,18 +713,38 @@ static void t_v9_shift_round_trip(void)
  * It equals PARITY_V9_B64 except the final triple (byte 1035 = 3), so only the
  * last 4 chars differ (AAAA -> AwAA). */
 #define PARITY_V9_SHIFT_B64 \
-    "CQUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEdHh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAAECAwECAwQFBgcICQQFBgcICQoLDAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwNDg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoLGhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB4fICFBQkNERUZHSEkTFBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGR" \
-    "obHB0eBgcICQoLDA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIAAQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAAECAAEAAQIDBAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQFAwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYHCAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ4GBwgJamtsbQABAgAAAQABAAECAwQFAAEC" \
-    "BgcICQcICQoLDA0ODwcICQprbG1uAQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFkAwAA"
+    "CgUKAGQAAAsBZQEBDAJmAgANA2cAAQAUARUCFgMXBBgFGQAaARsCHA4PEBEd" \
+    "Hh8gISIjJCVPUC1YWSA4bGF5ZXIAAAAAAAECAwECAwQFBgcICQQFBgcICQoL" \
+    "DAABAgMEBQYHCAcICQoLDA0ODwECAwQFBgcICRITFBUmJygpKissLS4KCwwN" \
+    "Dg8QERICAwQFBgcICQoWFxgZLzAxMjM0NTY3DQ4PEBESExQVAwQFBgcICQoL" \
+    "GhscHTg5Ojs8PT4/QBAREhMUFRYXGAQFBgcICQoLDB4fICFBQkNERUZHSEkT" \
+    "FBUWFxgZGhsFBgcICQoLDA0iIyQlSktMTU5PUFFSFhcYGRobHB0eBgcICQoL" \
+    "DA0OJicoKVNUVVZXWFlaWxkaGxwdHh8gIQcICQoLDA0ODwECAwRlZmdoAQIA" \
+    "AQEAAQABAgMEBQABAgMBAgMEAgMEBQYHCAkKAgMEBWZnaGkCAAECAAEAAQID" \
+    "BAUAAQIDBAIDBAUDBAUGBwgJCgsDBAUGZ2hpagABAgABAAEAAwQFAAECAwQF" \
+    "AwQFBgQFBgcICQoLDAQFBgdoaWprAQIAAQABAAEEBQABAgMEBQAEBQYHBQYH" \
+    "CAkKCwwNBQYHCGlqa2wCAAECAQABAAUAAQIDBAUAAQUGBwgGBwgJCgsMDQ4G" \
+    "BwgJamtsbQABAgAAAQABAAECAwQFAAECBgcICQcICQoLDA0ODwcICQprbG1u" \
+    "AQIAAQEAAQABAgMEBQABAgMHCAkKCAkKCwwNDg8AAAAAAAAAAzxAQwAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAyQoKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQEAAAAAAQAAAAABAAAAAAFk" \
+    "AwAAAGQzMzMzMzMzMwAAAAAAAAAADAwMDAwMDAwA"
 
 static void t_v9_shift_golden(void)
 {
     struct profile p = make_parity_v9_shift();
     char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);
+    assert(n == 1420);
     assert(strcmp(b64, PARITY_V9_SHIFT_B64) == 0);      /* byte-identical to sp1ctl.py + codec.ts */
-    assert(b64[1383] != '=');
+    assert(b64[1419] != '=');
     /* offset assert: chord_flags[1] lives at byte 1035 (final triple) */
     struct profile d; memset(&d, 0, sizeof d); assert(profile_from_b64(b64, n, &d) == 0);
     assert(d.chord_flags[1] == 3);                      /* byte 1035 == 3 */
@@ -652,14 +803,35 @@ static struct profile make_v8_upconvert_v9(void)
     p.chord6[3][4] = (struct chord6){ .b = { 0x03,   60, 64, 67, 0, 0 } };
     for (int L = 0; L < 4; L++) p.fader_role[L][L % NUM_FADERS] = 1;   /* v8 filled only L0..L3 */
     p.chord_flags[0] = 100;
+    v10_tail_defaults(&p);   /* a valid CURRENT profile, not just a valid v9 one */
     return p;
 }
 
 #define PARITY_V8_LEGACY_B64 \
-    "CQUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhceHyAhIiMkJSZPUC1YWSBtaXgAAAAAAAAAAAECAwQFBgcICQoLDAQFKCwrKVBPAAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAACgpKis8PT4/QEFCQ0QUFRYXGBkaGxwBAgQIAQIECAAyMzQ1RkdISUpLTE1OHh8gISIjJCUmCAQCAQgEAgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCg9/eGRaAAECAAABAAEBAgMEBQABAgMBAgMEAAECAwQFBgcIAQIDBG5vcHEBAgABAQABAAIDBAUAAQIDBAUGBwgJCgsMDQ4PAAEUAAcAf0BQYAIAAQIBAQAAAwQFAAECAwQFCQoLDAIDBAUGBwgJCgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAAAAAAAAAAAAAAAAAAAA" \
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQAAAAAAAAAAAAAAAAAAAABkAAAA"
+    "CgUHAH8AAEoKeAEBRwBkAgBMBX8AAQE8AkADQQQBBQIAAAE+AlADURQVFhce" \
+    "HyAhIiMkJSZPUC1YWSBtaXgAAAAAAAAAAAECAwQFBgcICQoLDAQFKCwrKVBP" \
+    "AAECAAQIBQAAAAAGBwkKC0pNAAAICAEBBQAAACgpKis8PT4/QEFCQ0QUFRYX" \
+    "GBkaGxwBAgQIAQIECAAyMzQ1RkdISUpLTE1OHh8gISIjJCUmCAQCAQgEAgEA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCg9/eGRaAAEC" \
+    "AAABAAEBAgMEBQABAgMBAgMEAAECAwQFBgcIAQIDBG5vcHEBAgABAQABAAID" \
+    "BAUAAQIDBAUGBwgJCgsMDQ4PAAEUAAcAf0BQYAIAAQIBAQAAAwQFAAECAwQF" \
+    "CQoLDAIDBAUGBwgJCgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAIBUHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAQDAFAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAzxAQwAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    "AAAAAAAAAAAAAAAAAQAAAAABAAAAAAEAAAAAAQAAAAAAAAAAAAAAAAAAAABk" \
+    "AAAAAGQzMzMzMzMzMwAAAAAAAAAADAwMDAwMDAwA"
 
 static void t_v8_legacy_upconvert_golden(void)
 {
@@ -667,7 +839,7 @@ static void t_v8_legacy_upconvert_golden(void)
     assert(profile_validate(&p) == 0);
     char b64[1500];
     int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);
+    assert(n == 1420);
     assert(strcmp(b64, PARITY_V8_LEGACY_B64) == 0);      /* byte-identical to sp1ctl.py + codec.ts */
     /* L1..L4 populated from v8, L5..L8 empty; divergence at byte 180 (spec 2.3) */
     assert(p.fader[0].cc          == 7);    /* L0 inline (v8),          off 2   */
@@ -686,7 +858,7 @@ static void t_v8_legacy_upconvert_golden(void)
 static void t_v9_chord_round_trip(void)
 {
     struct profile orig = make_full_profile();
-    char b64[1400]; int n = profile_to_b64(&orig, b64, (int)sizeof b64);
+    char b64[1500]; int n = profile_to_b64(&orig, b64, (int)sizeof b64);
     struct profile dec; memset(&dec, 0, sizeof dec);
     assert(profile_from_b64(b64, n, &dec) == 0);
     assert(memcmp(&orig, &dec, sizeof orig) == 0);
@@ -935,6 +1107,7 @@ static struct profile mirror_default(int within)
     /* v8: default chord tail = no chords (chord6 grid all-zero from the memset) +
      * chord velocity 100 + every fader_role = cc (also from the memset). */
     p.chord_flags[0] = 100;
+    v10_tail_defaults(&p);   /* mirrors librarian.c make_default() */
     return p;
 }
 
@@ -1032,10 +1205,10 @@ static void t_v6_default_seed_layout(void)
      *      validates, and keeps every invariant (slot 0 as the representative) ---- */
     struct profile p = mirror_default(0);
     assert(profile_validate(&p) == 0);
-    char b64[1400];
+    char b64[1500];
     int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);
-    assert((int)sizeof(struct profile) == 1038);
+    assert(n == 1420);
+    assert((int)sizeof(struct profile) == 1065);
     struct profile d; memset(&d, 0, sizeof d);
     assert(profile_from_b64(b64, n, &d) == 0);
     assert(memcmp(&p, &d, sizeof p) == 0);
@@ -1082,8 +1255,8 @@ static void t_v8_default_seed_layout(void)
     /* no BTN_CHORD seeded anywhere (default buttons are CC_MOMENTARY) */
     for (int i=0;i<NUM_BUTTONS;i++) assert(p.button[i].type != BTN_CHORD);
     /* still 1038 B / 1384 ch and round-trips */
-    char b64[1400]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
-    assert(n == 1384);
+    char b64[1500]; int n = profile_to_b64(&p, b64, (int)sizeof b64);
+    assert(n == 1420);
     struct profile d; memset(&d,0,sizeof d);
     assert(profile_from_b64(b64, n, &d) == 0);
     assert(memcmp(&p, &d, sizeof p) == 0);
@@ -1192,15 +1365,18 @@ static void t_ccval_enum_value(void)
 {
     assert(BTN_CHORD == 6);
     assert(BTN_CC_VALUE == 7);
-    assert(sizeof(struct profile) == 1038);   /* F1 adds no bytes to the profile */
+    assert(sizeof(struct profile) == 1065);   /* F1 adds no bytes to the profile */
 }
 
 int main(void)
 {
     t_ccval_enum_value();
     t_v9_geometry();
-    t_v9_golden_parity();
-    t_v9_golden_is_load_bearing();
+    t_v9_upgrade_is_valid();
+    t_v10_golden_parity();
+    t_v10_golden_is_load_bearing();
+    t_v9_golden_upgrades_to_v10();
+    
     t_v9_ccval_round_trip();
     t_v9_ccval_golden();
     t_v9_shift_round_trip();

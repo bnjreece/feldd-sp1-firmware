@@ -13,4 +13,11 @@ void midi_out_rt(uint8_t status);
  * host->device USB-MIDI packet) to the TRS jack ONLY (normal tier). Never fans to
  * USB or BLE, so the thru'd host stream cannot echo back to the host. */
 void midi_out_thru(const uint8_t *bytes, uint8_t len);
+/* Purge the TRS queue and emit a Note-Off for every note the jack is sounding.
+ * Call before the jack stops being a MIDI output; see the definition for why the
+ * queue is discarded but the notes are not. */
+void midi_out_trs_release_all(void);
+/* 1 once the queue is empty AND the UART has finished shifting the last byte.
+ * Gate the pin handoff on this, never on the queue alone. */
+int  midi_out_trs_idle(void);
 #endif
