@@ -38,6 +38,12 @@ int profile_layer_ccval(const struct profile *p, int idx, int layer,
 /* v7: a fader's role for `layer` (DIRECT 0..3). 0=cc, 1=chord_depth. */
 uint8_t profile_layer_fader_role(const struct profile *p, int idx, int layer);
 
+/* The MIDI channels on which profile p can send CC64 (sustain), in any layer: a
+ * CC-role fader whose CC is 64, or a CC button (toggle, momentary, value) whose
+ * value is 64. Bit n = channel n (0..15). On a profile change feldd sends CC64 0
+ * on each, so a pedal the outgoing profile left down does not outlive it. */
+uint16_t profile_sustain_channels(const struct profile *p);
+
 /* 0.22 Feature 1: resolve a profile's configurable PLAY shift target. Stored in
  * the reused v9 byte chord_flags[1]. Legacy 0 (every existing v9 profile) or an
  * out-of-range value (>= NUM_LAYERS) means "default", which is layer index 1

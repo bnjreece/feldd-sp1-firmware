@@ -174,3 +174,25 @@ int effective_layer(int play_mode, int play_held, int gesture_layer, int shift_t
         return (gesture_layer == shift_target) ? SHIFT_HOME : shift_target;
     return gesture_layer;
 }
+
+uint16_t profile_sustain_channels(const struct profile *p)
+{
+    uint16_t m = 0;
+    if (p == 0) return 0;
+    for (int l = 0; l < NUM_LAYERS; l++) {
+        for (int f = 0; f < NUM_FADERS; f++) {
+            if (profile_layer_fader_role(p, f, l) == FADER_ROLE_CC &&
+                profile_layer_fader_cc(p, f, l) == 64) {
+                m |= (uint16_t)(1u << (profile_layer_fader_channel(p, f, l) & 0x0F));
+            }
+        }
+        for (int b = 0; b < NUM_BUTTONS; b++) {
+            uint8_t t = profile_layer_button_type(p, b, l);
+            if ((t == BTN_CC_TOGGLE || t == BTN_CC_MOMENTARY || t == BTN_CC_VALUE) &&
+                profile_layer_button_value(p, b, l) == 64) {
+                m |= (uint16_t)(1u << (profile_layer_button_channel(p, b, l) & 0x0F));
+            }
+        }
+    }
+    return m;
+}
