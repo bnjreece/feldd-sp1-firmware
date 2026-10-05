@@ -69,6 +69,7 @@ BUILD_ASSERT(DIAL_MAX_COUNT >= GESTURE_LAYER_COUNT,
 #include "side_led.h"
 #include "panic.h"
 #include "wdt.h"
+#include "loop_clock.h"
 #include "chord_engine.h"
 #include "led_override.h"
 #include "led.h"
@@ -1569,7 +1570,15 @@ int main(void)
         }
 
         tick++;
-        k_msleep(8);
+        /* A fixed 8 ms cadence (loop_clock.h): sleep until one period after the
+         * previous deadline, not 8 ms after this pass's work, so an idle pass is
+         * 8 ms exactly and the pass-counted timings mean what they say; a pass
+         * that overruns starts the next at once. */
+        {
+            static int64_t loop_deadline;
+            loop_deadline = loop_clock_next(loop_deadline, k_uptime_get(), 8);
+            k_sleep(K_TIMEOUT_ABS_MS(loop_deadline));
+        }
     }
     return 0;
 }
