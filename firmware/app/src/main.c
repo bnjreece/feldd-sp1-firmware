@@ -521,6 +521,7 @@ static void boot_signature(void)
 static void chord_flush_all(void)
 {
     chord_tx_init(&g_chord_tx);   /* Fix 6: purge any queued On/Off for the stale map FIRST */
+    k_sched_lock();               /* one USB packet for the whole release (see the chord drain) */
     for (int idx = 0; idx < NUM_BUTTONS; idx++) {
         for (int n = 0; n < g_chord_count[idx]; n++) {
             struct midi_msg m = {
@@ -531,6 +532,7 @@ static void chord_flush_all(void)
         }
         g_chord_count[idx] = 0;
     }
+    k_sched_unlock();
 }
 
 /* Queue one chord message onto the per-tick ring (drained under the cap). */
@@ -872,11 +874,17 @@ int main(void)
         {
             struct chord_tx_msg txo[CHORD_TX_BUDGET];
             int nd = chord_tx_drain(&g_chord_tx, txo);
+            /* Hold the scheduler across the burst so the USB TX work (which
+             * outranks this loop) wakes ONCE, to every event already queued: one
+             * USB packet, not one note per frame (a chord was a ~1 ms-per-note
+             * staircase). Nothing below blocks; interrupts stay live. */
+            k_sched_lock();
             for (int i = 0; i < nd; i++) {
                 struct midi_msg m = { .status = txo[i].status, .d1 = txo[i].d1,
                                       .d2 = txo[i].d2, .len = 3 };
                 midi_out_send(&m, NULL);
             }
+            k_sched_unlock();
         }
 
         /* Service the CDC config protocol: drain any host request lines and
