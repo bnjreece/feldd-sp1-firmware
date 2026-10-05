@@ -36,6 +36,7 @@
 #include "lib_bank.h"
 #include "seed_cadence.h"
 #include "nvs_erase.h"
+#include "flash_defer.h"
 #include "wdt.h"
 
 /* F1 non-overlap guard: the NVS storage_partition MUST sit above the app region
@@ -712,6 +713,29 @@ int librarian_write(uint8_t g, const struct profile *in)
     return 0;
 }
 
+/* ---- deferred persistence (flash_defer.h) ----------------------------------
+ * g_quiet NULL is stock feldd: every setter below writes before it commits, as it
+ * always did. Non-NULL: the setter commits to RAM and owes the record to
+ * librarian_service(), which writes it from the RAM state when g_quiet() says so.
+ * Everything here runs on the main thread (config_cdc_poll is in the main loop),
+ * so g_defer needs no lock. */
+static struct flash_defer g_defer;      /* zero-initialised = nothing owed */
+static bool (*g_quiet)(void);
+
+/* The header record from explicit values: the stock path writes the NEW state
+ * before committing it; the deferred path writes the committed RAM state. */
+static int header_write_with(uint8_t mode, const uint8_t within[NUM_MODES])
+{
+    struct lib_header hdr;
+    lib_header_init(&hdr, PROFILE_VERSION, 0);   /* zero version + all bank actives */
+    lib_header_set_mode(&hdr, mode);
+    for (uint8_t m = 0; m < NUM_MODES; m++) {
+        lib_header_set_active(&hdr, m, within[m]);
+    }
+    ssize_t w = nvs_write(&fs, LIB_ID_HEADER, &hdr, sizeof(hdr));
+    return (w < 0) ? (int)w : 0;
+}
+
 int librarian_set_active(uint8_t within)
 {
     /* `within` is a WITHIN-bank index (0..7) — it selects one of the CURRENT
@@ -735,20 +759,21 @@ int librarian_set_active(uint8_t within)
      * power-cycle (the reader recomposes each bank's slot from active[mode]). Only
      * the CURRENT mode's active changes; the other banks keep their remembered
      * indices. */
-    struct lib_header hdr;
-    lib_header_init(&hdr, PROFILE_VERSION, 0);   /* zero version + all bank actives */
-    lib_header_set_mode(&hdr, active_mode);
-    for (uint8_t m = 0; m < NUM_MODES; m++) {
-        lib_header_set_active(&hdr, m, active_within[m]);
-    }
-    lib_header_set_active(&hdr, active_mode, within);   /* the change */
-    ssize_t w = nvs_write(&fs, LIB_ID_HEADER, &hdr, sizeof(hdr));
-    if (w < 0) {
-        return (int)w;
+    uint8_t next[NUM_MODES];
+    memcpy(next, active_within, sizeof(next));
+    next[active_mode] = within;                          /* the change */
+    if (g_quiet == NULL) {
+        int w = header_write_with(active_mode, next);    /* stock: persist first */
+        if (w < 0) {
+            return w;
+        }
     }
 
     active_profile             = p;
     active_within[active_mode] = within;
+    if (g_quiet != NULL) {
+        flash_defer_mark(&g_defer, FLASH_DEFER_HEADER);  /* librarian_service() writes it */
+    }
     return 0;
 }
 
@@ -807,15 +832,13 @@ int librarian_set_mode(uint8_t m)
      * bank's INDEPENDENTLY remembered active profile (NOT within 0). Persist the
      * new mode + EVERY bank's remembered active the SAME way librarian_init()
      * reads it back. */
-    struct lib_header hdr;
-    lib_header_init(&hdr, PROFILE_VERSION, 0);
-    lib_header_set_mode(&hdr, m);
-    for (uint8_t mm = 0; mm < NUM_MODES; mm++) {
-        lib_header_set_active(&hdr, mm, active_within[mm]);
-    }
-    ssize_t w = nvs_write(&fs, LIB_ID_HEADER, &hdr, sizeof(hdr));
-    if (w < 0) {
-        return (int)w;
+    if (g_quiet == NULL) {
+        int w = header_write_with(m, active_within);     /* stock: persist first */
+        if (w < 0) {
+            return w;
+        }
+    } else {
+        flash_defer_mark(&g_defer, FLASH_DEFER_HEADER);  /* librarian_service() writes it */
     }
     active_mode = m;
 
@@ -853,6 +876,17 @@ static int settings_write(void)
     return (w == (ssize_t)sizeof(st)) ? 0 : -1;
 }
 
+/* The settings record now (stock), or owed to librarian_service(). Either way
+ * the RAM caches are already updated, as before. */
+static int settings_persist(void)
+{
+    if (g_quiet == NULL) {
+        return settings_write();
+    }
+    flash_defer_mark(&g_defer, FLASH_DEFER_SETTINGS);
+    return 0;
+}
+
 #ifdef CONFIG_FELDD_BT_PROVISION
 uint8_t librarian_provision_done(void)
 {
@@ -867,7 +901,11 @@ int librarian_set_provision_done(uint8_t done, uint8_t app_maj, uint8_t app_min)
     provision_done_cache = done ? 1u : 0u;
     provision_app_maj    = app_maj;
     provision_app_min    = app_min;
-    return settings_write();
+    int rc = settings_write();   /* never deferred: provisioning must persist now */
+    if (rc == 0) {
+        flash_defer_clear(&g_defer, FLASH_DEFER_SETTINGS);   /* the record carries every cache */
+    }
+    return rc;
 }
 #endif
 
@@ -897,7 +935,7 @@ int librarian_set_play_mode(uint8_t v)
         return 0;             /* no-op: don't burn an NVS write */
     }
     play_mode_cache = v;
-    return settings_write();
+    return settings_persist();
 }
 
 uint8_t librarian_brightness(void)
@@ -910,7 +948,7 @@ int librarian_set_brightness(uint8_t v)
     if (v > 1u) return -1;
     if (v == brightness_cache) return 0;
     brightness_cache = v;
-    return settings_write();
+    return settings_persist();
 }
 
 uint8_t librarian_midi_thru(void)
@@ -957,5 +995,48 @@ int librarian_set_bpm(uint8_t v)
         return 0;             /* no-op: don't burn an NVS write */
     }
     bpm_cache = v;
-    return settings_write();
+    return settings_persist();
+}
+
+/* ---- deferred persistence: the public side (librarian.h) ---------------- */
+
+static void defer_write(uint8_t recs)
+{
+    const uint32_t now = k_uptime_get_32();
+    if ((recs & FLASH_DEFER_HEADER) && header_write_with(active_mode, active_within) != 0) {
+        flash_defer_failed(&g_defer, FLASH_DEFER_HEADER, now);
+    }
+    if ((recs & FLASH_DEFER_SETTINGS) && settings_write() != 0) {
+        flash_defer_failed(&g_defer, FLASH_DEFER_SETTINGS, now);
+    }
+}
+
+void librarian_set_quiet_fn(bool (*quiet)(void))
+{
+    if (quiet == NULL && fs_ready) {
+        /* Back to immediate writes: nothing may stay owed with no service. */
+        defer_write(flash_defer_take(&g_defer, k_uptime_get_32(), true, true));
+    }
+    g_quiet = quiet;
+}
+
+void librarian_service(void)
+{
+    if (!fs_ready || g_quiet == NULL || !flash_defer_pending(&g_defer)) {
+        return;
+    }
+    defer_write(flash_defer_take(&g_defer, k_uptime_get_32(), g_quiet(), false));
+}
+
+void librarian_flush(void)
+{
+    if (!fs_ready) {
+        return;   /* e.g. the charge-standby gate's power-off, before librarian_init() */
+    }
+    defer_write(flash_defer_take(&g_defer, k_uptime_get_32(), true, true));
+}
+
+bool librarian_flash_pending(void)
+{
+    return flash_defer_pending(&g_defer);
 }

@@ -1,5 +1,6 @@
 #ifndef LIBRARIAN_H
 #define LIBRARIAN_H
+#include <stdbool.h>
 #include "profile.h"
 
 /* M5.2 NVS-backed profile librarian.
@@ -29,6 +30,17 @@ int  librarian_reset(uint8_t g);                           /* g = GLOBAL slot 0.
 int  librarian_reset_all(void);                            /* 0 ok; reseed all 16 slots to factory default, persist, refresh RAM */
 uint8_t librarian_mode(void);                              /* device mode: 0=MIDI (default), 1=KEYBOARD, 2..3 reserved personalities (mode.h) */
 int  librarian_set_mode(uint8_t m);                        /* switch bank -> reload that mode's remembered active profile; persists raw mode (0..LIB_HEADER_MODE_MAX); -EINVAL if out of range */
+
+/* Deferred persistence (flash_defer.h). Stock feldd registers nothing, and every
+ * write below happens at once, as it always has. A time-critical layer (audio)
+ * registers a quiet predicate; profile and mode switches, play role, brightness
+ * and BPM then change in RAM immediately and reach flash at the first quiet
+ * librarian_service(), or at librarian_flush(). Profile edits, resets and the
+ * device settings a host sets (thru, the jack) are always written at once. */
+void librarian_set_quiet_fn(bool (*quiet)(void));  /* NULL = immediate (default); writes anything owed */
+void librarian_service(void);                      /* main loop, every pass */
+void librarian_flush(void);                        /* before power-off: write what is owed, quiet or not */
+bool librarian_flash_pending(void);                /* a setting is in RAM but not yet in flash */
 uint8_t librarian_play_mode(void);                         /* Feature 4: PLAY role 0=shift (default), 1=assignable. -ENOENT -> 0; read from the SEPARATE id-2 NVS record, never the header */
 int  librarian_set_play_mode(uint8_t v);                   /* persist PLAY role to the id-2 record ONLY (no header write, no wipe); range 0/1, -EINVAL out of range; same-value set is a no-op */
 uint8_t librarian_brightness(void);        /* Feature B: 0 dim, 1 full */

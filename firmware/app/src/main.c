@@ -268,6 +268,10 @@ static void charger_init(void)
 
 static void enter_bootloader(void)
 {
+    /* Any setting still owed to flash (librarian_set_quiet_fn) is written
+     * now: after SYSTEM_OFF it would be lost. A no-op in stock feldd. */
+    librarian_flush();
+
     /* v7: release any held chord notes BEFORE the power-off teardown so a
      * TRS-attached synth doesn't ring through SYSTEM_OFF. Idempotent + purges the
      * TX ring first (Fix 6). */
@@ -882,6 +886,7 @@ int main(void)
         /* Service the CDC config protocol: drain any host request lines and
          * write their responses. Non-blocking (returns at once if no RX). */
         config_cdc_poll();
+        librarian_service();   /* deferred settings writes, when a quiet predicate is registered */
 
         /* On a host disconnect (DTR drop) flush held chords so a TRS-attached
          * synth doesn't ring forever (USB offs go nowhere once the host is gone,
