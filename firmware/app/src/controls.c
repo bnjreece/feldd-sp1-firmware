@@ -67,3 +67,49 @@ int controls_read_raw(int i)
     int v = (int)(acc / 2);
     return v < 0 ? 0 : v;
 }
+
+/* ---- the per-pass snapshot (controls.h) -------------------------------------
+ * Channels 0..5 in ONE sequence: the SAADC converts them back to back, and
+ * extra_samplings = 1 repeats the scan at once -- the two-sample average the
+ * per-channel reads above take, for one driver round trip instead of twelve.
+ * Every channel shares one config (gain 1/6, internal ref, 20 us acquisition,
+ * 12 bit) and none oversamples, which a multi-channel sequence requires. The
+ * battery (6) stays on controls_read_raw(): it is read rarely, and not here. */
+#define N_SNAP 6
+
+static int16_t snap_buf[2 * N_SNAP];   /* sampling 0 then sampling 1, channel order */
+static int     snap[N_SNAP];
+
+int controls_sample(void)
+{
+    static const struct adc_sequence_options opts = {
+        .interval_us     = 0,          /* back to back, no timer */
+        .extra_samplings = 1,
+    };
+    struct adc_sequence seq = {
+        .options     = &opts,
+        .buffer      = snap_buf,
+        .buffer_size = sizeof(snap_buf),
+        .resolution  = ch[0].resolution,
+    };
+    for (int i = 0; i < N_SNAP; i++) {
+        seq.channels |= BIT(ch[i].channel_id);
+    }
+    int rc = adc_read(ch[0].dev, &seq);
+    if (rc < 0) {
+        return rc;
+    }
+    /* Samples land in ascending channel-id order, which is io-channels order
+     * here (channel@0..5 have reg 0..5). Clamp each at 0 before averaging: the
+     * single-channel path got that from the driver for every read. */
+    for (int i = 0; i < N_SNAP; i++) {
+        int a = snap_buf[i], b = snap_buf[N_SNAP + i];
+        snap[i] = ((a < 0 ? 0 : a) + (b < 0 ? 0 : b)) / 2;
+    }
+    return 0;
+}
+
+int controls_snap(int idx)
+{
+    return (idx >= 0 && idx < N_SNAP) ? snap[idx] : -1;
+}

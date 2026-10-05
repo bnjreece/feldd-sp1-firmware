@@ -1462,7 +1462,7 @@ int main(void)
         fader_rail_prev = rail_loaded;
         if (fader_settle == 0) {
             for (int idx = 0; idx < NUM_FADERS; idx++) {
-                int raw = controls_read_raw(2 + idx);
+                int raw = controls_snap(2 + idx);   /* this pass's snapshot (buttons_scan) */
                 if (raw < 0) {
                     continue;   /* read error this tick; try again next loop */
                 }

@@ -231,8 +231,11 @@ int buttons_init(void)
 
 int buttons_scan(struct button_event *evt, int cap)
 {
-    int trk_raw = controls_read_raw(0);   /* tracks ladder (AIN0) */
-    int vol_raw = controls_read_raw(1);   /* vol ladder   (AIN1) */
+    /* One snapshot of both ladders AND the four faders, at one instant, per pass
+     * (controls_sample): the fader loop and buttons_rail_probe() read it too. */
+    (void)controls_sample();              /* on error the previous snapshot stands */
+    int trk_raw = controls_snap(0);       /* tracks ladder (AIN0) */
+    int vol_raw = controls_snap(1);       /* vol ladder   (AIN1) */
     if (trk_raw < 0) trk_raw = 0;         /* a read error reads as idle */
     if (vol_raw < 0) vol_raw = 0;
     /* Capture the INSTANTANEOUS rail load (pre-debounce): a button pressed THIS
@@ -252,8 +255,11 @@ int buttons_scan(struct button_event *evt, int cap)
  * 0/127 rail-band bypass. Two ladder ADC reads, ~us-scale. */
 int buttons_rail_probe(void)
 {
-    int trk_raw = controls_read_raw(0);
-    int vol_raw = controls_read_raw(1);
+    /* The ladders and the faders are now one snapshot (controls_sample in
+     * buttons_scan), so a press cannot land between the ladder read and the fader
+     * reads: this classifies that same instant, and costs no ADC read. */
+    int trk_raw = controls_snap(0);
+    int vol_raw = controls_snap(1);
     if (trk_raw < 0) trk_raw = 0;
     if (vol_raw < 0) vol_raw = 0;
     return buttons_rail_class_pure(trk_raw, vol_raw);
