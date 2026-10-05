@@ -74,7 +74,7 @@ static void t_tx_ring_cap(void){
     for (int i=0;i<12;i++) assert(chord_tx_push(&r, 0x90, (uint8_t)(60+i), 100));
     assert(r.count == 24);
     struct chord_tx_msg out[CHORD_TX_BUDGET];
-    int total=0, drained_offs_first=1, seen_on=0;
+    int total=0, drained_offs_first=1, seen_on=0, drains=0;
     while (r.count > 0) {
         int n = chord_tx_drain(&r, out);
         assert(n >= 1 && n <= CHORD_TX_BUDGET);
@@ -83,11 +83,35 @@ static void t_tx_ring_cap(void){
             else if (seen_on) drained_offs_first=0;   /* an off after an on -> order broke */
         }
         total += n;
+        drains++;
     }
     assert(total == 24);                 /* nothing lost */
     assert(drained_offs_first == 1);     /* all 12 offs drained before any on */
     assert(r.count == 0);
     /* 24 msgs / 8 per tick = 3 drains -> empties in 3 ticks. */
+    assert(drains == 3);
+}
+/* A burst under the budget leaves in ONE drain, in the order pushed: a chord's
+ * notes go out together. Before the scan-count fix a 5-note chord drained 3,1,1
+ * across three ticks -- an audible strum on every output. */
+static void t_tx_burst_drains_in_one_tick(void){
+    for (int n = 1; n <= CHORD_TX_BUDGET; n++) {
+        struct chord_tx_ring r; chord_tx_init(&r);
+        for (int k=0;k<n;k++) assert(chord_tx_push(&r, 0x90, (uint8_t)(60+k), 100));
+        struct chord_tx_msg out[CHORD_TX_BUDGET];
+        assert(chord_tx_drain(&r, out) == n);
+        assert(r.count == 0);
+        for (int k=0;k<n;k++) assert(out[k].d1 == 60+k);   /* low to high, as pushed */
+    }
+    /* Offs and Ons together, under the budget: one drain, every Off first. */
+    struct chord_tx_ring r; chord_tx_init(&r);
+    for (int k=0;k<3;k++) assert(chord_tx_push(&r, 0x90, (uint8_t)(70+k), 100));
+    for (int k=0;k<3;k++) assert(chord_tx_push(&r, 0x80, (uint8_t)(60+k), 0));
+    struct chord_tx_msg out[CHORD_TX_BUDGET];
+    assert(chord_tx_drain(&r, out) == 6);
+    for (int k=0;k<3;k++) assert(is_off(out[k].status) && out[k].d1 == 60+k);
+    for (int k=3;k<6;k++) assert(!is_off(out[k].status) && out[k].d1 == 70+(k-3));
+    assert(r.count == 0);
 }
 static void t_tx_ring_full(void){
     struct chord_tx_ring r; chord_tx_init(&r);
@@ -116,7 +140,7 @@ int main(void){
     t_depth_bands(); t_explicit(); t_range(); t_quality_triads();
     t_depth_ladder(); t_thirteenth_drop(); t_depth_gated_off();
     t_high_root_clamp(); t_null();
-    t_tx_ring_cap(); t_tx_ring_full(); t_tx_ring_flush_purges();
+    t_tx_ring_cap(); t_tx_burst_drains_in_one_tick(); t_tx_ring_full(); t_tx_ring_flush_purges();
     printf("all chord_engine tests passed\n");
     return 0;
 }

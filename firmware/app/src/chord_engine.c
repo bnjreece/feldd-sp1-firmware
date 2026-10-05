@@ -139,11 +139,14 @@ int chord_tx_drain(struct chord_tx_ring *r, struct chord_tx_msg out[CHORD_TX_BUD
                 r->tail = (uint8_t)((r->tail + CHORD_TX_RING - 1) % CHORD_TX_RING);
                 r->count--;
                 total--;
-                /* do not advance i: the next element shifted into this slot. */
+                /* do not advance i or scanned: the next element shifted into
+                 * this slot and has not been looked at yet. Advancing scanned
+                 * here as well closed the gap by two per removal, so a chord
+                 * under the budget left across several ticks (5 notes: 3,1,1). */
             } else {
                 i = (i + 1) % CHORD_TX_RING;
+                scanned++;
             }
-            scanned++;
         }
     }
     return n;
